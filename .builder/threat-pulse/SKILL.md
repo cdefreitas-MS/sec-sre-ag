@@ -41,23 +41,38 @@ The Threat Pulse skill is a rapid, broad-spectrum security scan designed for the
 | [generate_html_report.py](generate_html_report.py) | HTML report generator from threat-pulse markdown report | Post-report (on explicit request) |
 | [svg-widgets.yaml](svg-widgets.yaml) | SVG dashboard widget manifest for visualization | Post-report (optional) |
 
-> ⚠️ **Runtime Location = "Must be on disk"** means the file must exist on the local filesystem in `tmp/threat-pulse/`. Scripts are accessed at runtime — NOT via `read_skill_file`. They are materialized **immediately on skill activation** — see [File Materialization](#file-materialization-immediate--on-skill-activation).
+> ⚠️ **Runtime Location = "Must be on disk"** means the file must exist on the local filesystem. Scripts are accessed at runtime — NOT via `read_skill_file`. They are resolved **immediately on skill activation** via the [File Resolution cascade](#file-resolution-coderefs-first--on-skill-activation).
 
 ---
 
-## File Materialization (Immediate — On Skill Activation)
+## File Resolution (codeRefs-first — On Skill Activation)
 
-`generate_html_report.py` runs from the local filesystem. Skill files are only accessible via `read_skill_file` and must be materialized to disk before use.
+`generate_html_report.py` runs from the local filesystem. Skill files must be resolved to disk before use.
 
-🔴 **MANDATORY — IMMEDIATE:** The moment this skill is activated (i.e., the agent reads this SKILL.md), the agent MUST materialize ALL files listed below to `tmp/threat-pulse/` **before doing anything else** — before collecting parameters, before asking the user questions, before any other action.
+🔴 **MANDATORY — IMMEDIATE:** The moment this skill is activated (i.e., the agent reads this SKILL.md), the agent MUST resolve ALL files listed below **before doing anything else** — before collecting parameters, before asking the user questions, before any other action.
 
-### Target Directory
+### Resolution Cascade
 
-**Fixed path:** `tmp/threat-pulse/`
+Resolve ALL 3 runtime files using this **mandatory cascade**:
 
-All scripts and companion files MUST be written to this single directory. Do NOT use any other directory.
+```
+1. codeRefs/sec-sre-ag/threat-pulse/
+   → If ALL 3 files exist here: use this directory as <SKILL_DIR>
+   → Execute/read files directly from here (companion files are co-located)
+   → Do NOT copy files to tmp/
 
-### Files to Materialize
+2. tmp/threat-pulse/
+   → If ALL 3 files exist here (from previous materialization): use this directory as <SKILL_DIR>
+
+3. Neither location has all files:
+   → read_skill_file() from Builder for each missing file
+   → CreateFile("tmp/threat-pulse/<filename>", <content>)
+   → Use tmp/threat-pulse/ as <SKILL_DIR>
+```
+
+All subsequent commands in this skill reference the resolved directory as `<SKILL_DIR>`.
+
+### Files to Resolve
 
 | File | Required By | Format |
 |------|-------------|--------|
@@ -65,18 +80,32 @@ All scripts and companion files MUST be written to this single directory. Do NOT
 | `threat-pulse-queries.md` | Phase 1–2 query reference | Markdown |
 | `svg-widgets.yaml` | SVG dashboard generation | YAML |
 
-### Procedure (Single Batch — Fast)
+### Step 1: Check codeRefs
+
+```bash
+ls codeRefs/sec-sre-ag/threat-pulse/generate_html_report.py codeRefs/sec-sre-ag/threat-pulse/threat-pulse-queries.md codeRefs/sec-sre-ag/threat-pulse/svg-widgets.yaml 2>/dev/null | wc -l
+# If returns 3 → set <SKILL_DIR>=codeRefs/sec-sre-ag/threat-pulse → DONE
+```
+
+### Step 2: Check tmp (if codeRefs not found)
+
+```bash
+ls tmp/threat-pulse/generate_html_report.py tmp/threat-pulse/threat-pulse-queries.md tmp/threat-pulse/svg-widgets.yaml 2>/dev/null | wc -l
+# If returns 3 → set <SKILL_DIR>=tmp/threat-pulse → DONE
+```
+
+### Step 3: Materialize from Builder (if neither location has all files)
 
 🔴 **CRITICAL: Write FULL file content. NEVER write placeholders or stubs.**
 
-**Step 1 — Read ALL 3 files in a single parallel batch:**
+**Step 3a — Read ALL 3 files in a single parallel batch:**
 ```
 read_skill_file(skill_name="threat-pulse", file_path="generate_html_report.py")
 read_skill_file(skill_name="threat-pulse", file_path="threat-pulse-queries.md")
 read_skill_file(skill_name="threat-pulse", file_path="svg-widgets.yaml")
 ```
 
-**Step 2 — Write ALL 3 files in a single parallel batch:**
+**Step 3b — Write ALL 3 files in a single parallel batch:**
 ```
 CreateFile(filePath="tmp/threat-pulse/generate_html_report.py", content=<FULL content>)
 CreateFile(filePath="tmp/threat-pulse/threat-pulse-queries.md", content=<FULL content>)
@@ -84,16 +113,9 @@ CreateFile(filePath="tmp/threat-pulse/svg-widgets.yaml", content=<FULL content>)
 ```
 
 **Total: 2 tool calls (read batch + write batch).** Do NOT split into more batches.
+Set `<SKILL_DIR>=tmp/threat-pulse`.
 
-### Skip Condition
-
-If `tmp/threat-pulse/` already contains ALL 3 files (from a previous materialization), skip materialization. **Verify first** with:
-```bash
-ls tmp/threat-pulse/generate_html_report.py tmp/threat-pulse/threat-pulse-queries.md tmp/threat-pulse/svg-widgets.yaml 2>/dev/null | wc -l
-# Must return 3. If less, re-materialize all missing files.
-```
-
-🔴 **PROHIBITED:** Proceeding to Phase 0 without completed materialization.
+🔴 **PROHIBITED:** Proceeding to Phase 0 without completed file resolution.
 
 ---
 
@@ -134,7 +156,7 @@ ls tmp/threat-pulse/generate_html_report.py tmp/threat-pulse/threat-pulse-querie
 
 ## 📑 TABLE OF CONTENTS
 
-1. **[File Materialization](#file-materialization-immediate--on-skill-activation)** — Script & file deployment to `tmp/threat-pulse/`
+1. **[File Resolution](#file-resolution-coderefs-first--on-skill-activation)** — Script & file resolution (codeRefs → tmp → Builder)
 2. **[Critical Workflow Rules](#-critical-workflow-rules---read-first-)**
 3. **[Execution Workflow](#execution-workflow)** — Phase 0–3
 4. **[Phase 4: Interactive Follow-Up Loop](#phase-4-interactive-follow-up-loop)**
@@ -742,7 +764,7 @@ The script reads the markdown report, parses sections (Executive Summary, Dashbo
 - Responsive table styling with portal link preservation
 - Print-friendly CSS
 
-> ⚠️ The script must be materialized to `tmp/threat-pulse/generate_html_report.py` before use. See [File Materialization](#file-materialization-immediate--on-skill-activation).
+> ⚠️ The script must be resolved via the [File Resolution cascade](#file-resolution-coderefs-first--on-skill-activation) before use.
 
 ---
 

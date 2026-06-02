@@ -35,8 +35,29 @@ This skill performs comprehensive security investigations on Windows, macOS, and
 **Skill files:**
 - `SKILL.md` — this file (investigation workflow, KQL queries, report templates)
 - `generate_html_report.py` — consolidated HTML report generator (dataclasses + HTML engine + JSON transformer, single self-contained file)
-- `enrich_ips.py` — IP enrichment script (source: `user-investigation/enrich_ips.py`, materialized to `tmp/computer-investigation/`)
+- `enrich_ips.py` — IP enrichment script (source: `user-investigation/enrich_ips.py`, resolved via File Resolution cascade)
 - `get-device-context-via-cli.md` — step-by-step Graph API reference for device data collection
+
+### File Resolution (codeRefs-first)
+
+Before executing any skill file (scripts, data files, companion files), resolve its location using this **mandatory cascade**:
+
+```
+1. codeRefs/sec-sre-ag/computer-investigation/<filename>
+   → If found: use/execute directly from this path (companion files are co-located here)
+2. tmp/computer-investigation/<filename>
+   → If found: use from this path
+3. Neither found:
+   → read_skill_file("computer-investigation", "<filename>") from Builder
+      (for enrich_ips.py: read_skill_file("user-investigation", "enrich_ips.py"))
+   → CreateFile("tmp/computer-investigation/<filename>", <content>)
+   → Repeat for ALL companion files referenced by the script
+```
+
+**Rules:**
+- When a file is found in `codeRefs/`, execute it directly from there — do NOT copy it to `tmp/`.
+- When materializing from Builder (step 3), materialize ALL companion files the script depends on, not just the script itself.
+- This cascade applies to every file listed in the Skill Files table above.
 
 ---
 
@@ -327,9 +348,9 @@ Deep-dive analysis, lateral movement detection, thorough forensics.
 - **Single consolidated script:** `generate_html_report.py` — contains dataclasses, HTML generator, and JSON transformer in one file. No external dependencies beyond Python 3 stdlib.
 - **Pipeline:** JSON export → materialize `generate_html_report.py` → run → HTML report
 - **Output location:** `reports/computer-investigations/Investigation_Report_<device_name>_<timestamp>.html`
-- **⚠️ Conditional materialization:** The script is materialized to disk ONLY when the user requests HTML output.
-  1. `read_skill_file("computer-investigation", "generate_html_report.py")` → `CreateFile("tmp/computer-investigation/generate_html_report.py", <content>)`
-  2. Run: `python3 tmp/computer-investigation/generate_html_report.py temp/investigation_device_<device_name>_<timestamp>.json`
+- **⚠️ Conditional materialization:** The script is resolved via the [File Resolution cascade](#file-resolution-coderefs-first) ONLY when the user requests HTML output.
+  1. Resolve `generate_html_report.py` via cascade (codeRefs → tmp → Builder)
+  2. Run: `python3 <resolved_path>/generate_html_report.py temp/investigation_device_<device_name>_<timestamp>.json`
 - **Trigger:** User says "generate HTML", "HTML report", "create HTML", or similar
 
 ### Mode 4: JSON Export (only if explicitly requested)
@@ -488,14 +509,16 @@ az rest --method GET --url "https://<vault-name>.vault.azure.net/secrets/<secret
 - If Key Vault fails (403/ForbiddenByConnection): **ASK the user** for API tokens.
 - If user has no tokens: proceed anyway — Shodan InternetDB (free, no key) still provides open ports, CVEs, and tags.
 
-#### Step 3b: Materialize and Run enrich_ips.py
+#### Step 3b: Resolve and Run enrich_ips.py
 
-1. Check if `tmp/computer-investigation/enrich_ips.py` already exists on disk (from previous run in this session). If yes, skip materialization.
-2. If not on disk: `read_skill_file("user-investigation", "enrich_ips.py")` → `CreateFile("tmp/computer-investigation/enrich_ips.py", <content>)`
-3. Run:
+Resolve `enrich_ips.py` using the [File Resolution cascade](#file-resolution-coderefs-first):
+1. Check `codeRefs/sec-sre-ag/computer-investigation/enrich_ips.py` → if found, run from there.
+2. Else check `tmp/computer-investigation/enrich_ips.py` → if found, run from there.
+3. Else: `read_skill_file("user-investigation", "enrich_ips.py")` → `CreateFile("tmp/computer-investigation/enrich_ips.py", <content>)` → run from `tmp/`.
+4. Run:
 ```bash
 # Pass available tokens as environment variables
-ABUSEIPDB_TOKEN=<value> IPINFO_TOKEN=<value> python3 tmp/computer-investigation/enrich_ips.py <ip1> <ip2> <ip3>
+ABUSEIPDB_TOKEN=<value> IPINFO_TOKEN=<value> python3 <resolved_path>/enrich_ips.py <ip1> <ip2> <ip3>
 ```
 
 **Output:** JSON file in `temp/ip_enrichment_<timestamp>.json` + text report in `temp/ip_enrichment_<timestamp>.txt`
@@ -517,14 +540,16 @@ Render analysis directly in chat using the **complete** section structure from t
 1. Build the markdown report using the template below — ALL sections must be populated
 2. Save: `create_file("reports/computer-investigations/computer_investigation_<device_name>_YYYYMMDD_HHMMSS.md", content)`
 
-#### Mode 3 — HTML Report (Conditional Materialization)
+#### Mode 3 — HTML Report (Conditional — File Resolution Cascade)
 
-> **⚠️ Materialize `generate_html_report.py` ONLY when the user requests HTML output.**
+> **⚠️ Resolve `generate_html_report.py` ONLY when the user requests HTML output.**
 
 1. **Export to JSON:** `create_file("temp/investigation_device_<device_name>_<timestamp>.json", content)`
-2. **Check if script already materialized:** If `tmp/computer-investigation/generate_html_report.py` exists on disk, skip to step 4.
-3. **Materialize:** `read_skill_file("computer-investigation", "generate_html_report.py")` → `CreateFile("tmp/computer-investigation/generate_html_report.py", <content>)`
-4. **Run:** `python3 tmp/computer-investigation/generate_html_report.py temp/investigation_device_<device_name>_<timestamp>.json`
+2. **Resolve `generate_html_report.py`** via the [File Resolution cascade](#file-resolution-coderefs-first):
+   - Check `codeRefs/sec-sre-ag/computer-investigation/generate_html_report.py` → if found, use that path.
+   - Else check `tmp/computer-investigation/generate_html_report.py` → if found, use that path.
+   - Else: `read_skill_file("computer-investigation", "generate_html_report.py")` → `CreateFile("tmp/computer-investigation/generate_html_report.py", <content>)`
+3. **Run:** `python3 <resolved_path>/generate_html_report.py temp/investigation_device_<device_name>_<timestamp>.json`
 
 #### Mode 4 — JSON Export
 1. Export: `create_file("temp/investigation_device_<device_name>_<timestamp>.json", content)`

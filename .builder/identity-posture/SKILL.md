@@ -37,7 +37,25 @@ Audit the **identity security posture** of the Entra ID tenant using a dual-sour
 | [analyze-identity-posture.py](analyze-identity-posture.py) | Analysis engine — reads JSON, computes score, generates report | Phase 2 |
 | [generate_html_report.py](generate_html_report.py) | HTML report generator — reads JSON, computes all metrics, produces styled HTML | Phase 2 (on request) |
 | [svg-widgets.yaml](svg-widgets.yaml) | SVG dashboard widget manifest | Optional post-report |
+### File Resolution (codeRefs-first)
 
+Before executing any skill file (scripts, data files, companion files), resolve its location using this **mandatory cascade**:
+
+```
+1. codeRefs/sec-sre-ag/identity-posture/<filename>
+   → If found: use/execute directly from this path (companion files are co-located here)
+2. tmp/identity-posture/<filename>
+   → If found: use from this path
+3. Neither found:
+   → read_skill_file("identity-posture", "<filename>") from Builder
+   → CreateFile("tmp/identity-posture/<filename>", <content>)
+   → Repeat for ALL companion files referenced by the script
+```
+
+**Rules:**
+- When a file is found in `codeRefs/`, execute it directly from there — do NOT copy it to `tmp/`.
+- When materializing from Builder (step 3), materialize ALL companion files the script depends on, not just the script itself.
+- This cascade applies to every file listed in the Skill Files table above.
 ---
 
 ## ⚠️ CRITICAL RULES — READ FIRST
@@ -54,7 +72,7 @@ Audit the **identity security posture** of the Entra ID tenant using a dual-sour
 
 6. **Evidence-based only.** Report only what data shows. Use `✅ No [finding] detected` for zero results.
 
-7. **Materialize scripts before execution.** Skill files are served via API and do NOT exist on the filesystem. Always save `.py` scripts to disk before running them (see Phase 2, Step 2.0).
+7. **Resolve scripts before execution.** Skill files may not exist on the filesystem. Always resolve them via the [File Resolution cascade](#file-resolution-coderefs-first) before running them (see Phase 2, Step 2.0).
 
 ### ⛔ PROHIBITED
 
@@ -65,7 +83,7 @@ Audit the **identity security posture** of the Entra ID tenant using a dual-sour
 | Copy-pasting KQL from SKILL.md | Use [kql-enrichment-queries.md](kql-enrichment-queries.md) |
 | Making 6 parallel Graph API calls | Token/throttling failures — do them sequentially |
 | Guessing data or assuming results | Only report what data files contain |
-| Running `python3 analyze-identity-posture.py` without materializing first | File does not exist on disk — see Step 2.0 |
+| Running `python3 analyze-identity-posture.py` without resolving first | File may not exist on disk — see Step 2.0 |
 
 ---
 
@@ -210,20 +228,20 @@ python3 -c "import json; json.dump({'results': <RESULTS>}, open('output/identity
 
 **Goal:** Compute all metrics, the Identity Posture Score, and generate the report.
 
-**Step 2.0 — Materialize the analysis script to disk:**
+**Step 2.0 — Resolve the analysis script to disk:**
 
-Skill files are served via the `read_skill_file` API and do **NOT** exist on the filesystem.
-Before execution, the agent must save the script to a known location:
+Resolve `analyze-identity-posture.py` via the [File Resolution cascade](#file-resolution-coderefs-first):
 
-1. `read_skill_file(skill_name="identity-posture", file_path="analyze-identity-posture")` → get content
-2. Save to `tmp/identity-posture/analyze-identity-posture.py` via `CreateFile`
-3. Run from that path (see Step 2.2)
+1. Check `codeRefs/sec-sre-ag/identity-posture/analyze-identity-posture.py` → if found, use that path directly.
+2. Else check `tmp/identity-posture/analyze-identity-posture.py` → if found, use that path.
+3. Else: `read_skill_file(skill_name="identity-posture", file_path="analyze-identity-posture")` → get content, then save to `tmp/identity-posture/analyze-identity-posture.py` via `CreateFile`.
 
-The same applies for `get-entra-posture-data.py` if used for validation (Step 0.3).
+The same cascade applies for `get-entra-posture-data.py` if used for validation (Step 0.3).
 
-> **Why?** The `read_skill_file` tool returns file content via API but does not place files
+> **Why the cascade?** `codeRefs/` contains the latest version-controlled scripts with companion files co-located.
+> The `read_skill_file` tool returns file content via API but does not place files
 > on the local filesystem. Attempting to run `python3 analyze-identity-posture.py` directly
-> will fail with `No such file or directory` (exit code 2).
+> will fail with `No such file or directory` (exit code 2) unless resolved first.
 
 **Step 2.1 — Output Modes:**
 
@@ -255,7 +273,7 @@ The script:
 
 **Step 2.3 — HTML report (only if explicitly requested):**
 
-Materialize `generate_html_report.py` the same way as analyze-identity-posture.py (Step 2.0), then run:
+Resolve `generate_html_report.py` via the [File Resolution cascade](#file-resolution-coderefs-first) (same as Step 2.0), then run:
 
 ```bash
 python3 tmp/identity-posture/generate_html_report.py \
@@ -378,7 +396,7 @@ az rest --method POST \
 
 ### 11. Skill Files Not on Filesystem
 **Problem:** `read_skill_file` returns file content via API but does NOT place files on the local filesystem. Running `python3 analyze-identity-posture.py` directly fails with `No such file or directory` (exit code 2).
-**Solution:** Always materialize `.py` scripts to `tmp/identity-posture/` via `CreateFile` before execution. See Phase 2, Step 2.0.
+**Solution:** Always resolve scripts via the [File Resolution cascade](#file-resolution-coderefs-first) (codeRefs → tmp → Builder) before execution. See Phase 2, Step 2.0.
 
 ### 12. `Tags` Column Is String, Not Dynamic (KQL SEM0218)
 **Problem:** The `Tags` column in `IdentityInfo` is stored as `string`, not `dynamic`. Using `array_index_of(Tags, "Sensitive")` fails at KQL compile time with `SEM0218: array_index_of(): argument #1 must be a dynamic`. The `iff()` wrapper does NOT prevent compile-time type validation.
@@ -395,7 +413,7 @@ Before delivering the report, verify:
 - [ ] KQL enrichment queries run (table availability noted)
 - [ ] All data saved to `output/identity-posture/` with correct filenames
 - [ ] `get-entra-posture-data.py --validate` passes
-- [ ] Analysis script materialized to disk (Step 2.0)
+- [ ] Analysis script resolved to disk (Step 2.0)
 - [ ] `analyze-identity-posture.py` runs without errors
 - [ ] Identity Posture Score computed (per-dimension breakdown shown)
 - [ ] Zero-result findings use explicit absence pattern

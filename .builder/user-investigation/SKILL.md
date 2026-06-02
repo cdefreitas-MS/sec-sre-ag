@@ -31,6 +31,26 @@ This skill performs comprehensive security investigations on Entra ID user accou
 - `enrich_ips.py` — IP enrichment script (AbuseIPDB, ipinfo.io, vpnapi.io, Shodan)
 - `get-entra-user-context-via-tool.md` — step-by-step Graph API reference for RunAzCliReadCommands
 
+### File Resolution (codeRefs-first)
+
+Before executing any skill file (scripts, data files, companion files), resolve its location using this **mandatory cascade**:
+
+```
+1. codeRefs/sec-sre-ag/user-investigation/<filename>
+   → If found: use/execute directly from this path (companion files are co-located here)
+2. tmp/user-investigation/<filename>
+   → If found: use from this path
+3. Neither found:
+   → read_skill_file("user-investigation", "<filename>") from Builder
+   → CreateFile("tmp/user-investigation/<filename>", <content>)
+   → Repeat for ALL companion files referenced by the script
+```
+
+**Rules:**
+- When a file is found in `codeRefs/`, execute it directly from there — do NOT copy it to `tmp/`.
+- When materializing from Builder (step 3), materialize ALL companion files the script depends on, not just the script itself.
+- This cascade applies to every file listed in the Skill Files table above.
+
 ---
 
 ## 📑 TABLE OF CONTENTS
@@ -302,10 +322,13 @@ az rest --method GET --url "https://<vault-name>.vault.azure.net/secrets/<secret
 ```
 - If Key Vault fails: ASK user for tokens. If no tokens: proceed anyway (Shodan InternetDB free).
 
-#### Step 3b: Materialize and Run enrich_ips.py
-1. Check if `tmp/user-investigation/enrich_ips.py` already exists on disk (from previous run in this session). If yes, skip materialization.
-2. If not on disk: `read_skill_file("user-investigation", "enrich_ips.py")` → `CreateFile("tmp/user-investigation/enrich_ips.py", <content>)`
-3. Run: `ABUSEIPDB_TOKEN=<value> python3 tmp/user-investigation/enrich_ips.py <ip1> <ip2> <ip3>`
+#### Step 3b: Resolve and Run enrich_ips.py
+
+Resolve `enrich_ips.py` using the [File Resolution cascade](#file-resolution-coderefs-first):
+1. Check `codeRefs/sec-sre-ag/user-investigation/enrich_ips.py` → if found, run from there.
+2. Else check `tmp/user-investigation/enrich_ips.py` → if found, run from there.
+3. Else: `read_skill_file("user-investigation", "enrich_ips.py")` → `CreateFile("tmp/user-investigation/enrich_ips.py", <content>)` → run from `tmp/`.
+4. Run: `ABUSEIPDB_TOKEN=<value> python3 <resolved_path>/enrich_ips.py <ip1> <ip2> <ip3>`
 
 #### Step 3c: KQL Supplements
 Q13 + Q11 (already in Batch 2) are SUPPLEMENTS to enrich_ips.py, NOT replacements.
@@ -337,21 +360,14 @@ Render analysis directly in chat using the complete section structure from the M
    - The JSON MUST include the `ip_enrichment` array (from Phase 3 `enrich_ips.py` output)
    - Include all query results: anomalies, signin_apps, signin_locations, signin_failures, signin_ip_counts, audit_events, office_events, dlp_events, incidents, user_profile, mfa_methods, devices, risk_profile, risk_detections, risky_signins, threat_intel_ips
 
-2. **Check if script already materialized:**
-   If `tmp/user-investigation/generate_html_report.py` exists on disk (from previous run in this session), skip to step 4.
+2. **Resolve `generate_html_report.py`** using the [File Resolution cascade](#file-resolution-coderefs-first):
+   - Check `codeRefs/sec-sre-ag/user-investigation/generate_html_report.py` → if found, use that path.
+   - Else check `tmp/user-investigation/generate_html_report.py` → if found, use that path.
+   - Else: `read_skill_file("user-investigation", "generate_html_report.py")` → `CreateFile("tmp/user-investigation/generate_html_report.py", <content>)`
 
-3. **Materialize the consolidated script:**
-   ```
-   read_skill_file("user-investigation", "generate_html_report.py")
-   ```
-   Then save the returned content to disk:
-   ```
-   CreateFile("tmp/user-investigation/generate_html_report.py", <content from read_skill_file>)
-   ```
-
-4. **Run the generator:**
+3. **Run the generator:**
    ```bash
-   python3 tmp/user-investigation/generate_html_report.py temp/investigation_<upn_prefix>_<timestamp>.json
+   python3 <resolved_path>/generate_html_report.py temp/investigation_<upn_prefix>_<timestamp>.json
    ```
 
 **What the script does automatically:**

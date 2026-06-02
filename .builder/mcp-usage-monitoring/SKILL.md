@@ -260,6 +260,26 @@ Beyond the four MCP servers actively monitored by this skill, Microsoft's MCP ec
 | `generate_html_report.py` | HTML report generator — reads JSON export, produces styled HTML |
 | `svg-widgets.yaml` | SVG dashboard widget manifest for visualization |
 
+### File Resolution (codeRefs-first)
+
+Before executing any skill file (scripts, data files, companion files), resolve its location using this **mandatory cascade**:
+
+```
+1. codeRefs/sec-sre-ag/mcp-usage-monitoring/<filename>
+   → If found: use/execute directly from this path (companion files are co-located here)
+2. tmp/mcp-usage-monitoring/<filename>
+   → If found: use from this path
+3. Neither found:
+   → read_skill_file("mcp-usage-monitoring", "<filename>") from Builder
+   → CreateFile("tmp/mcp-usage-monitoring/<filename>", <content>)
+   → Repeat for ALL companion files referenced by the script
+```
+
+**Rules:**
+- When a file is found in `codeRefs/`, execute it directly from there — do NOT copy it to `tmp/`.
+- When materializing from Builder (step 3), materialize ALL companion files the script depends on, not just the script itself.
+- This cascade applies to every file listed in the Skill Files table above.
+
 ---
 
 ## Phase 0: Results Cache Check (MANDATORY)
@@ -365,10 +385,13 @@ This skill supports three output modes. **ASK the user which they prefer** if no
 - Self-contained HTML with embedded CSS — dark theme, two-column layout, MCP server color-coded sections, score card, daily trends, security assessment
 - **Pipeline:** JSON export → materialize `generate_html_report.py` → run → HTML report
 - **Output location:** `reports/mcp-usage/MCP_Usage_Report_<workspace>_<timestamp>.html`
-- **⚠️ Conditional materialization:** The script is materialized to disk ONLY when the user requests HTML output.
+- **⚠️ Conditional — File Resolution Cascade:** The script is resolved to disk ONLY when the user requests HTML output.
   1. Export data to JSON: `reports/mcp-usage/mcp_usage_report_<workspace>_<timestamp>.json`
-  2. `read_skill_file("mcp-usage-monitoring", "generate_html_report.py")` → `CreateFile("tmp/mcp-usage-monitoring/generate_html_report.py", <content>)`
-  3. Run: `python3 tmp/mcp-usage-monitoring/generate_html_report.py reports/mcp-usage/mcp_usage_report_*.json --output-dir reports/mcp-usage/`
+  2. Resolve `generate_html_report.py` via the [File Resolution cascade](#file-resolution-coderefs-first):
+     - Check `codeRefs/sec-sre-ag/mcp-usage-monitoring/generate_html_report.py` → if found, use that path.
+     - Else check `tmp/mcp-usage-monitoring/generate_html_report.py` → if found, use that path.
+     - Else: `read_skill_file("mcp-usage-monitoring", "generate_html_report.py")` → `CreateFile("tmp/mcp-usage-monitoring/generate_html_report.py", <content>)`
+  3. Run: `python3 <resolved_path>/generate_html_report.py reports/mcp-usage/mcp_usage_report_*.json --output-dir reports/mcp-usage/`
 - **Trigger:** User says "generate HTML", "HTML report", "create HTML", or similar
 
 Do NOT materialize the script unless the user explicitly requests an HTML report.

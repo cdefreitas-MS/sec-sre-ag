@@ -82,6 +82,28 @@ This skill spans **4 files**. Load only the file(s) needed for the current phase
 | [invoke_ingestion_scan.py](invoke_ingestion_scan.py) | Python data-gathering pipeline (Phases 1-5) | Execution only — no need to read unless debugging |
 | [generate_html_report.py](generate_html_report.py) | Scratchpad → HTML report converter (dark theme) | Optional — when user requests HTML export |
 
+### File Resolution (codeRefs-first)
+
+Before executing any skill file (scripts, data files, companion files), resolve its location using this **mandatory cascade**:
+
+```
+1. codeRefs/sec-sre-ag/sentinel-ingestion-report/<filename>
+   → If found: use/execute directly from this path (companion files are co-located here)
+2. sentinel-ingestion-report/<filename>
+   → If found in the repo folder: use/execute from this path
+3. tmp/sentinel-ingestion-report/<filename>
+   → If found: use from this path
+4. None of the above:
+   → read_skill_file("sentinel-ingestion-report", "<filename>") from Builder
+   → CreateFile("tmp/sentinel-ingestion-report/<filename>", <content>)
+   → Repeat for ALL companion files referenced by the script (queries.yaml, etc.)
+```
+
+**Rules:**
+- When a file is found in `codeRefs/` or the repo folder, execute it directly from there — do NOT copy it to `tmp/`.
+- When materializing from Builder (step 4), materialize ALL companion files the script depends on, not just the script itself.
+- This cascade applies to `invoke_ingestion_scan.py`, `generate_html_report.py`, and `queries.yaml`.
+
 ---
 
 ## 📑 TABLE OF CONTENTS
@@ -115,18 +137,20 @@ Step 3:  Render report inline (§1-§8) — always inline, optional md/html expo
 
 ### Step 1: Run Data Gathering
 
+Resolve `invoke_ingestion_scan.py` via the [File Resolution cascade](#file-resolution-coderefs-first), then run:
+
 ```bash
-# From the skill folder — run all phases (default: 30 days):
-python sentinel-ingestion-report/invoke_ingestion_scan.py
+# From the resolved path — run all phases (default: 30 days):
+python <resolved_path>/invoke_ingestion_scan.py
 
 # Specify a custom window (1, 7, 30, 60, or 90 days):
-python sentinel-ingestion-report/invoke_ingestion_scan.py --days 7
+python <resolved_path>/invoke_ingestion_scan.py --days 7
 
 # Run a specific phase (for re-runs / debugging):
-python sentinel-ingestion-report/invoke_ingestion_scan.py --phase 3
+python <resolved_path>/invoke_ingestion_scan.py --phase 3
 
 # Force re-execution (ignore cached scratchpad):
-python sentinel-ingestion-report/invoke_ingestion_scan.py --redo
+python <resolved_path>/invoke_ingestion_scan.py --redo
 ```
 
 > **Note:** The script looks for `config.json` by walking up from its location. Place `config.json` at the workspace root with `sentinel_workspace_id`, `subscription_id`, and `azure_mcp.resource_group` / `azure_mcp.workspace_name` fields.
@@ -152,7 +176,7 @@ Render the **complete report (§1-§8) inline in chat**. This is the default and
 
 **Optional exports (only when user explicitly requests):**
 - **Markdown file:** `python invoke_ingestion_scan.py --export md` or user says "export as markdown"
-- **HTML file:** `python generate_html_report.py <scratchpad_path>` or user says "export as html" / "generate html"
+- **HTML file:** Resolve `generate_html_report.py` via the [File Resolution cascade](#file-resolution-coderefs-first), then run: `python <resolved_path>/generate_html_report.py <scratchpad_path>` or user says "export as html" / "generate html"
 - HTML export generates a self-contained dark-theme HTML file in `tmp/sentinel-ingestion-report/`
 
 **⛔ Do NOT ask the user for output mode.** Always render inline. Only generate md/html files when explicitly requested.

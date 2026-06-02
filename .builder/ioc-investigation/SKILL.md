@@ -107,6 +107,26 @@ The investigation correlates IoCs with threat intelligence, identifies associate
 | `generate_html_report.py` | HTML report generator — reads JSON export, produces styled HTML |
 | `defender-api-via-cli.md` | MDE API reference for `az rest` calls |
 
+### File Resolution (codeRefs-first)
+
+Before executing any skill file (scripts, data files, companion files), resolve its location using this **mandatory cascade**:
+
+```
+1. codeRefs/sec-sre-ag/ioc-investigation/<filename>
+   → If found: use/execute directly from this path (companion files are co-located here)
+2. tmp/ioc-investigation/<filename>
+   → If found: use from this path
+3. Neither found:
+   → read_skill_file("ioc-investigation", "<filename>") from Builder
+   → CreateFile("tmp/ioc-investigation/<filename>", <content>)
+   → Repeat for ALL companion files referenced by the script
+```
+
+**Rules:**
+- When a file is found in `codeRefs/`, execute it directly from there — do NOT copy it to `tmp/`.
+- When materializing from Builder (step 3), materialize ALL companion files the script depends on, not just the script itself.
+- This cascade applies to every file listed in the Skill Files table above.
+
 ---
 
 ## Output Modes
@@ -121,15 +141,18 @@ The investigation correlates IoCs with threat intelligence, identifies associate
 > **Rule:** Always start with inline presentation. Never skip inline output. The other modes are additive, triggered only by explicit user request.
 > **Rule:** JSON files are internal artifacts consumed by `generate_html_report.py`. Do NOT present JSON links in the final output — only present HTML report links.
 
-### HTML Report — Conditional Materialization
+### HTML Report — Conditional Resolution (codeRefs-first)
 
 When the user requests an HTML report:
 
 1. Export investigation data to JSON: `temp/ioc_investigation_{type}_{value}_{ts}.json`
-2. Materialize `generate_html_report.py` to `tmp/ioc-investigation/generate_html_report.py`
-3. Execute: `python3 tmp/ioc-investigation/generate_html_report.py temp/ioc_investigation_*.json --output-dir reports/ioc-investigation/`
+2. Resolve `generate_html_report.py` via the [File Resolution cascade](#file-resolution-coderefs-first):
+   - Check `codeRefs/sec-sre-ag/ioc-investigation/generate_html_report.py` → if found, use that path.
+   - Else check `tmp/ioc-investigation/generate_html_report.py` → if found, use that path.
+   - Else: `read_skill_file("ioc-investigation", "generate_html_report.py")` → `CreateFile("tmp/ioc-investigation/generate_html_report.py", <content>)`
+3. Execute: `python3 <resolved_path>/generate_html_report.py temp/ioc_investigation_*.json --output-dir reports/ioc-investigation/`
 
-Do NOT materialize the script unless the user explicitly requests an HTML report.
+Do NOT resolve the script unless the user explicitly requests an HTML report.
 
 #### Multi-IoC HTML Reports
 
@@ -146,13 +169,14 @@ When multiple IoCs are investigated together (e.g., an IP + a domain), **generat
 - Present all generated HTML report links to the user together at the end
 - **NEVER present JSON file links to the user** — JSON is an internal intermediate artifact
 
-### enrich_ips.py — Conditional Materialization
+### enrich_ips.py — Conditional Resolution (codeRefs-first)
 
-Before running IP enrichment:
+Before running IP enrichment, resolve `enrich_ips.py` via the [File Resolution cascade](#file-resolution-coderefs-first):
 
-1. Check if `tmp/ioc-investigation/enrich_ips.py` already exists on disk (from previous run). If yes, skip materialization.
-2. If not on disk: `read_skill_file("ioc-investigation", "enrich_ips.py")` → `CreateFile("tmp/ioc-investigation/enrich_ips.py", <content>)`
-3. Run: `ABUSEIPDB_TOKEN=<value> python3 tmp/ioc-investigation/enrich_ips.py <ip1> <ip2> ...`
+1. Check `codeRefs/sec-sre-ag/ioc-investigation/enrich_ips.py` → if found, run from there.
+2. Else check `tmp/ioc-investigation/enrich_ips.py` → if found, run from there.
+3. Else: `read_skill_file("ioc-investigation", "enrich_ips.py")` → `CreateFile("tmp/ioc-investigation/enrich_ips.py", <content>)` → run from `tmp/`.
+4. Run: `ABUSEIPDB_TOKEN=<value> python3 <resolved_path>/enrich_ips.py <ip1> <ip2> ...`
 
 ---
 
@@ -492,12 +516,14 @@ SHA256: r'^[a-fA-F0-9]{64}$'
 
 **MANDATORY for all IP address investigations.** Run `enrich_ips.py` to get external threat intelligence context that is NOT available from Defender/Sentinel native tools.
 
-**Materialize and run:**
-1. Check if `tmp/ioc-investigation/enrich_ips.py` already exists on disk. If yes, skip to step 3.
-2. If not on disk: `read_skill_file("ioc-investigation", "enrich_ips.py")` → `CreateFile("tmp/ioc-investigation/enrich_ips.py", <content>)`
-3. Run:
+**Resolve and run:**
+1. Resolve `enrich_ips.py` via the [File Resolution cascade](#file-resolution-coderefs-first):
+   - Check `codeRefs/sec-sre-ag/ioc-investigation/enrich_ips.py` → if found, run from there.
+   - Else check `tmp/ioc-investigation/enrich_ips.py` → if found, run from there.
+   - Else: `read_skill_file("ioc-investigation", "enrich_ips.py")` → `CreateFile("tmp/ioc-investigation/enrich_ips.py", <content>)` → run from `tmp/`.
+2. Run:
 ```powershell
-ABUSEIPDB_TOKEN=<value> python3 tmp/ioc-investigation/enrich_ips.py <IP_ADDRESS_1> <IP_ADDRESS_2> ...
+ABUSEIPDB_TOKEN=<value> python3 <resolved_path>/enrich_ips.py <IP_ADDRESS_1> <IP_ADDRESS_2> ...
 ```
 
 **What it provides:**

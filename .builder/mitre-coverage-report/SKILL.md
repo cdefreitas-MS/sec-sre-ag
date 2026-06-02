@@ -86,23 +86,38 @@ This skill generates a comprehensive **MITRE ATT&CK Coverage Report** analyzing 
 | [known-kql-tables.json](known-kql-tables.json) | Known KQL table names for parser validation | Referenced at runtime — no manual loading | **Must be on disk** (same dir as script) |
 | [svg-widgets.yaml](svg-widgets.yaml) | SVG dashboard widget manifest | SVG dashboard generation only | `read_skill_file` only |
 
-> ⚠️ **Runtime Location = "Must be on disk"** means the file must exist on the local filesystem in `tmp/mitre-coverage-report/`. These files are accessed by `invoke_mitre_scan.py` via `Path(__file__).resolve().parent` at runtime — they are NOT read via `read_skill_file`. They are materialized **immediately on skill activation** — see [File Materialization](#file-materialization-immediate--on-skill-activation).
+> ⚠️ **Runtime Location = "Must be on disk"** means the file must exist on the local filesystem. These files are accessed by `invoke_mitre_scan.py` via `Path(__file__).resolve().parent` at runtime. They are resolved **immediately on skill activation** via the [File Resolution cascade](#file-resolution-coderefs-first--on-skill-activation).
 
 ---
 
-## File Materialization (Immediate — On Skill Activation)
+## File Resolution (codeRefs-first — On Skill Activation)
 
-`invoke_mitre_scan.py` loads companion data files **from its own directory** at runtime (`script_dir = Path(__file__).resolve().parent`). These files are part of the skill package but are NOT automatically written to the workspace filesystem — they are only accessible via `read_skill_file`.
+`invoke_mitre_scan.py` loads companion data files **from its own directory** at runtime (`script_dir = Path(__file__).resolve().parent`). These files must be co-located with the script on disk.
 
-🔴 **MANDATORY — IMMEDIATE:** The moment this skill is activated (i.e., the agent reads this SKILL.md), the agent MUST materialize ALL files listed below to `tmp/mitre-coverage-report/` **before doing anything else** — before collecting parameters, before asking the user questions, before any other action. This is not a workflow step; it is a **precondition of the skill being operational**.
+🔴 **MANDATORY — IMMEDIATE:** The moment this skill is activated (i.e., the agent reads this SKILL.md), the agent MUST resolve ALL files listed below **before doing anything else** — before collecting parameters, before asking the user questions, before any other action. This is not a workflow step; it is a **precondition of the skill being operational**.
 
-### Target Directory
+### Resolution Cascade
 
-**Fixed path:** `tmp/mitre-coverage-report/`
+Resolve ALL 6 runtime files using this **mandatory cascade**:
 
-All scripts and companion files MUST be written to this single directory. Do NOT use any other directory. All subsequent commands in this skill reference `tmp/mitre-coverage-report/` as `<SKILL_DIR>`.
+```
+1. codeRefs/sec-sre-ag/mitre-coverage-report/
+   → If ALL 6 files exist here: use this directory as <SKILL_DIR>
+   → Execute invoke_mitre_scan.py directly from here (companion files are co-located)
+   → Do NOT copy files to tmp/
 
-### Files to Materialize
+2. tmp/mitre-coverage-report/
+   → If ALL 6 files exist here (from previous materialization): use this directory as <SKILL_DIR>
+
+3. Neither location has all files:
+   → read_skill_file() from Builder for each missing file
+   → CreateFile("tmp/mitre-coverage-report/<filename>", <content>)
+   → Use tmp/mitre-coverage-report/ as <SKILL_DIR>
+```
+
+All subsequent commands in this skill reference the resolved directory as `<SKILL_DIR>`.
+
+### Files to Resolve
 
 | File | Required By | Format |
 |------|-------------|--------|
@@ -113,11 +128,25 @@ All scripts and companion files MUST be written to this single directory. Do NOT
 | `m365-platform-coverage.json` | `invoke_mitre_scan.py` | JSON |
 | `known-kql-tables.json` | `invoke_mitre_scan.py` | JSON |
 
-### Procedure (Single Batch — Fast)
+### Step 1: Check codeRefs
+
+```bash
+ls codeRefs/sec-sre-ag/mitre-coverage-report/queries.yaml codeRefs/sec-sre-ag/mitre-coverage-report/mitre-attck-enterprise.json codeRefs/sec-sre-ag/mitre-coverage-report/m365-platform-coverage.json codeRefs/sec-sre-ag/mitre-coverage-report/known-kql-tables.json codeRefs/sec-sre-ag/mitre-coverage-report/invoke_mitre_scan.py codeRefs/sec-sre-ag/mitre-coverage-report/generate_html_report.py 2>/dev/null | wc -l
+# If returns 6 → set <SKILL_DIR>=codeRefs/sec-sre-ag/mitre-coverage-report → DONE
+```
+
+### Step 2: Check tmp (if codeRefs not found)
+
+```bash
+ls tmp/mitre-coverage-report/queries.yaml tmp/mitre-coverage-report/mitre-attck-enterprise.json tmp/mitre-coverage-report/m365-platform-coverage.json tmp/mitre-coverage-report/known-kql-tables.json tmp/mitre-coverage-report/invoke_mitre_scan.py tmp/mitre-coverage-report/generate_html_report.py 2>/dev/null | wc -l
+# If returns 6 → set <SKILL_DIR>=tmp/mitre-coverage-report → DONE
+```
+
+### Step 3: Materialize from Builder (if neither location has all files)
 
 🔴 **CRITICAL: Write FULL file content. NEVER write placeholders or stubs** (e.g., `{"placeholder": true}` or stub scripts). Writing placeholders then backfilling later wastes multiple round-trips and is the #1 cause of slow materialization.
 
-**Step 1 — Read ALL 6 files in a single parallel batch:**
+**Step 3a — Read ALL 6 files in a single parallel batch:**
 ```
 read_skill_file(skill_name="mitre-coverage-report", file_path="invoke_mitre_scan.py")
 read_skill_file(skill_name="mitre-coverage-report", file_path="generate_html_report.py")
@@ -127,7 +156,7 @@ read_skill_file(skill_name="mitre-coverage-report", file_path="m365-platform-cov
 read_skill_file(skill_name="mitre-coverage-report", file_path="known-kql-tables.json")
 ```
 
-**Step 2 — Write ALL 6 files in a single parallel batch** (use `CreateFile` for text files, `RunInTerminal` with `python3 -c 'json.dump(...)'` for large JSON if needed):
+**Step 3b — Write ALL 6 files in a single parallel batch:**
 ```
 CreateFile(filePath="tmp/mitre-coverage-report/invoke_mitre_scan.py", content=<FULL content>)
 CreateFile(filePath="tmp/mitre-coverage-report/generate_html_report.py", content=<FULL content>)
@@ -138,16 +167,9 @@ CreateFile(filePath="tmp/mitre-coverage-report/known-kql-tables.json", content=<
 ```
 
 **Total: 2 tool calls (read batch + write batch).** Do NOT split into more batches. Do NOT write one file at a time.
+Set `<SKILL_DIR>=tmp/mitre-coverage-report`.
 
-### Skip Condition
-
-If `tmp/mitre-coverage-report/` already contains ALL 6 files (from a previous materialization in the same or earlier session), skip materialization. **Verify first** with:
-```bash
-ls tmp/mitre-coverage-report/queries.yaml tmp/mitre-coverage-report/mitre-attck-enterprise.json tmp/mitre-coverage-report/m365-platform-coverage.json tmp/mitre-coverage-report/known-kql-tables.json tmp/mitre-coverage-report/invoke_mitre_scan.py tmp/mitre-coverage-report/generate_html_report.py 2>/dev/null | wc -l
-# Must return 6. If less, re-materialize all missing files.
-```
-
-🔴 **PROHIBITED:** Proceeding to Phase 0 (parameter collection) or any workflow step without completed materialization. The script will exit immediately if `queries.yaml` or `mitre-attck-enterprise.json` are missing.
+🔴 **PROHIBITED:** Proceeding to Phase 0 (parameter collection) or any workflow step without completed file resolution. The script will exit immediately if `queries.yaml` or `mitre-attck-enterprise.json` are missing.
 
 ---
 
@@ -167,7 +189,7 @@ ls tmp/mitre-coverage-report/queries.yaml tmp/mitre-coverage-report/mitre-attck-
 
 ## Quick Start (TL;DR)
 
-**3-step execution pattern** (file materialization happens automatically on skill activation — see [above](#file-materialization-immediate--on-skill-activation)):
+**3-step execution pattern** (file resolution happens automatically on skill activation — see [above](#file-resolution-coderefs-first--on-skill-activation)):
 
 ```
 Step 1:  Run invoke_mitre_scan.py (Phases 1-3 — data gathering)

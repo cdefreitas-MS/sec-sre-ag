@@ -44,6 +44,26 @@ Generate comprehensive security incident statistics from Microsoft Sentinel, inc
 | `generate_charts.py` | Pre-built script that generates matplotlib PNG charts from `query_results.json` |
 | `generate_html_report.py` | Pre-built script that generates a self-contained HTML report (dark theme, no matplotlib dependency) from `query_results.json` |
 
+### File Resolution (codeRefs-first)
+
+Before executing any skill file (scripts, data files, companion files), resolve its location using this **mandatory cascade**:
+
+```
+1. codeRefs/sec-sre-ag/incident-statistics/<filename>
+   → If found: use/execute directly from this path (companion files are co-located here)
+2. tmp/incident-statistics/<filename>
+   → If found: use from this path
+3. Neither found:
+   → read_skill_file("incident-statistics", "<filename>") from Builder
+   → CreateFile("tmp/incident-statistics/<filename>", <content>)
+   → Repeat for ALL companion files referenced by the script
+```
+
+**Rules:**
+- When a file is found in `codeRefs/`, execute it directly from there — do NOT copy it to `tmp/`.
+- When materializing from Builder (step 3), materialize ALL companion files the script depends on, not just the script itself.
+- This cascade applies to every file listed in the Skill Files table above.
+
 ---
 
 ## Output Modes
@@ -57,16 +77,18 @@ Generate comprehensive security incident statistics from Microsoft Sentinel, inc
 
 > **Rule:** Always start with inline presentation. Never skip inline output. The other modes are additive, triggered only by explicit user request.
 
-### HTML Report — Conditional Materialization
+### HTML Report — Conditional Resolution (codeRefs-first)
 
 When the user requests an HTML report:
 
-1. Read `generate_html_report.py` from this skill's directory
-2. Write it to `tmp/incident-statistics/generate_html_report.py`
-3. Execute: `python3 tmp/incident-statistics/generate_html_report.py {output_dir}/query_results.json --output-dir {output_dir} --lookback "{lookback_label}"`
-4. The script generates a self-contained HTML file (dark theme, CSS-only visualizations, no matplotlib dependency)
+1. Resolve `generate_html_report.py` via the [File Resolution cascade](#file-resolution-coderefs-first):
+   - Check `codeRefs/sec-sre-ag/incident-statistics/generate_html_report.py` → if found, use that path.
+   - Else check `tmp/incident-statistics/generate_html_report.py` → if found, use that path.
+   - Else: `read_skill_file("incident-statistics", "generate_html_report.py")` → `CreateFile("tmp/incident-statistics/generate_html_report.py", <content>)`
+2. Execute: `python3 <resolved_path>/generate_html_report.py {output_dir}/query_results.json --output-dir {output_dir} --lookback "{lookback_label}"`
+3. The script generates a self-contained HTML file (dark theme, CSS-only visualizations, no matplotlib dependency)
 
-Do NOT materialize the script unless the user explicitly requests an HTML report.
+Do NOT resolve the script unless the user explicitly requests an HTML report.
 
 ---
 
@@ -194,15 +216,18 @@ After collecting all query results:
    ```
    Save to `{output_dir}/query_results.json`. Use empty arrays `[]` for queries with no data.
 
-2. **Read the chart generation script** from this skill:
-   ```
-   read_skill_file(skill_name="incident-statistics", file_path="generate_charts.py")
-   ```
-   Save the script content to `tmp/incident-statistics/generate_charts.py`.
+2. **Resolve the chart generation script** via the [File Resolution cascade](#file-resolution-coderefs-first):
+   - Check `codeRefs/sec-sre-ag/incident-statistics/generate_charts.py` → if found, use that path.
+   - Else check `tmp/incident-statistics/generate_charts.py` → if found, use that path.
+   - Else:
+     ```
+     read_skill_file(skill_name="incident-statistics", file_path="generate_charts.py")
+     ```
+     Save the script content to `tmp/incident-statistics/generate_charts.py`.
 
 3. **Execute the script:**
    ```bash
-   python3 tmp/incident-statistics/generate_charts.py {output_dir}/query_results.json {output_dir} "{lookback_label}"
+   python3 <resolved_path>/generate_charts.py {output_dir}/query_results.json {output_dir} "{lookback_label}"
    ```
 
 The script generates all applicable chart PNGs **and** the Q1 heatmap table image (`1_incidents_by_title_table.png`), skipping queries with no data.
@@ -229,13 +254,12 @@ General pattern: `![description](/api/files/{output_dir}/{filename}.png)`
 
 If — and only if — the user explicitly asks for an HTML report:
 
-1. Read `generate_html_report.py` from this skill
-2. Materialize it to `tmp/incident-statistics/generate_html_report.py`
-3. Execute:
+1. Resolve `generate_html_report.py` via the [File Resolution cascade](#file-resolution-coderefs-first)
+2. Execute:
    ```bash
-   python3 tmp/incident-statistics/generate_html_report.py {output_dir}/query_results.json --output-dir {output_dir} --lookback "{lookback_label}"
+   python3 <resolved_path>/generate_html_report.py {output_dir}/query_results.json --output-dir {output_dir} --lookback "{lookback_label}"
    ```
-4. The script produces a self-contained HTML file with dark theme, CSS-only charts, severity heatmaps, MITRE matrix, MTTA/MTTR bars, and top-5 tables — no matplotlib dependency required.
+3. The script produces a self-contained HTML file with dark theme, CSS-only charts, severity heatmaps, MITRE matrix, MTTA/MTTR bars, and top-5 tables — no matplotlib dependency required.
 
 
 ---

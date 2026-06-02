@@ -154,6 +154,55 @@ Performs comprehensive security investigations on Entra ID user accounts. Collec
 
 ---
 
+## Sandbox Architecture & Script Retrieval
+
+### How the Sandbox Works
+
+In Azure SRE Agent, when a new conversation is started, a new thread is created. The agent's tool execution runs inside an isolated sandbox — a micro VM powered by Azure Dedicated Compute (ADC), separate from the reasoning engine. In the sandbox's workspace filesystem, under `codeRefs/`, the content of the GitHub or Azure DevOps repositories connected to the agent is cloned and made available for reading.
+
+This means that when a skill needs to execute a Python script or load a companion data file (JSON, YAML), the file already exists on the sandbox filesystem at a predictable path such as `codeRefs/sec-sre-ag/<skill-name>/<filename>`.
+
+### File Resolution Cascade (`codeRefs`-first)
+
+Every SKILL.md in this repository instructs the agent to resolve script and data files using a **mandatory three-step cascade** before execution:
+
+```
+1. codeRefs/sec-sre-ag/<skill-name>/<filename>
+   → If found: use / execute directly from this path.
+     Companion files (queries.yaml, JSON reference data, etc.) are co-located here.
+
+2. tmp/<skill-name>/<filename>
+   → If found: use from this path (left over from a previous materialization
+     in the same conversation).
+
+3. Neither found → materialize from Builder:
+   → read_skill_file("<skill-name>", "<filename>") — returns file content via API
+   → CreateFile("tmp/<skill-name>/<filename>", <content>)
+   → Repeat for ALL companion files the script depends on.
+```
+
+**Rules enforced in every SKILL.md:**
+- When a file is found in `codeRefs/`, execute it directly from there — do **not** copy it to `tmp/`.
+- When materializing from Builder (step 3), materialize **all** companion files the script depends on, not just the script itself.
+- The `read_skill_file` tool returns file content via API but does **not** place files on the local filesystem. Running `python3 <script>.py` directly will fail with `No such file or directory` (exit code 2) unless the file has been resolved first.
+
+### Why the Cascade?
+
+`codeRefs/` contains the latest version-controlled scripts with companion files co-located. Because the repository is cloned into the sandbox automatically, step 1 succeeds in the vast majority of cases, making execution fast and reliable. Steps 2 and 3 exist as fallbacks: step 2 reuses files already materialized earlier in the conversation, and step 3 fetches content from the Builder API as a last resort.
+
+### How Scripts Locate Their Own Files at Runtime
+
+Once the agent has resolved a script to a filesystem path and invokes it with `python3`, the scripts themselves use two patterns to find companion files:
+
+| Pattern | Used by | Mechanism |
+|---|---|---|
+| **`Path(__file__).resolve().parent`** | Data-gathering scripts (`invoke_mitre_scan.py`, `invoke_ingestion_scan.py`, `analyze-identity-posture.py`, `enrich_ips.py`) | Resolves the directory containing the running script, then opens co-located files like `queries.yaml`, `mitre-attck-enterprise.json`, `known-kql-tables.json` via `script_dir / 'filename'`. Also walks up parent directories (6–10 levels) to find the root `config.json`. |
+| **`sys.argv[1]`** | HTML report generators (`generate_html_report.py` in every skill), chart generators (`generate_charts.py`) | Receives the path to a JSON data file (or directory) as a positional CLI argument. The agent passes the path of the JSON it produced in the previous step. |
+
+No script manipulates `sys.path` or imports modules from other skill directories. Every script is self-contained. Shared utilities (e.g., `shared/enrich_ips.py`) are invoked as subprocesses, not imported.
+
+---
+
 ## Repository Structure
 
 ```

@@ -52,6 +52,26 @@ This skill performs comprehensive security investigations on incidents from **Mi
 | [incident-queries.yaml](incident-queries.yaml) | Pre-built KQL queries (Q1–Q10) for incident data extraction |
 | [generate_html_report.py](generate_html_report.py) | HTML report generator — reads JSON export, produces styled HTML report |
 
+### File Resolution (codeRefs-first)
+
+Before executing any skill file (scripts, data files, companion files), resolve its location using this **mandatory cascade**:
+
+```
+1. codeRefs/sec-sre-ag/incident-investigation/<filename>
+   → If found: use/execute directly from this path (companion files are co-located here)
+2. tmp/incident-investigation/<filename>
+   → If found: use from this path
+3. Neither found:
+   → read_skill_file("incident-investigation", "<filename>") from Builder
+   → CreateFile("tmp/incident-investigation/<filename>", <content>)
+   → Repeat for ALL companion files referenced by the script
+```
+
+**Rules:**
+- When a file is found in `codeRefs/`, execute it directly from there — do NOT copy it to `tmp/`.
+- When materializing from Builder (step 3), materialize ALL companion files the script depends on, not just the script itself.
+- This cascade applies to every file listed in the Skill Files table above.
+
 ---
 
 ## 📑 TABLE OF CONTENTS
@@ -589,13 +609,15 @@ ELSE IF user says "done" or declines:
 |------|------|------|
 | **Inline** (default) | Always | Present all findings, alerts, assets, evidences, and recommendations directly in chat |
 | **Markdown file** | Only if user explicitly requests | Save full investigation report as `.md` file |
-| **HTML report** | Only if user explicitly requests | Materialize `generate_html_report.py` to `tmp/incident-investigation/` and run: `python3 tmp/incident-investigation/generate_html_report.py <json_file> --output-dir reports/incident-investigation/` |
+| **HTML report** | Only if user explicitly requests | Resolve `generate_html_report.py` via [File Resolution cascade](#file-resolution-coderefs-first) and run: `python3 <resolved_path>/generate_html_report.py <json_file> --output-dir reports/incident-investigation/` |
 | **JSON export** | Only if user explicitly requests | Save investigation data using the JSON Export Structure below |
 
-> **Conditional materialization:** The `generate_html_report.py` script exists in the skill repo but is NOT on the filesystem.
-> 1. `read_skill_file("incident-investigation", "generate_html_report.py")` → `CreateFile("tmp/incident-investigation/generate_html_report.py", <content>)`
-> 2. Run: `python3 tmp/incident-investigation/generate_html_report.py <json_file> --output-dir reports/incident-investigation/`
-> Materialize via `CreateFile` only when the user requests an HTML report.
+> **Conditional — File Resolution Cascade:** The `generate_html_report.py` script is resolved ONLY when the user requests HTML output.
+> 1. Check `codeRefs/sec-sre-ag/incident-investigation/generate_html_report.py` → if found, use that path.
+> 2. Else check `tmp/incident-investigation/generate_html_report.py` → if found, use that path.
+> 3. Else: `read_skill_file("incident-investigation", "generate_html_report.py")` → `CreateFile("tmp/incident-investigation/generate_html_report.py", <content>)`
+> 4. Run: `python3 <resolved_path>/generate_html_report.py <json_file> --output-dir reports/incident-investigation/`
+> Resolve via cascade only when the user requests an HTML report.
 
 ---
 
