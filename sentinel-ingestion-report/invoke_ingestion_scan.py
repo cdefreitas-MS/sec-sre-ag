@@ -4,7 +4,7 @@ invoke_ingestion_scan.py — Sentinel Ingestion Report data-gathering pipeline.
 Reads queries.yaml, executes via az CLI, post-processes, writes scratchpad.
 Drop-in replacement for Invoke-IngestionScan.ps1 (no pwsh required).
 """
-import argparse, json, os, re, subprocess, sys, time
+import argparse, json, os, re, shlex, subprocess, sys, time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -177,7 +177,7 @@ def parse_yaml_docs(text):
                     i += 1
                     while i < len(lines):
                         bl = lines[i]
-                        if bl and not bl[0].isspace() and bl.strip() and not bl.strip().startswith('#'):
+                        if bl and not bl[0].isspace() and bl.strip():
                             break
                         block.append(bl)
                         i += 1
@@ -300,7 +300,7 @@ def exec_cli(command, config):
     for k, v in config.items():
         if isinstance(v, str):
             cmd = cmd.replace(f'{{{k}}}', v)
-    parts = cmd.strip().split()
+    parts = shlex.split(cmd.strip())
     if parts and parts[0] == 'az':
         parts = parts[1:]
     parts += ["-o", "json"]
@@ -615,9 +615,18 @@ def post_process_phase4(all_results, ctx, deep_dive_days):
     q11 = all_results.get('ingestion-q11', [])
     if q11 and isinstance(q11, list) and len(q11) > 0:
         s = q11[0]
+        total_exec = sf(s.get('TotalExec'))
+        total_fail = sf(s.get('TotalFail'))
+        osr = s.get('OverallSuccessRate')
+        if osr is not None:
+            computed_success_rate = sf(osr)
+        elif total_exec > 0:
+            computed_success_rate = round(100.0 * (total_exec - total_fail) / total_exec, 1)
+        else:
+            computed_success_rate = 0
         ctx['health'] = {
             'total_rules': int(sf(s.get('TotalRulesInHealth'))),
-            'overall_success_rate': sf(s.get('OverallSuccessRate')),
+            'overall_success_rate': computed_success_rate,
             'failing_count': int(sf(s.get('FailingRuleCount'))),
         }
     else:
@@ -835,6 +844,13 @@ def post_process_phase5(all_results, ctx, days, deep_dive_days):
 
 def build_prerendered(ctx, all_results, phases, days, deep, wow, labels):
     """Build all 18 PRERENDERED markdown blocks."""
+    if isinstance(labels, tuple):
+        labels = {
+            'this_period': labels[0] if len(labels) > 0 else '',
+            'last_period': labels[1] if len(labels) > 1 else '',
+            'wow_change': labels[2] if len(labels) > 2 else '',
+            'period': f"{labels[0]} vs {labels[1]}" if len(labels) > 1 else (labels[0] if labels else ''),
+        }
     lines = []
     L = lines.append
 
@@ -1802,6 +1818,13 @@ def build_phase_blocks(ctx, all_results, phases, days, deep, labels):
 
 def build_scratchpad(ctx, all_results, phases, days, deep, wow, labels, config, queries, elapsed):
     """Assemble the full scratchpad markdown file."""
+    if isinstance(labels, tuple):
+        labels = {
+            'this_period': labels[0] if len(labels) > 0 else '',
+            'last_period': labels[1] if len(labels) > 1 else '',
+            'wow_change': labels[2] if len(labels) > 2 else '',
+            'period': f"{labels[0]} vs {labels[1]}" if len(labels) > 1 else (labels[0] if labels else ''),
+        }
     daily = ctx.get('daily_trend', [])
     ws_name = ctx.get('workspace_name', config.get('workspace_name', ''))
     ws_id = config.get('workspace_id', '')

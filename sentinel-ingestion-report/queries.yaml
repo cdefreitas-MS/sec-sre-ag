@@ -63,8 +63,6 @@ query: |
       BillableTableCount = dcountif(DataType, IsBillable == true)
   | extend BillablePercent = round(100.0 * BillableGB / TotalGB, 1)
 
-# ─── Phase 2: Deep Dives ─────────────────────────────────────────
-
 ---
 
 id: ingestion-q4
@@ -215,8 +213,6 @@ query: |
   | order by EstimatedGB desc
   | take 30
 
-# ─── Phase 3: Rules & Tiers ──────────────────────────────────────
-
 ---
 
 # Q9: Analytic Rule Inventory via Sentinel REST API
@@ -244,9 +240,7 @@ name: Custom Detection Rules
 description: Fetch Custom Detection rules via Microsoft Graph API
 phase: 3
 type: graph
-endpoint: /beta/security/rules/detectionRules
-select: id,displayName,isEnabled,queryCondition,schedule,detectionAction,lastRunDetails,createdDateTime,lastModifiedDateTime
-scope: CustomDetection.Read.All
+uri: /beta/security/rules/detectionRules?$select=id,displayName,isEnabled,queryCondition,schedule,detectionAction,lastRunDetails,createdDateTime,lastModifiedDateTime
 
 ---
 
@@ -260,7 +254,7 @@ name: Table Tier Classification
 description: Fetch table plan metadata via az monitor log-analytics workspace table list
 phase: 3
 type: cli
-command: az monitor log-analytics workspace table list --resource-group {resource_group} --workspace-name {workspace_name} --subscription {subscription_id} --query "[].{name:name, plan:plan}" -o json
+command: az monitor log-analytics workspace table list --resource-group {resource_group} --workspace-name {workspace_name} --subscription {subscription_id}
 
 ---
 
@@ -295,8 +289,6 @@ query: |
       Usage | where TimeGenerated > ago({days}d) | summarize round(sum(Quantity) / 1024, 3)
   ), 1)
   | order by BillableGB desc
-
-# ─── Phase 4: Detection Coverage ─────────────────────────────────
 
 ---
 
@@ -385,8 +377,6 @@ query: |
   | where IsBillable == true
   | distinct DataType
   | order by DataType asc
-
-# ─── Phase 5: Anomalies & Cost ───────────────────────────────────
 
 ---
 
