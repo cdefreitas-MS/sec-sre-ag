@@ -1,0 +1,535 @@
+# ═══════════════════════════════════════════════════════════════════
+# Sentinel Ingestion Report — Query Definitions
+# ═══════════════════════════════════════════════════════════════════
+# All queries used by invoke_ingestion_scan.py, grouped by phase.
+# Documents are separated by '---'.  Each document has an 'id',
+# 'phase', 'type', and the relevant query/url/endpoint fields.
+# ═══════════════════════════════════════════════════════════════════
+
+# ─── Phase 1: Usage Summary ──────────────────────────────────────
+
+id: ingestion-q1
+name: Usage by DataType with Billing Breakdown
+description: Top 20 tables ranked by billable volume with solution mapping
+phase: 1
+type: kql
+timespan: P{days}D
+query: |
+  Usage
+  | where TimeGenerated > ago({days}d)
+  | summarize
+      TotalGB = round(sum(Quantity) / 1024, 3),
+      BillableGB = round(sumif(Quantity, IsBillable == true) / 1024, 3),
+      NonBillableGB = round(sumif(Quantity, IsBillable == false) / 1024, 3),
+      DayCount = dcount(bin(TimeGenerated, 1d))
+      by DataType, Solution
+  | extend AvgDailyGB = iff(DayCount > 0, round(BillableGB / toreal(DayCount), 3), 0.0)
+  | project-away DayCount
+  | order by BillableGB desc
+  | take 20
+
+---
+
+id: ingestion-q2
+name: Daily Ingestion Trend
+description: Daily ingestion trend for pattern analysis and peak/min detection
+phase: 1
+type: kql
+timespan: P{days}D
+query: |
+  Usage
+  | where TimeGenerated > ago({days}d)
+  | summarize DailyGB = round(sum(Quantity) / 1024, 3) by bin(TimeGenerated, 1d)
+  | order by TimeGenerated asc
+
+---
+
+id: ingestion-q3
+name: Workspace Ingestion Summary
+description: Executive summary metrics - table count, billable totals, daily average
+phase: 1
+type: kql
+timespan: P{days}D
+query: |
+  Usage
+  | where TimeGenerated > ago({days}d)
+  | summarize
+      TotalTableCount = dcount(DataType),
+      TotalGB = round(sum(Quantity) / 1024, 3),
+      BillableGB = round(sumif(Quantity, IsBillable == true) / 1024, 3),
+      NonBillableGB = round(sumif(Quantity, IsBillable == false) / 1024, 3),
+      DayCount = dcount(bin(TimeGenerated, 1d)),
+      AvgDailyGB = round(sum(Quantity) / 1024 / dcount(bin(TimeGenerated, 1d)), 3),
+      BillableTableCount = dcountif(DataType, IsBillable == true)
+  | extend BillablePercent = round(100.0 * BillableGB / TotalGB, 1)
+
+# ─── Phase 2: Deep Dives ─────────────────────────────────────────
+
+---
+
+id: ingestion-q4
+name: SecurityEvent by Computer
+description: Top 25 computers by SecurityEvent volume. Identifies noisy endpoints for DCR filtering.
+phase: 2
+type: kql
+timespan: P{deepDiveDays}D
+query: |
+  let _total = toscalar(SecurityEvent | where TimeGenerated > ago({deepDiveDays}d) | summarize round(sum(estimate_data_size(*)) / 1024.0 / 1024.0 / 1024.0, 4));
+  let _totalServers = toscalar(SecurityEvent | where TimeGenerated > ago({deepDiveDays}d) | summarize dcount(Computer));
+  SecurityEvent
+  | where TimeGenerated > ago({deepDiveDays}d)
+  | summarize
+      EventCount = count(),
+      EstimatedGB = round(sum(estimate_data_size(*)) / 1024.0 / 1024.0 / 1024.0, 4)
+      by Computer
+  | extend
+      PercentOfTotal = iff(_total > 0, round(100.0 * EstimatedGB / _total, 1), 0.0),
+      TotalServers = _totalServers
+  | order by EstimatedGB desc
+  | take 25
+
+---
+
+id: ingestion-q5
+name: SecurityEvent by EventID
+description: Top 20 EventIDs by SecurityEvent volume. Identifies high-volume event types for DCR optimization.
+phase: 2
+type: kql
+timespan: P{deepDiveDays}D
+query: |
+  let _total = toscalar(SecurityEvent | where TimeGenerated > ago({deepDiveDays}d) | summarize round(sum(estimate_data_size(*)) / 1024.0 / 1024.0 / 1024.0, 4));
+  SecurityEvent
+  | where TimeGenerated > ago({deepDiveDays}d)
+  | summarize
+      EventCount = count(),
+      EstimatedGB = round(sum(estimate_data_size(*)) / 1024.0 / 1024.0 / 1024.0, 4)
+      by EventID
+  | extend PercentOfTotal = iff(_total > 0, round(100.0 * EstimatedGB / _total, 1), 0.0)
+  | order by EstimatedGB desc
+  | take 20
+
+---
+
+id: ingestion-q6a
+name: Syslog by Source Host
+description: Top 25 hosts by Syslog volume. Uses HostName when available to handle centralized forwarders.
+phase: 2
+type: kql
+timespan: P{deepDiveDays}D
+query: |
+  let _total = toscalar(Syslog | where TimeGenerated > ago({deepDiveDays}d) | summarize round(sum(estimate_data_size(*)) / 1024.0 / 1024.0 / 1024.0, 4));
+  Syslog
+  | where TimeGenerated > ago({deepDiveDays}d)
+  | extend SourceHost = iff(isnotempty(HostName) and HostName != Computer, HostName, Computer)
+  | summarize
+      EventCount = count(),
+      EstimatedGB = round(sum(estimate_data_size(*)) / 1024.0 / 1024.0 / 1024.0, 4),
+      Facilities = make_set(Facility),
+      SeverityLevels = make_set(SeverityLevel)
+      by SourceHost
+  | extend PercentOfTotal = iff(_total > 0, round(100.0 * EstimatedGB / _total, 1), 0.0)
+  | order by EstimatedGB desc
+  | take 25
+
+---
+
+id: ingestion-q6b
+name: Syslog by Facility and Severity
+description: Top 30 Facility x SeverityLevel combinations by volume. Maps directly to DCR severity-per-facility settings.
+phase: 2
+type: kql
+timespan: P{deepDiveDays}D
+query: |
+  let _total = toscalar(Syslog | where TimeGenerated > ago({deepDiveDays}d) | summarize round(sum(estimate_data_size(*)) / 1024.0 / 1024.0 / 1024.0, 4));
+  Syslog
+  | where TimeGenerated > ago({deepDiveDays}d)
+  | summarize
+      EventCount = count(),
+      EstimatedGB = round(sum(estimate_data_size(*)) / 1024.0 / 1024.0 / 1024.0, 4),
+      DistinctHosts = dcount(Computer)
+      by Facility, SeverityLevel
+  | extend PercentOfTotal = iff(_total > 0, round(100.0 * EstimatedGB / _total, 1), 0.0)
+  | order by EstimatedGB desc
+  | take 30
+
+---
+
+id: ingestion-q6c
+name: Syslog Top ProcessName by Facility
+description: Top 30 ProcessName x Facility combinations by volume. Identifies filterable processes within noisy facilities.
+phase: 2
+type: kql
+timespan: P{deepDiveDays}D
+query: |
+  let _total = toscalar(Syslog | where TimeGenerated > ago({deepDiveDays}d) | summarize round(sum(estimate_data_size(*)) / 1024.0 / 1024.0 / 1024.0, 4));
+  Syslog
+  | where TimeGenerated > ago({deepDiveDays}d)
+  | summarize
+      EventCount = count(),
+      EstimatedGB = round(sum(estimate_data_size(*)) / 1024.0 / 1024.0 / 1024.0, 4),
+      DistinctHosts = dcount(Computer)
+      by Facility, ProcessName
+  | extend PercentOfTotal = iff(_total > 0, round(100.0 * EstimatedGB / _total, 1), 0.0)
+  | order by EstimatedGB desc, EventCount desc
+  | take 30
+
+---
+
+id: ingestion-q7
+name: CommonSecurityLog by DeviceVendor
+description: Top 20 DeviceVendor x DeviceProduct by CEF volume. Identifies high-volume security appliances.
+phase: 2
+type: kql
+timespan: P{deepDiveDays}D
+query: |
+  let _total = toscalar(CommonSecurityLog | where TimeGenerated > ago({deepDiveDays}d) | summarize round(sum(estimate_data_size(*)) / 1024.0 / 1024.0 / 1024.0, 4));
+  CommonSecurityLog
+  | where TimeGenerated > ago({deepDiveDays}d)
+  | summarize
+      EventCount = count(),
+      EstimatedGB = round(sum(estimate_data_size(*)) / 1024.0 / 1024.0 / 1024.0, 4)
+      by DeviceVendor, DeviceProduct
+  | extend PercentOfTotal = iff(_total > 0, round(100.0 * EstimatedGB / _total, 1), 0.0)
+  | order by EstimatedGB desc
+  | take 20
+
+---
+
+id: ingestion-q8
+name: CommonSecurityLog by Activity
+description: Top 30 Activity x LogSeverity x DeviceAction by volume. Reveals filtering opportunities by event type.
+phase: 2
+type: kql
+timespan: P{deepDiveDays}D
+query: |
+  let _total = toscalar(CommonSecurityLog | where TimeGenerated > ago({deepDiveDays}d) | summarize round(sum(estimate_data_size(*)) / 1024.0 / 1024.0 / 1024.0, 4));
+  CommonSecurityLog
+  | where TimeGenerated > ago({deepDiveDays}d)
+  | summarize
+      EventCount = count(),
+      EstimatedGB = round(sum(estimate_data_size(*)) / 1024.0 / 1024.0 / 1024.0, 4),
+      DistinctSources = dcount(strcat(DeviceVendor, "|", DeviceProduct)),
+      DistinctSourceIPs = dcount(SourceIP)
+      by Activity, LogSeverity, DeviceAction
+  | extend PercentOfTotal = iff(_total > 0, round(100.0 * EstimatedGB / _total, 1), 0.0)
+  | order by EstimatedGB desc
+  | take 30
+
+# ─── Phase 3: Rules & Tiers ──────────────────────────────────────
+
+---
+
+# Q9: Analytic Rule Inventory via Sentinel REST API
+# Fetches all Scheduled + NRT analytic rules from the workspace.
+# Returns displayName, ruleId, query text, enabled state, and kind.
+# The query text is needed for Phase 4 cross-reference (which tables rules target).
+
+id: ingestion-q9
+name: Analytic Rule Inventory
+description: Fetch Scheduled + NRT analytic rules via Sentinel REST API (az rest)
+phase: 3
+type: rest
+url: https://management.azure.com/subscriptions/{subscription_id}/resourceGroups/{resource_group}/providers/Microsoft.OperationalInsights/workspaces/{workspace_name}/providers/Microsoft.SecurityInsights/alertRules?api-version=2024-03-01
+jmespath: value[?kind=='Scheduled' || kind=='NRT'].{displayName:properties.displayName, ruleId:name, query:properties.query, enabled:properties.enabled, kind:kind}
+
+---
+
+# Q9b: Custom Detection Rule Inventory via Microsoft Graph API
+# Fetches Custom Detection rules from Defender XDR via Graph beta endpoint.
+# Requires CustomDetection.Read.All scope.
+# May be skipped gracefully if auth unavailable — status recorded in scratchpad.
+
+id: ingestion-q9b
+name: Custom Detection Rules
+description: Fetch Custom Detection rules via Microsoft Graph API
+phase: 3
+type: graph
+endpoint: /beta/security/rules/detectionRules
+select: id,displayName,isEnabled,queryCondition,schedule,detectionAction,lastRunDetails,createdDateTime,lastModifiedDateTime
+scope: CustomDetection.Read.All
+
+---
+
+# Q10: Table Tier Classification via Azure CLI
+# Fetches table plan metadata (Analytics, Basic, Auxiliary/Data Lake) from the workspace.
+# Azure CLI internally reports Data Lake tier as plan "Auxiliary" — always relabel as "Data Lake".
+# The Usage table does NOT have a TablePlan column; Azure CLI is the only programmatic source.
+
+id: ingestion-q10
+name: Table Tier Classification
+description: Fetch table plan metadata via az monitor log-analytics workspace table list
+phase: 3
+type: cli
+command: az monitor log-analytics workspace table list --resource-group {resource_group} --workspace-name {workspace_name} --subscription {subscription_id} --query "[].{name:name, plan:plan}" -o json
+
+---
+
+# Q10b: Tier Summary via KQL
+# Cross-references Usage data with table tier classification from Q10 (Azure CLI).
+# Computes per-tier TotalGB, BillableGB, TableCount, PercentOfTotal.
+# DEPENDS ON: Q10 output — the DataLakeTables and BasicTables arrays are populated at runtime.
+
+id: ingestion-q10b
+name: Tier Summary
+description: Per-tier volume summary cross-referencing Usage with CLI tier classification
+phase: 3
+type: kql
+depends_on: ingestion-q10
+timespan: P{days}D
+query: |
+  let DataLakeTables = dynamic([{datalake_tables}]);
+  let BasicTables = dynamic([{basic_tables}]);
+  Usage
+  | where TimeGenerated > ago({days}d)
+  | extend Tier = case(
+      DataType in (DataLakeTables), 'Data Lake',
+      DataType in (BasicTables), 'Basic',
+      'Analytics'
+  )
+  | summarize
+      TotalGB = round(sum(Quantity) / 1024, 3),
+      BillableGB = round(sumif(Quantity, IsBillable == true) / 1024, 3),
+      TableCount = dcount(DataType)
+      by Tier
+  | extend PercentOfTotal = round(100.0 * TotalGB / toscalar(
+      Usage | where TimeGenerated > ago({days}d) | summarize round(sum(Quantity) / 1024, 3)
+  ), 1)
+  | order by BillableGB desc
+
+# ─── Phase 4: Detection Coverage ─────────────────────────────────
+
+---
+
+id: ingestion-q11
+name: Analytic Rule Execution Health Summary
+description: SentinelHealth rule execution summary — total rules, executions, failures, failing rule count. PartialSuccess treated as Success.
+phase: 4
+type: kql
+timespan: P{deepDiveDays}D
+query: |
+  SentinelHealth
+  | where TimeGenerated > ago({deepDiveDays}d)
+  | where SentinelResourceType == 'Analytics Rule'
+  | where OperationName in ('Scheduled analytics rule run', 'NRT analytics rule run')
+  | extend EffectiveStatus = iff(Status == 'Failure', 'Failure', 'Success')
+  | summarize
+      Executions = count(),
+      Successes = countif(EffectiveStatus == 'Success'),
+      Failures = countif(EffectiveStatus == 'Failure')
+      by SentinelResourceName, SentinelResourceKind
+  | summarize
+      TotalRules = dcount(SentinelResourceName),
+      TotalExec = sum(Executions),
+      TotalFail = sum(Failures),
+      FailingRules = dcountif(SentinelResourceName, Failures > 0),
+      NRTRules = dcountif(SentinelResourceName, SentinelResourceKind == 'NRT'),
+      ScheduledRules = dcountif(SentinelResourceName, SentinelResourceKind == 'Scheduled')
+
+---
+
+id: ingestion-q11d
+name: Failing Analytic Rule Detail
+description: Top 20 failing rules from SentinelHealth. Failure-only rows with sample error message.
+phase: 4
+type: kql
+timespan: P{deepDiveDays}D
+query: |
+  SentinelHealth
+  | where TimeGenerated > ago({deepDiveDays}d)
+  | where SentinelResourceType == 'Analytics Rule'
+  | where Status == 'Failure'
+  | summarize
+      FailureCount = count(),
+      LastFailure = max(TimeGenerated),
+      SampleError = take_any(Description)
+      by SentinelResourceName
+  | order by FailureCount desc
+  | take 20
+
+---
+
+id: ingestion-q12
+name: SecurityAlert Firing by Analytic Rule
+description: Top 30 alert-producing Sentinel analytic rules with severity distribution. ProviderName ASI Scheduled Alerts covers Scheduled, NRT, and solution-based rules.
+phase: 4
+type: kql
+timespan: P{days}D
+query: |
+  SecurityAlert
+  | where TimeGenerated > ago({days}d)
+  | where ProviderName == 'ASI Scheduled Alerts'
+  | extend RuleId = extract(@'_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$', 1, AlertType)
+  | summarize
+      AlertCount = count(),
+      FirstAlert = min(TimeGenerated),
+      LastAlert = max(TimeGenerated),
+      HighSev = countif(AlertSeverity == 'High'),
+      MediumSev = countif(AlertSeverity == 'Medium'),
+      LowSev = countif(AlertSeverity == 'Low'),
+      InfoSev = countif(AlertSeverity == 'Informational')
+      by AlertName, RuleId, ProductComponentName
+  | order by AlertCount desc
+  | take 30
+
+---
+
+id: ingestion-q13
+name: All Tables with Usage Data
+description: All distinct DataType values from Usage — provides complete table list for Phase 4 cross-reference
+phase: 4
+type: kql
+timespan: P{days}D
+query: |
+  Usage
+  | where TimeGenerated > ago({days}d)
+  | where IsBillable == true
+  | distinct DataType
+  | order by DataType asc
+
+# ─── Phase 5: Anomalies & Cost ───────────────────────────────────
+
+---
+
+id: ingestion-q14
+name: Ingestion Anomaly Detection (24h vs same-weekday avg)
+description: Top 20 tables where last-24h ingestion deviates >50% from same-weekday historical average (4-week lookback, min 3 data points). Falls back to flat 7d daily average when insufficient same-weekday history exists. Min 0.01 GB volume floor.
+phase: 5
+type: kql
+timespan: P30D
+query: |
+  let targetDow = dayofweek(ago(12h));
+  let last24h = Usage
+  | where TimeGenerated > ago(24h)
+  | summarize Last24hGB = round(sum(Quantity) / 1024, 2) by DataType;
+  let sameWeekday = Usage
+  | where TimeGenerated between (ago(29d) .. ago(1d))
+  | where dayofweek(TimeGenerated) == targetDow
+  | summarize WkdayTotalGB = sum(Quantity) / 1024,
+      WkdayCount = dcount(startofday(TimeGenerated)) by DataType;
+  let flatAvg = Usage
+  | where TimeGenerated between (ago(8d) .. ago(1d))
+  | summarize FlatAvgGB = round(sum(Quantity) / 1024 / 7, 2) by DataType;
+  last24h
+  | join kind=inner flatAvg on DataType
+  | join kind=leftouter sameWeekday on DataType
+  | extend Avg7dDailyGB = iff(isnotnull(WkdayCount) and WkdayCount >= 3,
+      round(WkdayTotalGB / WkdayCount, 2),
+      FlatAvgGB)
+  | extend DeviationPercent = round(100.0 * (Last24hGB - Avg7dDailyGB) / Avg7dDailyGB, 1)
+  | where abs(DeviationPercent) > 50
+  | where max_of(Last24hGB, Avg7dDailyGB) >= 0.01
+  | project DataType, Last24hGB, Avg7dDailyGB, DeviationPercent
+  | order by abs(DeviationPercent) desc
+  | take 20
+
+---
+
+id: ingestion-q15
+name: Week-over-Week Comparison
+description: Tables with >20% WoW change OR >0.1 GB this week, min 0.01 GB floor
+phase: 5
+type: kql
+timespan: P{wowTotalDays}D
+query: |
+  let thisWeek = Usage
+  | where TimeGenerated > ago({deepDiveDays}d)
+  | summarize ThisWeekGB = round(sum(Quantity) / 1024, 2) by DataType;
+  let lastWeek = Usage
+  | where TimeGenerated between (ago({wowTotalDays}d) .. ago({deepDiveDays}d))
+  | summarize LastWeekGB = round(sum(Quantity) / 1024, 2) by DataType;
+  thisWeek
+  | join kind=fullouter lastWeek on DataType
+  | extend DataType = coalesce(DataType, DataType1),
+      ThisWeekGB = coalesce(ThisWeekGB, 0.0),
+      LastWeekGB = coalesce(LastWeekGB, 0.0)
+  | extend ChangePercent = iff(LastWeekGB == 0, 100.0, round(100.0 * (ThisWeekGB - LastWeekGB) / LastWeekGB, 1))
+  | where abs(ChangePercent) > 20 or ThisWeekGB > 0.1
+  | where max_of(ThisWeekGB, LastWeekGB) >= 0.01
+  | order by abs(ChangePercent) desc
+  | take 20
+
+---
+
+id: ingestion-q16
+name: Tier Migration Candidates
+description: All billable tables with >0.01 GB — volume ranking for migration classification
+phase: 5
+type: kql
+timespan: P{deepDiveDays}D
+query: |
+  Usage
+  | where TimeGenerated > ago({deepDiveDays}d)
+  | where IsBillable == true
+  | summarize BillableGB = round(sum(Quantity) / 1024, 2) by DataType
+  | where BillableGB > 0.01
+  | order by BillableGB desc
+
+---
+
+id: ingestion-q17
+name: License Benefit Analysis
+description: Daily billable ingestion broken into DfSP2-eligible, E5/XDR-eligible, and remaining
+phase: 5
+type: kql
+timespan: P{days}D
+query: |
+  let TotalBillable = Usage
+  | where IsBillable == true
+  | summarize TotalGB = sum(Quantity) / 1000 by Day = bin(TimeGenerated, 1d)
+  | extend TotalGB = todouble(TotalGB);
+  let DFSP2Eligible = Usage
+  | where IsBillable == true
+  | where DataType in ('SecurityAlert', 'SecurityBaseline', 'SecurityBaselineSummary',
+      'SecurityDetection', 'SecurityEvent', 'WindowsFirewall',
+      'MaliciousIPCommunication', 'SysmonEvent', 'ProtectionStatus',
+      'Update', 'UpdateSummary')
+  | summarize DFSP2GB = sum(Quantity) / 1000 by Day = bin(TimeGenerated, 1d)
+  | extend DFSP2GB = todouble(DFSP2GB);
+  let E5Eligible = Usage
+  | where IsBillable == true
+  | where DataType in ('SigninLogs', 'AuditLogs', 'AADNonInteractiveUserSignInLogs',
+      'AADServicePrincipalSignInLogs', 'AADManagedIdentitySignInLogs',
+      'AADProvisioningLogs', 'ADFSSignInLogs', 'McasShadowItReporting',
+      'InformationProtectionLogs_CL', 'DeviceEvents', 'DeviceFileEvents',
+      'DeviceImageLoadEvents', 'DeviceInfo', 'DeviceLogonEvents',
+      'DeviceNetworkEvents', 'DeviceNetworkInfo', 'DeviceProcessEvents',
+      'DeviceRegistryEvents', 'DeviceFileCertificateInfo',
+      'EmailAttachmentInfo', 'EmailEvents', 'EmailPostDeliveryEvents',
+      'EmailUrlInfo', 'IdentityLogonEvents', 'IdentityQueryEvents',
+      'IdentityDirectoryEvents', 'AlertEvidence', 'CloudAppEvents',
+      'DynamicEventCollection')
+  | summarize E5GB = sum(Quantity) / 1000 by Day = bin(TimeGenerated, 1d)
+  | extend E5GB = todouble(E5GB);
+  TotalBillable
+  | join kind=fullouter DFSP2Eligible on Day
+  | join kind=fullouter E5Eligible on Day
+  | extend RemainingGB = todouble(TotalGB) - coalesce(DFSP2GB, 0.0) - coalesce(E5GB, 0.0)
+  | project Day, TotalGB, DFSP2GB, E5GB, RemainingGB
+  | order by Day asc
+
+---
+
+id: ingestion-q17b
+name: E5-Eligible Per-Table Breakdown
+description: Per-table billable volume for all 29 E5-eligible tables
+phase: 5
+type: kql
+timespan: P{days}D
+query: |
+  Usage
+  | where TimeGenerated > ago({days}d)
+  | where IsBillable == true
+  | where DataType in ('SigninLogs', 'AuditLogs', 'AADNonInteractiveUserSignInLogs',
+      'AADServicePrincipalSignInLogs', 'AADManagedIdentitySignInLogs',
+      'AADProvisioningLogs', 'ADFSSignInLogs', 'McasShadowItReporting',
+      'InformationProtectionLogs_CL', 'DeviceEvents', 'DeviceFileEvents',
+      'DeviceImageLoadEvents', 'DeviceInfo', 'DeviceLogonEvents',
+      'DeviceNetworkEvents', 'DeviceNetworkInfo', 'DeviceProcessEvents',
+      'DeviceRegistryEvents', 'DeviceFileCertificateInfo',
+      'EmailAttachmentInfo', 'EmailEvents', 'EmailPostDeliveryEvents',
+      'EmailUrlInfo', 'IdentityLogonEvents', 'IdentityQueryEvents',
+      'IdentityDirectoryEvents', 'AlertEvidence', 'CloudAppEvents',
+      'DynamicEventCollection')
+  | summarize VolumeGB = round(sum(Quantity) / 1024, 3) by DataType
+  | where VolumeGB > 0
+  | order by VolumeGB desc

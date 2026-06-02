@@ -1,0 +1,226 @@
+# SVG Dashboard Widget Manifest — MCP Usage Monitoring Report
+#
+# This file defines the layout and data mapping for generating an SVG dashboard
+# from a completed MCP Usage Monitoring report. It is consumed by the shared SVG
+# rendering skill at .github/skills/svg-dashboard/SKILL.md
+#
+# Usage:  After generating an MCP usage report, ask:
+#           "Generate an SVG dashboard from the report"
+#         Copilot will read this manifest + the report data + the skill,
+#         then produce a single SVG file in reports/mcp-usage/.
+#
+# Customization:  Tweak rows, reorder widgets, add/remove items, change colors.
+#                 The renderer adapts to whatever is defined here.
+
+# ─── Canvas ──────────────────────────────────────────────────────────────────
+canvas:
+  width: 1400
+  height: 1100          # slimmed: 5 rows, 10 widgets — stays within output token limits
+  background: "#0d1117"
+  padding: 30
+  row_gap: 20
+  col_gap: 20
+  font_family: "Segoe UI, Roboto, sans-serif"
+
+# ─── Color Palette ───────────────────────────────────────────────────────────
+# Aligned with SharePoint Dark Theme:
+# https://learn.microsoft.com/en-us/sharepoint/dev/design/themes-colors
+palette:
+  primary: "#409AE1"      # blue   — KPI highlights, trend lines, primary data
+  secondary: "#b4a0ff"    # purple — secondary charts, tier badges
+  accent: "#FFC83D"       # yellow — warnings, anomalies
+  danger: "#EF6950"       # red    — critical findings, high error rates
+  success: "#40C5AF"      # green  — healthy metrics, low error
+  muted: "#b2b2b2"        # gray   — labels, axis text
+  card_bg: "#161b22"      # dark card background
+  card_border: "#30363d"  # subtle border
+  text_primary: "#e6edf3"
+  text_secondary: "#b2b2b2"
+
+# ─── MCP Server Colors (consistent across all widgets) ──────────────────────
+server_colors:
+  graph_mcp: "#409AE1"       # blue — Graph MCP
+  triage_mcp: "#40C5AF"      # green — Triage MCP (primary workhorse)
+  data_lake_mcp: "#b4a0ff"   # purple — Data Lake MCP
+  azure_mcp: "#FFC83D"       # yellow — Azure MCP
+
+# ─── Row Definitions ─────────────────────────────────────────────────────────
+# TOKEN-BUDGET LAYOUT: 5 rows, 10 widgets, ~1100px height
+# Designed to stay within LLM output token limits for SVG generation.
+# Dropped: Row 6 (Users & Auth — single user, data in landscape table),
+#          Row 7 (Recommendations — folded into Row 5),
+#          Row 8 (Assessment — duplicates score card context).
+# Merged:  Row 4 server deep-dives consolidated into 1 bar chart + 1 donut.
+# Trimmed: KPI cards 7→4, line chart 4→2 series (weekly), bar max_items reduced.
+
+rows:
+
+  # ── ROW 1: Title Bar ────────────────────────────────────────────────────────
+  - id: title-bar
+    height: 70
+    widgets:
+      - type: title-banner
+        fields:
+          title: "MCP Usage Monitoring Dashboard"
+          subtitle_fields:
+            - workspace_name        # from report header
+            - report_period         # e.g. "Feb 19 – Mar 21, 2026"
+            - generation_date       # e.g. "2026-03-21"
+        style:
+          title_align: center
+          title_size: 26
+          subtitle_size: 13
+          accent_color: palette.primary
+
+  # ── ROW 2: MCP Usage Score + KPI Cards ──────────────────────────────────────
+  # Kept: Score card + 4 highest-value KPIs. Dropped: Auth Events, Active Servers
+  # (both visible in the Server Landscape table in Row 3).
+  - id: score-and-kpis
+    height: 150
+    widgets:
+      - type: score-card
+        title: "MCP Usage Score"
+        field: mcp_usage_score              # from Score Card — 0-100
+        width_pct: 25
+        ranges:
+          - { min: 0,  max: 25, color: palette.success, label: "Healthy" }
+          - { min: 26, max: 50, color: palette.accent,  label: "Elevated" }
+          - { min: 51, max: 75, color: "#EF6950",       label: "Concerning" }
+          - { min: 76, max: 100, color: palette.danger,  label: "Critical" }
+        show_rating_label: true
+
+      - type: kpi-card
+        label: "Total API Calls"
+        field: total_mcp_api_calls          # from §3 MCP Footprint Summary
+        unit: "calls"
+        icon: "activity"
+
+      - type: kpi-card
+        label: "Distinct Users"
+        field: distinct_mcp_users           # from §3
+        unit: "users"
+        icon: "users"
+
+      - type: kpi-card
+        label: "MCP Query Share"
+        field: mcp_query_share_pct          # from §3 — MCP as % of workspace queries
+        unit: "%"
+        icon: "pie-chart"
+        highlight_color: palette.success
+
+      - type: kpi-card
+        label: "Sensitive API Rate"
+        field: sensitive_endpoint_pct       # from §3 — % calls to sensitive endpoints
+        unit: "%"
+        icon: "alert-triangle"
+        highlight_color: palette.danger
+
+  # ── ROW 3: Score Dimensions + Server Landscape ─────────────────────────────
+  - id: score-breakdown
+    height: 250
+    widgets:
+      - type: horizontal-bar-chart
+        title: "Score Dimensions"
+        field: score_dimensions             # array of {name, score, max, rating}
+        width_pct: 35
+        max_items: 5
+        bar_color_by: rating               # High=danger, Medium=accent, Low=success
+        show_value_label: true
+        show_max: true                     # e.g. "14/20"
+        bar_format: "score/max"
+
+      - type: table-widget
+        title: "MCP Server Landscape"
+        field: server_landscape             # from §3 — array of {server, calls, auth_events, users, error_rate, status}
+        width_pct: 65
+        columns:
+          - { header: "MCP Server",   field: "server",      width: 22, color_by: "server_colors" }
+          - { header: "API Calls",    field: "calls",        width: 16 }
+          - { header: "Auth Events",  field: "auth_events",  width: 16 }
+          - { header: "Users",        field: "users",        width: 10 }
+          - { header: "Error Rate",   field: "error_rate",   width: 16, color_scale: true }
+          - { header: "Status",       field: "status",       width: 20, badge: true }
+
+  # ── ROW 4: Combined Endpoints + MCP vs Direct KQL ─────────────────────────
+  # MERGED: 3 separate per-server bar charts → 1 combined bar chart (top 5
+  # endpoints across all servers, color-coded by server_colors). Keeps donut.
+  - id: server-overview
+    height: 280
+    widgets:
+      - type: horizontal-bar-chart
+        title: "Top Endpoints (All Servers)"
+        field: top_endpoints_combined       # top 5 endpoints across Graph+Triage+Data Lake, color-coded by server
+        width_pct: 55
+        max_items: 5
+        bar_color_by: server               # color each bar by its server_colors entry
+        show_value_label: true
+        highlight_sensitive: true           # flag sensitive endpoints
+        # Data derivation: merge graph_mcp_endpoints + triage_mcp_endpoints +
+        # data_lake_tool_breakdown, sort by calls desc, take top 5.
+        # Include server name in label for disambiguation.
+
+      - type: table-widget
+        title: "Top MCP Users"
+        field: top_mcp_users                # from §9 — array of {rank, user, servers_used, servers, total_calls}
+        width_pct: 45
+        columns:
+          - { header: "#",            field: "rank",         width: 8 }
+          - { header: "User",         field: "user",         width: 32 }
+          - { header: "Servers",      field: "servers_used",  width: 14 }
+          - { header: "MCP Servers",  field: "servers",      width: 28 }
+          - { header: "Calls",        field: "total_calls",  width: 18 }
+        max_rows: 5
+        # Data derivation: Query 15 cross-server user breadth results.
+        # Rank by ServerCount desc, TotalCalls desc. Truncate UPN to display name where possible.
+
+  # ── ROW 5: Weekly Trend + Recommendations ──────────────────────────────────
+  # Line chart: 2 series only (Triage + Data Lake — these dominate 95%+ of volume).
+  # Graph MCP (53 calls) and Azure MCP (73 auth events) are low-volume noise at
+  # this scale; their data is captured in the landscape table.
+  # Resampled to weekly to cap data points at ~8 per series.
+  # Recommendations: condensed to 3 cards max.
+  - id: trends-and-recs
+    height: 280
+    widgets:
+      - type: line-chart
+        title: "Weekly MCP Activity Trend"
+        field: daily_mcp_trend              # resample to weekly (sum per ISO week)
+        width_pct: 55
+        multi_series: true
+        resample: "weekly"                  # aggregate daily → weekly to reduce data points
+        series:
+          - { field: "triage_mcp",    label: "Triage MCP",    color: server_colors.triage_mcp }
+          - { field: "data_lake_mcp", label: "Data Lake MCP", color: server_colors.data_lake_mcp }
+        x_label: "Week"
+        y_label: "Calls"
+
+      - type: recommendation-cards
+        title: "Top Recommendations"
+        field: recommendations              # from §12 — array of {priority, title, description}
+        width_pct: 45
+        card_colors:
+          high: palette.danger
+          medium: palette.accent
+          low: palette.muted
+        max_cards: 3
+
+# ─── Data Source Mapping ─────────────────────────────────────────────────────
+# Maps YAML field names above to report sections.
+# The renderer extracts values from the markdown report.
+data_sources:
+  report_file: "reports/mcp-usage/MCP_Usage_Report_*.md"
+  field_mapping_notes: |
+    Header      → workspace_name, report_period, generation_date
+    §3 (MCP Footprint)   → server_landscape table, total_mcp_api_calls,
+                            distinct_mcp_users, mcp_query_share_pct,
+                            sensitive_endpoint_pct
+    §4 (Graph MCP)       → graph_mcp_endpoints (for top_endpoints_combined merge)
+    §5 (Triage MCP)      → triage_mcp_endpoints (for top_endpoints_combined merge),
+                            daily_mcp_trend.triage_mcp
+    §6 (Data Lake MCP)   → data_lake_tool_breakdown (for top_endpoints_combined merge),
+                            daily_mcp_trend.data_lake_mcp
+    §9 (Top MCP Users)   → top_mcp_users (rank, user, servers_used, servers, total_calls)
+    §10 (Score)          → mcp_usage_score, score_dimensions (5 dims × score/max/rating)
+    §12 (Recommendations)→ recommendations (priority, title, description)
+    Combined             → top_endpoints_combined (merge §4+§5+§6 endpoints, top 5 by calls)
+    Combined             → daily_mcp_trend (weekly resample of §5+§6 daily trends)

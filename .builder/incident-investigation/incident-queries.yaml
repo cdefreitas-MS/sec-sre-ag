@@ -1,0 +1,365 @@
+# Incident Investigation — KQL Queries for Azure Monitor MCP
+# These queries replace the Sentinel Triage MCP tools (GetIncidentById, ListAlerts, etc.)
+# Execute via: monitor-client_monitor_workspace_log_query
+#
+# Replace placeholders:
+#   <INCIDENT_ID>  — numeric incident ID or ProviderIncidentId
+#   <INCIDENT_GUID> — Sentinel GUID (SecurityIncident.IncidentName)
+#   <StartDate>     — ISO 8601 start (e.g., 2026-01-16T00:00:00Z)
+#   <EndDate>       — ISO 8601 end   (e.g., 2026-01-25T00:00:00Z)
+
+---
+
+# Q1. Incident Metadata (by numeric ID or ProviderIncidentId)
+# Returns: Title, Description, Severity, Status, Classification, Owner, MITRE tactics, etc.
+# Use ProviderIncidentId for mapping to Defender XDR incident IDs.
+id: Q1-IncidentMetadata
+table: SecurityIncident
+query: |
+  SecurityIncident
+  | where IncidentNumber == <INCIDENT_ID> or ProviderIncidentId == "<INCIDENT_ID>"
+  | summarize arg_max(TimeGenerated, *) by IncidentNumber
+  | project
+      IncidentNumber,
+      IncidentName,
+      ProviderIncidentId,
+      Title,
+      Description,
+      Severity,
+      Status,
+      Classification,
+      ClassificationComment,
+      ClassificationReason,
+      Owner = parse_json(Owner),
+      FirstActivityTime,
+      LastActivityTime,
+      CreatedTime,
+      LastModifiedTime,
+      ClosedTime,
+      AlertIds,
+      AdditionalData,
+      Labels,
+      ProviderName
+
+---
+
+# Q1b. Incident Metadata (by GUID / IncidentName)
+id: Q1b-IncidentMetadataByGuid
+table: SecurityIncident
+query: |
+  SecurityIncident
+  | where IncidentName == "<INCIDENT_GUID>"
+  | summarize arg_max(TimeGenerated, *) by IncidentNumber
+  | project
+      IncidentNumber,
+      IncidentName,
+      ProviderIncidentId,
+      Title,
+      Description,
+      Severity,
+      Status,
+      Classification,
+      ClassificationComment,
+      ClassificationReason,
+      Owner = parse_json(Owner),
+      FirstActivityTime,
+      LastActivityTime,
+      CreatedTime,
+      LastModifiedTime,
+      ClosedTime,
+      AlertIds,
+      AdditionalData,
+      Labels,
+      ProviderName
+
+---
+
+# Q2. Incident Alerts — all alerts correlated to the incident
+# Joins SecurityIncident.AlertIds with SecurityAlert.SystemAlertId.
+# Returns: Alert name, severity, status, tactics, detection source, timestamps.
+id: Q2-IncidentAlerts
+table: SecurityIncident
+query: |
+  let incidentAlertIds = SecurityIncident
+  | where IncidentNumber == <INCIDENT_ID> or ProviderIncidentId == "<INCIDENT_ID>"
+  | summarize arg_max(TimeGenerated, *) by IncidentNumber
+  | mv-expand AlertId = parse_json(AlertIds)
+  | extend AlertId = tostring(AlertId)
+  | distinct AlertId;
+  SecurityAlert
+  | where SystemAlertId in (incidentAlertIds)
+  | summarize arg_max(TimeGenerated, *) by SystemAlertId
+  | project
+      SystemAlertId,
+      AlertName,
+      AlertSeverity,
+      Status,
+      Tactics,
+      Techniques,
+      ProviderName,
+      ProductName,
+      StartTime,
+      EndTime,
+      TimeGenerated,
+      CompromisedEntity,
+      Entities,
+      Description,
+      RemediationSteps,
+      ExtendedProperties
+  | order by EndTime desc
+
+---
+
+# Q3. Incident Assets — Entities extracted from alert data
+# Extracts users, devices, IPs, URLs, files, etc. from SecurityAlert Entities JSON.
+id: Q3-IncidentEntities
+table: SecurityIncident
+query: |
+  let incidentAlertIds = SecurityIncident
+  | where IncidentNumber == <INCIDENT_ID> or ProviderIncidentId == "<INCIDENT_ID>"
+  | summarize arg_max(TimeGenerated, *) by IncidentNumber
+  | mv-expand AlertId = parse_json(AlertIds)
+  | extend AlertId = tostring(AlertId)
+  | distinct AlertId;
+  SecurityAlert
+  | where SystemAlertId in (incidentAlertIds)
+  | mv-expand Entity = parse_json(Entities)
+  | extend EntityType = tostring(Entity.Type)
+  | extend EntityName = case(
+      EntityType == "account", strcat(tostring(Entity.Name), "@", tostring(Entity.UPNSuffix)),
+      EntityType == "host", tostring(Entity.HostName),
+      EntityType == "ip", tostring(Entity.Address),
+      EntityType == "url", tostring(Entity.Url),
+      EntityType == "file", tostring(Entity.Name),
+      EntityType == "filehash", tostring(Entity.Value),
+      EntityType == "dns", tostring(Entity.DomainName),
+      EntityType == "process", tostring(Entity.ProcessId),
+      EntityType == "mailbox", tostring(Entity.MailboxPrimaryAddress),
+      EntityType == "cloud-application", tostring(Entity.Name),
+      tostring(Entity.Name)
+  )
+  | extend EntityDetail = tostring(Entity)
+  | summarize
+      AlertCount = dcount(SystemAlertId),
+      Alerts = make_set(AlertName, 5),
+      FirstSeen = min(TimeGenerated),
+      LastSeen = max(TimeGenerated)
+      by EntityType, EntityName
+  | order by EntityType asc, AlertCount desc
+
+---
+
+# Q4. Incident Evidences — Malicious/Suspicious evidence from AlertEvidence
+# Uses AlertInfo + AlertEvidence (Log Analytics synced from M365D).
+# Filters for malicious or suspicious verdicts only.
+id: Q4-IncidentEvidences
+table: SecurityIncident
+query: |
+  let incidentAlertIds = SecurityIncident
+  | where IncidentNumber == <INCIDENT_ID> or ProviderIncidentId == "<INCIDENT_ID>"
+  | summarize arg_max(TimeGenerated, *) by IncidentNumber
+  | mv-expand AlertId = parse_json(AlertIds)
+  | extend AlertId = tostring(AlertId)
+  | distinct AlertId;
+  AlertEvidence
+  | where AlertId in (incidentAlertIds)
+  | where EvidenceRole in ("Attacker", "Related") or Title has "malicious" or Title has "suspicious"
+  | project
+      TimeGenerated,
+      AlertId,
+      Title,
+      EntityType,
+      EvidenceRole,
+      EvidenceDirection,
+      RemoteIP,
+      RemoteUrl,
+      FileName,
+      FolderPath,
+      SHA1,
+      SHA256,
+      ProcessCommandLine,
+      DeviceName,
+      AccountName,
+      AccountDomain,
+      AccountUpn,
+      Categories,
+      RegistryKey,
+      RegistryValueName,
+      RegistryValueData,
+      AdditionalFields
+  | order by TimeGenerated desc
+
+---
+
+# Q5. Incident User Assets — Distinct users involved
+# Extracts unique user entities from the incident's alerts.
+id: Q5-IncidentUsers
+table: SecurityIncident
+query: |
+  let incidentAlertIds = SecurityIncident
+  | where IncidentNumber == <INCIDENT_ID> or ProviderIncidentId == "<INCIDENT_ID>"
+  | summarize arg_max(TimeGenerated, *) by IncidentNumber
+  | mv-expand AlertId = parse_json(AlertIds)
+  | extend AlertId = tostring(AlertId)
+  | distinct AlertId;
+  SecurityAlert
+  | where SystemAlertId in (incidentAlertIds)
+  | mv-expand Entity = parse_json(Entities)
+  | where tostring(Entity.Type) == "account"
+  | extend UPN = tolower(strcat(tostring(Entity.Name), "@", tostring(Entity.UPNSuffix)))
+  | extend DisplayName = tostring(Entity.DisplayName)
+  | extend ObjectId = tostring(Entity.AadUserId)
+  | extend Sid = tostring(Entity.Sid)
+  | extend IsDomainJoined = tostring(Entity.IsDomainJoined)
+  | where isnotempty(UPN) and UPN != "@"
+  | summarize
+      AlertCount = dcount(SystemAlertId),
+      ObjectIds = make_set(ObjectId, 1),
+      DisplayNames = make_set(DisplayName, 1)
+      by UPN
+  | extend ObjectId = tostring(ObjectIds[0]), DisplayName = tostring(DisplayNames[0])
+  | project UPN, DisplayName, ObjectId, AlertCount
+
+---
+
+# Q6. Incident Device Assets — Distinct devices involved
+id: Q6-IncidentDevices
+table: SecurityIncident
+query: |
+  let incidentAlertIds = SecurityIncident
+  | where IncidentNumber == <INCIDENT_ID> or ProviderIncidentId == "<INCIDENT_ID>"
+  | summarize arg_max(TimeGenerated, *) by IncidentNumber
+  | mv-expand AlertId = parse_json(AlertIds)
+  | extend AlertId = tostring(AlertId)
+  | distinct AlertId;
+  SecurityAlert
+  | where SystemAlertId in (incidentAlertIds)
+  | mv-expand Entity = parse_json(Entities)
+  | where tostring(Entity.Type) == "host"
+  | extend HostName = tostring(Entity.HostName)
+  | extend DnsDomain = tostring(Entity.DnsDomain)
+  | extend FQDN = iff(isnotempty(DnsDomain), strcat(HostName, ".", DnsDomain), HostName)
+  | extend OSFamily = tostring(Entity.OSFamily)
+  | extend OSVersion = tostring(Entity.OSVersion)
+  | extend MdatpDeviceId = tostring(Entity.MdatpDeviceId)
+  | extend AadDeviceId = tostring(Entity.AadDeviceId)
+  | extend IsDomainJoined = tostring(Entity.IsDomainJoined)
+  | where isnotempty(HostName)
+  | summarize
+      AlertCount = dcount(SystemAlertId),
+      MdatpDeviceIds = make_set(MdatpDeviceId, 1),
+      AadDeviceIds = make_set(AadDeviceId, 1)
+      by FQDN, HostName, OSFamily, OSVersion, IsDomainJoined
+  | extend MdatpDeviceId = tostring(MdatpDeviceIds[0]), AadDeviceId = tostring(AadDeviceIds[0])
+  | project FQDN, HostName, OSFamily, OSVersion, IsDomainJoined, MdatpDeviceId, AadDeviceId, AlertCount
+
+---
+
+# Q7. Incident IP Evidence — Distinct IPs (filtered: no RFC1918)
+id: Q7-IncidentIPs
+table: SecurityIncident
+query: |
+  let incidentAlertIds = SecurityIncident
+  | where IncidentNumber == <INCIDENT_ID> or ProviderIncidentId == "<INCIDENT_ID>"
+  | summarize arg_max(TimeGenerated, *) by IncidentNumber
+  | mv-expand AlertId = parse_json(AlertIds)
+  | extend AlertId = tostring(AlertId)
+  | distinct AlertId;
+  SecurityAlert
+  | where SystemAlertId in (incidentAlertIds)
+  | mv-expand Entity = parse_json(Entities)
+  | where tostring(Entity.Type) == "ip"
+  | extend IPAddress = tostring(Entity.Address)
+  | where isnotempty(IPAddress)
+  | where not(ipv4_is_private(IPAddress))
+  | summarize
+      AlertCount = dcount(SystemAlertId),
+      Alerts = make_set(AlertName, 5),
+      FirstSeen = min(TimeGenerated),
+      LastSeen = max(TimeGenerated)
+      by IPAddress
+  | order by AlertCount desc
+
+---
+
+# Q8. Incident URL/Domain Evidence — Distinct URLs and domains
+id: Q8-IncidentURLsDomains
+table: SecurityIncident
+query: |
+  let incidentAlertIds = SecurityIncident
+  | where IncidentNumber == <INCIDENT_ID> or ProviderIncidentId == "<INCIDENT_ID>"
+  | summarize arg_max(TimeGenerated, *) by IncidentNumber
+  | mv-expand AlertId = parse_json(AlertIds)
+  | extend AlertId = tostring(AlertId)
+  | distinct AlertId;
+  SecurityAlert
+  | where SystemAlertId in (incidentAlertIds)
+  | mv-expand Entity = parse_json(Entities)
+  | where tostring(Entity.Type) in ("url", "dns")
+  | extend EntityType = tostring(Entity.Type)
+  | extend Value = case(
+      EntityType == "url", tostring(Entity.Url),
+      EntityType == "dns", tostring(Entity.DomainName),
+      "")
+  | where isnotempty(Value)
+  | summarize
+      AlertCount = dcount(SystemAlertId),
+      Alerts = make_set(AlertName, 5),
+      FirstSeen = min(TimeGenerated),
+      LastSeen = max(TimeGenerated)
+      by EntityType, Value
+  | order by AlertCount desc
+
+---
+
+# Q9. Incident File Hash Evidence — Distinct file hashes
+id: Q9-IncidentFileHashes
+table: SecurityIncident
+query: |
+  let incidentAlertIds = SecurityIncident
+  | where IncidentNumber == <INCIDENT_ID> or ProviderIncidentId == "<INCIDENT_ID>"
+  | summarize arg_max(TimeGenerated, *) by IncidentNumber
+  | mv-expand AlertId = parse_json(AlertIds)
+  | extend AlertId = tostring(AlertId)
+  | distinct AlertId;
+  SecurityAlert
+  | where SystemAlertId in (incidentAlertIds)
+  | mv-expand Entity = parse_json(Entities)
+  | where tostring(Entity.Type) in ("file", "filehash")
+  | extend EntityType = tostring(Entity.Type)
+  | extend FileName = tostring(Entity.Name)
+  | extend HashAlgorithm = tostring(Entity.Algorithm)
+  | extend HashValue = tostring(Entity.Value)
+  | extend Directory = tostring(Entity.Directory)
+  | where isnotempty(HashValue) or isnotempty(FileName)
+  | summarize
+      AlertCount = dcount(SystemAlertId),
+      Alerts = make_set(AlertName, 5),
+      FirstSeen = min(TimeGenerated),
+      LastSeen = max(TimeGenerated)
+      by FileName, HashAlgorithm, HashValue, Directory
+  | order by AlertCount desc
+
+---
+
+# Q10. Incident MITRE Tactics & Techniques
+id: Q10-IncidentMITRE
+table: SecurityIncident
+query: |
+  let incidentAlertIds = SecurityIncident
+  | where IncidentNumber == <INCIDENT_ID> or ProviderIncidentId == "<INCIDENT_ID>"
+  | summarize arg_max(TimeGenerated, *) by IncidentNumber
+  | mv-expand AlertId = parse_json(AlertIds)
+  | extend AlertId = tostring(AlertId)
+  | distinct AlertId;
+  SecurityAlert
+  | where SystemAlertId in (incidentAlertIds)
+  | extend Tactics_parsed = parse_json(Tactics)
+  | extend Techniques_parsed = parse_json(Techniques)
+  | mv-expand Tactic = Tactics_parsed
+  | mv-expand Technique = Techniques_parsed
+  | summarize
+      AlertCount = dcount(SystemAlertId),
+      Alerts = make_set(AlertName, 10)
+      by Tactic = tostring(Tactic), Technique = tostring(Technique)
+  | order by AlertCount desc

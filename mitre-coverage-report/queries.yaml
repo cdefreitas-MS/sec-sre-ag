@@ -1,0 +1,250 @@
+# ═══════════════════════════════════════════════════════════════════
+# MITRE Coverage Report — Query Definitions
+# ═══════════════════════════════════════════════════════════════════
+# All queries used by invoke_mitre_scan.py, grouped by phase.
+# Documents are separated by '---'.  Each document has an 'id',
+# 'phase', 'type', and the relevant query/url/endpoint fields.
+# ═══════════════════════════════════════════════════════════════════
+
+# ─── Phase 1: Rule Inventory ─────────────────────────────────────
+
+# M1: Analytic Rule Inventory with MITRE ATT&CK Mapping
+# Fetches all Scheduled + NRT analytic rules with tactics, techniques, and severity.
+# Extended from ingestion-q9 to include MITRE fields.
+
+id: mitre-m1
+name: Analytic Rules with MITRE Mapping
+description: Fetch Scheduled + NRT analytic rules via Sentinel REST API with tactics and techniques
+phase: 1
+type: rest
+url: https://management.azure.com/subscriptions/{subscription_id}/resourceGroups/{resource_group}/providers/Microsoft.OperationalInsights/workspaces/{workspace_name}/providers/Microsoft.SecurityInsights/alertRules?api-version=2024-03-01
+jmespath: value[?kind=='Scheduled' || kind=='NRT'].{displayName:properties.displayName, ruleId:name, enabled:properties.enabled, kind:kind, severity:properties.severity, tactics:properties.tactics, techniques:properties.techniques, query:properties.query, alertRuleTemplateName:properties.alertRuleTemplateName, queryFrequency:properties.queryFrequency}
+
+---
+
+# M2: Custom Detection Rule Inventory with MITRE Mapping
+# Fetches Custom Detection rules from Defender XDR via Graph beta endpoint.
+# Requires CustomDetection.Read.All scope.
+# May be skipped gracefully if auth unavailable — status recorded in scratchpad.
+# mitreTechniques field contains technique IDs mapped to the custom detection.
+
+id: mitre-m2
+name: Custom Detection Rules with MITRE Mapping
+description: Fetch Custom Detection rules via Microsoft Graph API with MITRE techniques
+phase: 1
+type: graph
+endpoint: /beta/security/rules/detectionRules
+scope: CustomDetection.Read.All
+
+# ─── Phase 2: SOC Optimization ───────────────────────────────────
+
+---
+
+# M3: SOC Optimization Coverage Recommendations
+# Fetches all SOC Optimization recommendations from the Sentinel REST API.
+# Coverage-type recommendations (Precision_Coverage*) contain rich MITRE data:
+#   - Tactics array with CurrentCount vs RecommendedCount per tactic and technique
+#   - CoverageEntities with per-rule coverage status (Covered/NotCovered/CoveredAlternative)
+#   - TemplateIds for recommended Content Hub rule templates
+#   - DataSources required by recommended rules
+# Also captures MITRE Tagging recommendations (Precision_Coverage_DetectionMitreTagging)
+# with AI-suggested tactic/technique tags for untagged rules.
+
+id: mitre-m3
+name: SOC Optimization Coverage Recommendations
+description: Fetch SOC Optimization recommendations via Sentinel REST API (preview)
+phase: 2
+type: rest
+url: https://management.azure.com/subscriptions/{subscription_id}/resourceGroups/{resource_group}/providers/Microsoft.OperationalInsights/workspaces/{workspace_name}/providers/Microsoft.SecurityInsights/recommendations?api-version=2024-01-01-preview
+jmespath: value[?starts_with(properties.recommendationTypeId, 'Precision_Coverage')].{id:name, title:properties.title, state:properties.state, typeId:properties.recommendationTypeId, description:properties.description, useCaseName:properties.additionalProperties.UseCaseName, suggestions:properties.suggestions}
+
+# ─── Phase 3: Operational Correlation ────────────────────────────
+
+---
+
+# M4: SecurityAlert Firing by MITRE Tactic — SOC-authored rules only
+# Queries SecurityAlert for Analytic Rules (AR) and Custom Detections (CD)
+# to correlate which SOC-authored rules are actually generating alerts.
+#
+# Scope: AR + CD only. Platform alerts (MDE, MDI, MDO, MCAS, etc.) are
+# covered separately by M6 (Platform Alert MITRE Coverage).
+#
+# CD discrimination: AlertType == 'CustomDetection' (literal string).
+# This is the ONLY reliable marker — seen on MDATP-sourced CDs.
+# ExtendedProperties.DetectionSource == 'customDetection' is NOT reliable
+# (MicrosoftThreatProtection correlation wrappers also carry this).
+#
+# This answers: "Of my rules, which ones are actually firing?"
+
+id: mitre-m4
+name: Alert Firing by MITRE Tactic
+description: SecurityAlert firing counts for SOC-authored rules (AR + CD) correlated with MITRE mappings
+phase: 3
+type: kql
+timespan: P{days}D
+query: |
+  SecurityAlert
+  | where TimeGenerated > ago({days}d)
+  | where ProviderName == 'ASI Scheduled Alerts' or AlertType == 'CustomDetection'
+  | extend Source = iff(ProviderName == 'ASI Scheduled Alerts', 'AR', 'CD')
+  | extend RuleId = iff(Source == 'AR',
+      extract(@'_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$', 1, AlertType),
+      AlertType)
+  | summarize
+      AlertCount = count(),
+      FirstAlert = min(TimeGenerated),
+      LastAlert = max(TimeGenerated),
+      HighSev = countif(AlertSeverity == 'High'),
+      MediumSev = countif(AlertSeverity == 'Medium'),
+      LowSev = countif(AlertSeverity == 'Low'),
+      InfoSev = countif(AlertSeverity == 'Informational'),
+      Tactics = make_set(Tactics),
+      Source = any(Source)
+      by AlertName, RuleId
+  | order by AlertCount desc
+  | take 50
+
+---
+
+# M5: Incident Volume by MITRE Tactic
+# Queries SecurityIncident for tactic distribution across real incidents.
+# Provides operational context: which tactics are generating investigation workload.
+
+id: mitre-m5
+name: Incident Volume by MITRE Tactic
+description: SecurityIncident tactic distribution for operational coverage assessment
+phase: 3
+type: kql
+timespan: P{days}D
+query: |
+  SecurityIncident
+  | where CreatedTime > ago({days}d)
+  | summarize arg_max(TimeGenerated, *) by IncidentNumber
+  | mv-expand AdditionalData.tactics
+  | extend Tactic = tostring(AdditionalData_tactics)
+  | where isnotempty(Tactic)
+  | summarize
+      IncidentCount = dcount(IncidentNumber),
+      HighSev = dcountif(IncidentNumber, Severity == 'High'),
+      MediumSev = dcountif(IncidentNumber, Severity == 'Medium'),
+      LowSev = dcountif(IncidentNumber, Severity == 'Low'),
+      InfoSev = dcountif(IncidentNumber, Severity == 'Informational'),
+      TP = dcountif(IncidentNumber, Classification == 'TruePositive'),
+      FP = dcountif(IncidentNumber, Classification == 'FalsePositive'),
+      BP = dcountif(IncidentNumber, Classification == 'BenignPositive')
+      by Tactic
+  | order by IncidentCount desc
+
+---
+
+# M6: Platform-Native Alert MITRE Coverage
+# Queries SecurityAlert for built-in product detections (NOT custom analytic rules).
+# Extracts techniques directly attributed by the product detection engine.
+# This answers: "What MITRE techniques are the M365 Defender products actually detecting?"
+# Used to derive Tier 1 (alert-proven) platform coverage and active product list.
+
+id: mitre-m6
+name: Platform Alert MITRE Coverage
+description: SecurityAlert platform-native detections with MITRE technique attribution (excludes custom analytic rules)
+phase: 3
+type: kql
+timespan: P{days}D
+query: |
+  SecurityAlert
+  | where TimeGenerated > ago({days}d)
+  | where ProviderName !in~ ('ASI Scheduled Alerts', 'ASI NRT Alerts')
+  | where isnotempty(Techniques)
+  | mv-expand Technique = todynamic(Techniques) to typeof(string)
+  | where isnotempty(Technique)
+  | where Technique matches regex @'^T\d{4}'
+  | extend ParentTechnique = extract(@'^(T\d{4})', 1, Technique)
+  | where isnotempty(ParentTechnique)
+  | summarize
+      AlertCount = count(),
+      DistinctAlertTypes = dcount(AlertName),
+      Products = make_set(ProductName, 20),
+      AlertNames = make_set(strcat(ProductName, '|||', AlertName), 10)
+      by ParentTechnique
+  | project Technique = ParentTechnique, AlertCount, DistinctAlertTypes, Products, AlertNames
+  | order by AlertCount desc
+
+---
+
+# M7: Table Ingestion Volume (7-day average)
+# Queries the Usage table to get average daily ingestion per table.
+# Used for Data Readiness cross-reference: confirms which tables have
+# active data flowing vs tables referenced by rules but with zero ingestion.
+# This catches the silent failure mode: rules targeting tables on Data Lake tier,
+# disconnected connectors, or misconfigured diagnostic settings.
+
+id: mitre-m7
+name: Table Ingestion Volume (7d avg)
+description: Average daily ingestion volume per table from Usage table for data readiness validation
+phase: 3
+type: kql
+timespan: P7D
+query: |
+  Usage
+  | where TimeGenerated > ago(7d)
+  | summarize TotalMB = round(sum(Quantity), 2) by DataType
+  | where TotalMB > 0
+  | extend AvgDailyMB = round(TotalMB / 7.0, 2)
+  | project DataType, TotalMB, AvgDailyMB
+  | order by TotalMB desc
+
+---
+
+# M8: SentinelHealth Data Connector Health (7-day)
+# Queries the SentinelHealth table for data connector fetch status changes.
+# Used to enrich Data Readiness: detects connector failures BEFORE they degrade
+# the M7 Usage table averages. A rule may show "Ready" in M7 while its feeding
+# connector is actively failing — M8 catches this early-warning signal.
+#
+# SentinelHealth coverage is limited to supported connectors only (AWS, O365,
+# Dynamics, MDE, TI-TAXII, CCP-based). This SUPPLEMENTS M7, not replaces it.
+#
+# CRITICAL: SentinelResourceType must be "Data connector" (capital D, lowercase c).
+
+id: mitre-m8
+name: Data Connector Health (7d)
+description: SentinelHealth connector fetch status — latest state, success/failure counts, health percentage per connector
+phase: 3
+type: kql
+timespan: P7D
+query: |
+  SentinelHealth
+  | where TimeGenerated > ago(7d)
+  | where SentinelResourceType == 'Data connector'
+  | where OperationName == 'Data fetch status change'
+  | where Status in ('Success', 'Failure')
+  | summarize
+      TimeGenerated = arg_max(TimeGenerated, Status),
+      SuccessCount = countif(Status == 'Success'),
+      FailureCount = countif(Status == 'Failure')
+      by SentinelResourceName, SentinelResourceId
+  | extend HealthPct = round(100.0 * SuccessCount / (SuccessCount + FailureCount), 1)
+  | project SentinelResourceName, LastStatus = Status, SuccessCount, FailureCount, HealthPct, LastEvent = TimeGenerated
+  | order by FailureCount desc
+
+---
+
+# M9: Table Tier Classification via Azure CLI
+# Fetches table plan metadata (Analytics, Basic, Auxiliary/Data Lake) from the workspace.
+# Azure CLI internally reports Data Lake tier as plan "Auxiliary" — always relabel as "Data Lake".
+# The Usage table does NOT have a TablePlan column; Azure CLI is the only programmatic source.
+#
+# WHY THIS MATTERS FOR MITRE COVERAGE:
+# Analytics rules can ONLY query Analytics-tier tables. Rules targeting tables on
+# Basic or Data Lake tier are structurally dead — they cannot fire regardless of data volume.
+# This produces "phantom coverage": techniques appear covered in the rule inventory but
+# have zero real detection capability. M9 lets the pipeline flag these rules as "TierBlocked"
+# in the Data Readiness assessment.
+#
+# Reused from: sentinel-ingestion-report/queries/phase3/Q10-TableTierClassification.yaml
+
+id: mitre-m9
+name: Table Tier Classification
+description: Fetch table plan metadata via az CLI — identifies tables on Basic/Data Lake tier that analytics rules cannot query
+phase: 3
+type: cli
+command: az monitor log-analytics workspace table list --resource-group {resource_group} --workspace-name {workspace_name} --subscription {subscription_id} --query "[].{name:name, plan:plan}" -o json

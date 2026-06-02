@@ -1,0 +1,216 @@
+# SVG Dashboard Widget Manifest — Identity Security Posture Report
+#
+# This file defines the layout and data mapping for generating an SVG dashboard
+# from a completed Identity Security Posture report. It is consumed by the shared
+# SVG rendering skill (if available in the workspace).
+#
+# Usage:  After generating an identity posture report, ask:
+#           "Generate an SVG dashboard from the report"
+#         Copilot will read this manifest + the report data + the skill,
+#         then produce a single SVG file in reports/identity-posture/.
+#
+# Customization:  Tweak rows, reorder widgets, add/remove items, change colors.
+#                 The renderer adapts to whatever is defined here.
+
+# ─── Canvas ──────────────────────────────────────────────────────────────────
+canvas:
+  width: 1400
+  height: 1100
+  background: "#0d1117"
+  padding: 30
+  row_gap: 20
+  col_gap: 20
+  font_family: "Segoe UI, Roboto, sans-serif"
+
+# ─── Color Palette ───────────────────────────────────────────────────────────
+palette:
+  primary: "#409AE1"
+  secondary: "#b4a0ff"
+  accent: "#FFC83D"
+  danger: "#EF6950"
+  success: "#40C5AF"
+  muted: "#b2b2b2"
+  card_bg: "#161b22"
+  card_border: "#30363d"
+  text_primary: "#e6edf3"
+  text_secondary: "#b2b2b2"
+
+# ─── Score Rating Colors ────────────────────────────────────────────────────
+score_rating_colors:
+  healthy: "#40C5AF"
+  elevated: "#FFC83D"
+  concerning: "#FF8C00"
+  critical: "#EF6950"
+
+# ─── Dimension Colors (Identity Posture Score — 5 dimensions) ───────────────
+dimension_colors:
+  stale_deleted: "#EF6950"
+  privileged: "#FF8C00"
+  password: "#FFC83D"
+  risk_distrib: "#b4a0ff"
+  identity_sprawl: "#40C5AF"
+
+# ─── Provider Colors ────────────────────────────────────────────────────────
+# NOTE: In this environment (Graph API primary), most accounts are Entra ID.
+# On-prem AD is detected via onPremisesSyncEnabled=true.
+# Third-party IdP data requires IdentityAccountInfo (AH) and is NOT available.
+provider_colors:
+  EntraID_CloudOnly: "#409AE1"
+  EntraID_Hybrid: "#40C5AF"
+  OnPremAD: "#FFC83D"
+
+# ─── Row Definitions ─────────────────────────────────────────────────────────
+rows:
+
+  # ── ROW 1: Title Bar ────────────────────────────────────────────────────────
+  - id: title-bar
+    height: 70
+    widgets:
+      - type: title-banner
+        fields:
+          title: "Identity Security Posture Dashboard"
+          subtitle_fields:
+            - data_source
+            - analysis_period
+            - generation_date
+        style:
+          title_align: center
+          title_size: 26
+          subtitle_size: 13
+          accent_color: palette.primary
+
+  # ── ROW 2: Identity Posture Score + KPI Cards ──────────────────────────────
+  - id: score-and-kpis
+    height: 150
+    widgets:
+      - type: score-card
+        title: "Identity Posture Score"
+        field: identity_posture_score
+        width_pct: 25
+        ranges:
+          - { min: 0,  max: 25, color: score_rating_colors.healthy,    label: "Healthy" }
+          - { min: 26, max: 50, color: score_rating_colors.elevated,   label: "Elevated" }
+          - { min: 51, max: 75, color: score_rating_colors.concerning,  label: "Concerning" }
+          - { min: 76, max: 100, color: score_rating_colors.critical,   label: "Critical" }
+        show_rating_label: true
+
+      - type: kpi-card
+        label: "Total Accounts"
+        field: total_accounts
+        unit: ""
+        highlight_color: palette.primary
+
+      - type: kpi-card
+        label: "MFA Coverage"
+        field: mfa_coverage_pct
+        unit: "%"
+        highlight_color: palette.success
+
+      - type: kpi-card
+        label: "High-Priv Permanent"
+        field: high_priv_permanent
+        unit: ""
+        highlight_color: palette.accent
+
+      - type: kpi-card
+        label: "High-Risk Active"
+        field: high_risk_active
+        unit: ""
+        highlight_color: palette.danger
+
+      - type: kpi-card
+        label: "Stale Accounts"
+        field: stale_accounts
+        unit: ""
+        highlight_color: palette.danger
+
+  # ── ROW 3: Score Dimensions + Risk Distribution ────────────────────────────
+  - id: dimensions-and-risk
+    height: 280
+    widgets:
+      - type: horizontal-bar-chart
+        title: "Posture Score Dimensions"
+        field: score_dimensions
+        width_pct: 45
+        bar_height: 32
+        max_items: 5
+        value_suffix: "/20"
+        label_field: "dimension"
+        value_field: "score"
+        max_value: 20
+        bar_color_map:
+          "Stale/Deleted": dimension_colors.stale_deleted
+          "Privileged": dimension_colors.privileged
+          "Password": dimension_colors.password
+          "Risk Distrib.": dimension_colors.risk_distrib
+          "Identity Sprawl": dimension_colors.identity_sprawl
+
+      - type: stacked-bar-chart
+        title: "Risk Level Distribution"
+        field: risk_distribution
+        width_pct: 55
+        orientation: horizontal
+        show_totals: true
+        max_items: 4
+        label_field: "risk_level"
+        segment_colors:
+          High: palette.danger
+          Medium: "#FF8C00"
+          Low: palette.accent
+          None: palette.muted
+
+  # ── ROW 4: Account Breakdown + Key Hygiene Metrics ────────────────────
+  - id: accounts-and-hygiene
+    height: 280
+    widgets:
+      - type: horizontal-bar-chart
+        title: "Account Breakdown"
+        field: account_breakdown
+        width_pct: 45
+        bar_height: 28
+        max_items: 6
+        value_suffix: ""
+        label_field: "category"
+        value_field: "count"
+        bar_color_map:
+          "Cloud-Only Enabled": provider_colors.EntraID_CloudOnly
+          "Hybrid Enabled": provider_colors.EntraID_Hybrid
+          "Cloud-Only Disabled": "#30363d"
+          "Hybrid Disabled": "#30363d"
+          "Guest Accounts": palette.muted
+          "Deleted (Recycle Bin)": palette.danger
+
+      - type: table-widget
+        title: "Identity Hygiene Summary"
+        field: hygiene_metrics
+        width_pct: 55
+        columns:
+          - { header: "Metric",  field: "metric", width: 50 }
+          - { header: "Value",   field: "value",  width: 25 }
+          - { header: "Status",  field: "status", width: 25, badge: true }
+        max_items: 10
+        badge_colors:
+          "Critical": palette.danger
+          "Warning": "#FF8C00"
+          "Review": palette.accent
+          "Healthy": palette.success
+
+  # ── ROW 5: Recommendations ─────────────────────────────────────────────────
+  - id: recommendations
+    height: 200
+    widgets:
+      - type: table-widget
+        title: "Priority Recommendations"
+        field: recommendations
+        width_pct: 100
+        columns:
+          - { header: "#",       field: "priority", width: 5 }
+          - { header: "Finding", field: "finding",  width: 50 }
+          - { header: "Action",  field: "action",   width: 35 }
+          - { header: "Risk",    field: "risk",     width: 10, badge: true }
+        max_items: 5
+        badge_colors:
+          "Critical": palette.danger
+          "High": "#FF8C00"
+          "Medium": palette.accent
+          "Low": palette.success

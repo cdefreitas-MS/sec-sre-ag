@@ -1,0 +1,16 @@
+{
+  "tenant_name": "",
+  "sentinel_workspace_id": "",
+  "subscription_id": "",
+  "azure_mcp": {
+    "subscription_id": "",
+    "resource_group": "",
+    "workspace_name": ""
+  },
+  "api_tokens": {
+    "abuseipdb": "",
+    "ipinfo": "",
+    "vpnapi": "",
+    "shodan": ""
+  }
+}

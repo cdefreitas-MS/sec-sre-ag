@@ -1,0 +1,286 @@
+# SVG Dashboard Widget Manifest — Sentinel Ingestion Report
+# 
+# This file defines the layout and data mapping for generating an SVG dashboard
+# from a completed ingestion report. It is consumed by the shared SVG rendering
+# skill at .github/skills/svg-dashboard/SKILL.md
+#
+# Usage:  After generating an ingestion report, ask:
+#           "Generate an SVG dashboard from the report"
+#         Copilot will read this manifest + the report data + the skill,
+#         then produce a single SVG file in reports/sentinel/.
+#
+# Customization:  Tweak rows, reorder widgets, add/remove items, change colors.
+#                 The renderer adapts to whatever is defined here.
+
+# ─── Canvas ──────────────────────────────────────────────────────────────────
+canvas:
+  width: 1800
+  height: 2000          # 7 rows — mirrors MCP Usage layout density
+  background: "#0d1117"
+  padding: 30
+  row_gap: 20
+  col_gap: 20
+  font_family: "Segoe UI, Roboto, sans-serif"
+
+# ─── Color Palette ───────────────────────────────────────────────────────────
+# Aligned with SharePoint Dark Theme:
+# https://learn.microsoft.com/en-us/sharepoint/dev/design/themes-colors
+palette:
+  primary: "#409AE1"      # blue   — KPI highlights, trend lines, primary data
+  secondary: "#b4a0ff"    # purple — secondary charts, tier badges
+  accent: "#FFC83D"       # yellow — warnings, anomalies
+  danger: "#EF6950"       # red    — critical findings
+  success: "#40C5AF"      # green  — healthy / mitigating
+  muted: "#b2b2b2"        # gray   — labels, axis text
+  card_bg: "#161b22"      # dark card background
+  card_border: "#30363d"  # subtle border
+  text_primary: "#e6edf3"
+  text_secondary: "#b2b2b2"
+
+# ─── Tier Colors (consistent across all widgets) ────────────────────────────
+tier_colors:
+  analytics: "#409AE1"    # blue — Analytics tier
+  basic: "#FFC83D"        # yellow — Basic tier
+  data_lake: "#b4a0ff"    # purple — Data Lake tier
+
+# ─── Row Definitions ─────────────────────────────────────────────────────────
+# Layout mirrors the MCP Usage Monitoring dashboard style: gauge-led KPI row,
+# mixed tables + charts, shared-row line chart, footer assessment panel.
+# Max items kept low (5-8) to stay within SVG generation token budget.
+
+rows:
+
+  # ── ROW 1: Title Bar ────────────────────────────────────────────────────────
+  - id: title-bar
+    height: 80
+    widgets:
+      - type: title-banner
+        fields:
+          title: "Sentinel Ingestion Dashboard"
+          subtitle_fields:
+            - workspace_name        # from report §1
+            - report_period         # e.g. "Feb 16 – Mar 17, 2026"
+            - generation_date       # e.g. "2026-03-18"
+        style:
+          title_align: center
+          title_size: 28
+          subtitle_size: 14
+          accent_color: palette.primary
+
+  # ── ROW 2: Detection Posture Gauge + KPI Cards ─────────────────────────────
+  # Mirrors MCP's ROW 2: gauge leading, KPIs alongside.
+  # Detection Posture Score = weighted composite of rule health, detection
+  # coverage (top-20 tables with ≥1 rule), and detection gap severity.
+  # Computed by renderer from report data — not a pre-computed field.
+  - id: score-and-kpis
+    height: 160
+    widgets:
+      - type: gauge-chart
+        title: "Detection Posture"
+        field: detection_posture_score      # renderer computes: rule_health*0.3 + coverage*0.4 + (100 - gap_penalty)*0.3
+        width_pct: 25
+        ranges:
+          - { min: 0,  max: 40, color: palette.danger,  label: "Critical" }
+          - { min: 41, max: 60, color: "#EF6950",       label: "Weak" }
+          - { min: 61, max: 80, color: palette.accent,   label: "Moderate" }
+          - { min: 81, max: 100, color: palette.success, label: "Strong" }
+        show_rating_label: true
+
+      - type: kpi-card
+        label: "Avg Daily"
+        field: avg_daily_ingestion_gb       # from §1
+        unit: "GB/day"
+        icon: "bar-chart"
+
+      - type: kpi-card
+        label: "Net Billable"
+        field: net_billable_gb_day          # from §1 Cost Waterfall — after benefits
+        unit: "GB/day"
+        icon: "trending-down"
+        highlight_color: palette.success
+
+      - type: kpi-card
+        label: "Analytic Rules"
+        field: analytic_rule_count          # from §5 — enabled AR count
+        unit: "enabled"
+        icon: "shield"
+
+      - type: kpi-card
+        label: "Rule Health"
+        field: rule_health_pct              # from §5b — success rate %
+        unit: "%"
+        icon: "heart"
+        highlight_color: palette.success
+
+      - type: kpi-card
+        label: "Coverage"
+        field: detection_coverage_pct       # from §5a — tables with ≥1 rule / top-20
+        unit: "%"
+        icon: "crosshair"
+
+      - type: kpi-card
+        label: "DL Tables"
+        field: data_lake_table_count        # from §2b tier summary
+        unit: "tables"
+        icon: "layers"
+        highlight_color: palette.secondary
+
+  # ── ROW 3: Top Tables Bar Chart + Detection Coverage Table ─────────────────
+  # Mirrors MCP's ROW 3: bar chart (35%) + table (65%) — mixed widget types.
+  - id: tables-and-coverage
+    height: 300
+    widgets:
+      - type: horizontal-bar-chart
+        title: "Top Tables by Volume"
+        field: top_tables                   # from §2a — array of {name, gb, pct, tier, rule_count}
+        width_pct: 40
+        max_items: 8
+        bar_color: palette.primary
+        value_unit: "GB"
+        show_tier_badge: true
+        badge_colors:
+          Analytics: tier_colors.analytics
+          Basic: tier_colors.basic
+          "Data Lake": tier_colors.data_lake
+        show_rule_count: right              # rightmost column: rule count, 0 in danger color
+
+      - type: table-widget
+        title: "Detection Coverage — Top Tables"
+        field: detection_coverage            # from §5a cross-ref — array of {table, gb_day, rules, gap_flag}
+        width_pct: 60
+        columns:
+          - { header: "Table",        field: "name",       width: 35, color_by: "tier_colors" }
+          - { header: "GB/day",       field: "gb_day",     width: 15, format: "0.2f" }
+          - { header: "Tier",         field: "tier",       width: 15, badge: true }
+          - { header: "AR",           field: "ar_rules",   width: 10, highlight_zero: true }
+          - { header: "CD",           field: "cd_rules",   width: 10, highlight_zero: true }
+          - { header: "Gap",          field: "gap_flag",   width: 15, badge: true }
+        max_items: 8
+        sort_by: "gb_day desc"
+        summary_row:
+          label: "Coverage"
+          formula: "tables_with_rules / total_tables"
+
+  # ── ROW 4: Trend Line Chart + Cost Waterfall ──────────────────────────────
+  # Mirrors MCP's ROW 5: line chart (55%) + bar chart (45%) sharing a row.
+  - id: trend-and-cost
+    height: 350
+    widgets:
+      - type: line-chart
+        title: "Daily Ingestion Trend"
+        field: daily_ingestion_trend        # from §4b — array of {date, gb}
+        width_pct: 55
+        line_color: palette.primary
+        fill_opacity: 0.15
+        annotations:
+          - { type: "peak",    label: "Peak Day",  color: palette.danger }
+          - { type: "low",     label: "Low Day",   color: palette.success }
+          - { type: "average", label: "Avg",        color: palette.muted, style: "dashed" }
+        show_weekday_pattern: true
+        x_label: "Date"
+        y_label: "GB"
+
+      - type: waterfall-chart
+        title: "Cost Waterfall (GB/day)"
+        field: cost_waterfall               # from §1 Cost Waterfall — gross → benefits → net
+        width_pct: 45
+        segments:
+          - { label: "Gross Billable",  color: palette.danger }
+          - { label: "DfS P2 Benefit",  color: palette.success, negative: true }
+          - { label: "E5 Benefit",      color: palette.success, negative: true }
+          - { label: "Net Billable",    color: palette.primary }
+
+  # ── ROW 5: Tier Donut + Anomalies Table + Alert Rules Bar ─────────────────
+  # Mirrors MCP's ROW 4: donut (30%) + bar (35%) + bar (35%) — three widgets.
+  - id: tiers-anomalies-alerts
+    height: 280
+    widgets:
+      - type: donut-chart
+        title: "Tier Distribution"
+        field: tier_distribution            # from §2b — {analytics, basic, data_lake} counts + GB
+        width_pct: 25
+        segments:
+          - { label: "Analytics", color: tier_colors.analytics }
+          - { label: "Basic",    color: tier_colors.basic }
+          - { label: "Data Lake", color: tier_colors.data_lake }
+        show_legend: true
+        show_center_total: true
+
+      - type: table-widget
+        title: "Ingestion Anomalies"
+        field: wow_anomalies                # from §4a — array of {table, current, previous, change_pct, severity}
+        width_pct: 40
+        columns:
+          - { header: "Table",    field: "name",       width: 35 }
+          - { header: "This Wk",  field: "current_gb", width: 15, format: "0.1f" }
+          - { header: "Last Wk",  field: "prior_gb",   width: 15, format: "0.1f" }
+          - { header: "Δ%",       field: "change_pct", width: 15, color_scale: true }
+          - { header: "Risk",     field: "severity",   width: 20, badge: true }
+        max_items: 5
+
+      - type: horizontal-bar-chart
+        title: "Top Alert-Producing Rules"
+        field: alert_producing_rules        # from §5b — array of {rule_name, alert_count, severity}
+        width_pct: 35
+        max_items: 5
+        bar_color_by: severity              # High=danger, Medium=accent, Low=muted
+        show_severity_badge: true
+        show_alert_count: true
+
+  # ── ROW 6: Recommendation Cards ────────────────────────────────────────────
+  # Mirrors MCP's ROW 7: standalone recommendation row.
+  - id: recommendations
+    height: 200
+    widgets:
+      - type: recommendation-cards
+        field: recommendations              # from §1 Top 3 — array of {priority, title, description, impact}
+        card_colors:
+          critical: palette.danger
+          high: palette.accent
+          medium: palette.secondary
+        max_cards: 3
+        show_impact_estimate: true
+
+  # ── ROW 7: Assessment Banner + Key Findings ────────────────────────────────
+  # Mirrors MCP's ROW 8: assessment (50%) + findings table (50%).
+  - id: footer-assessment
+    height: 220
+    widgets:
+      - type: assessment-banner
+        title: "Overall Assessment"
+        field: overall_assessment           # from §1 Overall Assessment narrative
+        width_pct: 50
+        style:
+          border_color: palette.primary
+          icon: "clipboard-check"
+        sub_fields:
+          - key_risks                       # bullet list of 🔴/🟠 findings
+          - strengths                       # bullet list of 🟢 findings
+
+      - type: table-widget
+        title: "Key Findings"
+        field: key_findings                 # from §1 bullet points — array of {priority, finding}
+        width_pct: 50
+        columns:
+          - { header: "Priority", field: "priority", width: 12, badge: true }
+          - { header: "Finding",  field: "finding",  width: 88 }
+        max_items: 5
+
+# ─── Data Source Mapping ─────────────────────────────────────────────────────
+# Maps YAML field names above to report sections.
+# The renderer extracts values from the markdown report or scratchpad JSON.
+data_sources:
+  report_file: "reports/sentinel/sentinel_ingestion_report_*.md"
+  scratchpad_file: "temp/scratchpad_*.json"
+  field_mapping_notes: |
+    §1  → workspace_name, report_period, generation_date, avg_daily_ingestion_gb,
+           net_billable_gb_day, overall_assessment, key_findings, recommendations
+    §2a → top_tables (name, gb, pct, tier, rule_count) — top 8
+    §2b → tier_distribution (analytics/basic/data_lake counts + GB), data_lake_table_count
+    §4a → wow_anomalies (table, current_gb, prior_gb, change_pct, severity) — top 5
+    §4b → daily_ingestion_trend (date, gb) — 30 data points
+    §5  → analytic_rule_count, rule_health_pct, detection_coverage_pct
+    §5a → detection_coverage (table, gb_day, tier, ar_rules, cd_rules, gap_flag) — top 8
+    §5b → alert_producing_rules (rule_name, alert_count, severity) — top 5
+    §6  → cost_waterfall (gross, DfS P2, E5, net)
+    Computed → detection_posture_score (gauge): rule_health*0.3 + coverage*0.4 + (100-gap_penalty)*0.3

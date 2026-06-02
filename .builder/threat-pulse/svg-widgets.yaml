@@ -1,0 +1,293 @@
+# SVG Dashboard Widget Manifest — Threat Pulse
+#
+# This file defines the layout and data mapping for generating an SVG dashboard
+# from a completed Threat Pulse report. It is consumed by the shared SVG
+# rendering skill.
+#
+# Usage:  After generating a Threat Pulse report, ask:
+#           "Generate an SVG dashboard from the report"
+#         Copilot will read this manifest + the report data + the skill,
+#         then produce a single SVG file in temp/.
+#
+# Customization:  Tweak rows, reorder widgets, add/remove items, change colors.
+#                 The renderer adapts to whatever is defined here.
+
+# ─── Canvas ──────────────────────────────────────────────────────────────────
+canvas:
+  width: 1400
+  height: 1150
+  background: "#0d1117"
+  padding: 40
+  row_gap: 20
+  col_gap: 24
+  font_family: "Segoe UI, Roboto, sans-serif"
+
+# ─── Color Palette ───────────────────────────────────────────────────────────
+palette:
+  primary: "#409AE1"       # blue   — KPI highlights, primary bars
+  secondary: "#b4a0ff"     # purple — secondary data
+  accent: "#FFC83D"        # yellow — warnings, monitor verdicts
+  danger: "#EF6950"        # red    — escalate verdicts, critical findings
+  success: "#40C5AF"       # green  — clear verdicts, healthy states
+  warning: "#ff8c00"       # orange — open incidents, moderate risk
+  muted: "#b2b2b2"         # gray   — labels, axis text, subtitles
+  card_bg: "#161b22"       # dark card background
+  card_border: "#30363d"   # subtle border / grid lines
+  text_primary: "#e6edf3"
+  text_secondary: "#b2b2b2"
+  grid_line: "#30363d"
+  bar_label: "#ffffff"     # white  — device labels inside bars (bold)
+
+# ─── Verdict Colors ──────────────────────────────────────────────────────────
+verdict_colors:
+  escalate: "#EF6950"        # 🔴
+  investigate: "#ff8c00"     # 🟠
+  monitor: "#FFC83D"         # 🟡
+  clear: "#40C5AF"           # ✅
+  no_data: "#b2b2b2"        # ❓
+
+# ─── Assessment Level Colors ────────────────────────────────────────────────
+assessment_colors:
+  stable: "#40C5AF"          # green
+  elevated: "#FFC83D"        # yellow
+  critical: "#EF6950"        # red
+
+# ─── Row Definitions ─────────────────────────────────────────────────────────
+
+rows:
+
+  # ── ROW 1: Title Banner ─────────────────────────────────────────────────────
+  - id: title-banner
+    height: 70
+    widgets:
+      - type: title-banner
+        fields:
+          title: "🔍 Threat Pulse — {workspace_name}"
+          subtitle_fields:
+            - scan_timestamp               # e.g. "2026-04-10 03:29 UTC"
+            - query_count                  # e.g. "12 Queries"
+            - domain_count                 # e.g. "7 Domains"
+            - lookback_period              # e.g. "7d Lookback"
+        style:
+          title_align: center
+          title_size: 26
+          subtitle_size: 12
+          accent_color: palette.primary
+          gradient: true                   # left-to-right blue gradient
+
+  # ── ROW 2: KPI Cards ───────────────────────────────────────────────────────
+  - id: kpi-cards
+    height: 100
+    widgets:
+      - type: kpi-card
+        label: "OPEN HIGH INCIDENTS"
+        field: open_high_incidents
+        unit: ""
+        highlight_color_rules:
+          0: palette.success               # green if 0
+          ">=1": palette.warning           # orange if any open
+        sub_field: open_incident_detail    # e.g. "Assigned, 0d old"
+
+      - type: kpi-card
+        label: "RISKY USERS"
+        field: risky_users_count
+        unit: ""
+        highlight_color_rules:
+          0: palette.success
+          ">=1": palette.danger
+        sub_field: risky_users_detail      # e.g. "No atRisk / compromised"
+
+      - type: kpi-card
+        label: "PHISH DELIVERED"
+        field: phish_delivered
+        unit: ""
+        highlight_color_rules:
+          0: palette.success
+          ">=1": palette.danger
+        sub_field: email_summary           # e.g. "142 inbound, 2 spam blocked"
+
+      - type: kpi-card
+        label: "EXPLOITABLE CVEs"
+        field: exploitable_cves_count
+        unit: ""
+        highlight_color_rules:
+          0: palette.success
+          1: palette.accent                # yellow for 1
+          ">=2": palette.danger
+        sub_field: top_cve_detail          # e.g. "CVE-2026-5281 · CVSS 8.8"
+
+      - type: kpi-card
+        label: "CLOSED IN 7d"
+        field: closed_incidents_7d
+        unit: ""
+        highlight_color: palette.primary
+        sub_field: classification_summary  # e.g. "100% Benign Positive"
+
+  # ── ROW 3 LEFT: Domain Verdict Dashboard ────────────────────────────────────
+  - id: verdict-and-drift
+    height: 380
+    widgets:
+      - type: table-widget
+        title: "Domain Verdict Dashboard"
+        field: domain_verdicts              # array of 12 domain verdict objects
+        width_pct: 59                       # 800px of 1360
+        columns:
+          - { header: "DOMAIN",      field: "domain",     width_pct: 38 }
+          - { header: "STATUS",      field: "verdict",    width_pct: 12 }
+          - { header: "KEY FINDING", field: "finding",    width_pct: 50 }
+        max_items: 12
+        row_height: 24                      # compact rows to fit 12 domains
+        row_striping: true
+        striping_color: "#0d1117"
+        striping_opacity: 0.5
+        verdict_color_map:
+          "🟡 Monitor": palette.accent
+          "✅ Clear": palette.success
+          "❓ No Data": palette.muted
+          "🟠 Investigate": palette.warning
+          "🔴 Escalate": palette.danger
+
+      # ── ROW 3 RIGHT: Device Drift Bar Chart ────────────────────────────────
+      - type: horizontal-bar-chart
+        title: "Device Process Drift Scores"
+        subtitle: "7d baseline vs 1d recent"
+        field: device_drift_scores          # array of {device, score, breakdown}
+        width_pct: 37                       # 496px of 1360
+        bar_height: 20
+        bar_gap: 15
+        max_items: 7
+        label_field: "device"
+        value_field: "score"
+        bar_color: palette.primary
+        bar_opacity: 0.85
+        label_position: inside              # device names INSIDE bars (white bold)
+        label_color: palette.bar_label      # #ffffff
+        label_font_weight: bold
+        label_font_size: 10
+        value_label_position: right         # score number right of bar
+        tooltip_field: "breakdown"          # hover shows dimension breakdown
+        threshold_lines:
+          - { value: 120, label: "Monitor (120)", color: palette.accent, dash: "4,3" }
+        baseline:
+          value: 100
+          color: palette.grid_line
+          dash: "2,4"
+
+  # ── ROW 4: Email Donut + Closed Incidents Donut + Critical Assets ──────────
+  - id: details
+    height: 260
+    widgets:
+      - type: donut-chart
+        title: "Inbound Email (7d)"
+        field: email_threat_composition     # array of {category, count, color}
+        width_pct: 25                       # 340px
+        show_center_total: true
+        center_label: "inbound"
+        segment_colors:
+          Clean: palette.success
+          Spam: palette.accent
+          Phish: palette.danger
+          Malware: palette.secondary
+        legend_position: "right"
+
+      - type: donut-chart
+        title: "7d Closed Incidents"
+        subtitle: "Classification breakdown"
+        field: closed_incident_classification  # array of {classification, count}
+        width_pct: 25                       # 340px
+        show_center_total: true
+        center_label: "closed"
+        segment_colors:
+          BenignPositive: palette.success
+          TruePositive: palette.danger
+          FalsePositive: palette.muted
+          Undetermined: palette.accent
+        legend_position: "right"
+
+      - type: table-widget
+        title: "Critical Asset Inventory"
+        subtitle: "ExposureGraph · Criticality 0–3"
+        field: critical_assets              # array of {device, criticality, internet_facing, rce, privesc}
+        width_pct: 44                       # 592px
+        columns:
+          - { header: "DEVICE",    field: "device",          width_pct: 40 }
+          - { header: "CRIT",      field: "criticality",     width_pct: 12 }
+          - { header: "INTERNET",  field: "internet_facing",  width_pct: 16 }
+          - { header: "RCE",       field: "rce",              width_pct: 16 }
+          - { header: "PRIVESC",   field: "privesc",          width_pct: 16 }
+        max_items: 6
+        row_height: 28
+        row_striping: true
+        criticality_color_map:
+          0: palette.danger
+          1: palette.warning
+          2: palette.accent
+          3: palette.muted
+
+  # ── ROW 5: Recommendation Cards ────────────────────────────────────────────
+  - id: recommendations
+    height: 104                             # header(20) + card(80) + gap
+    widgets:
+      - type: recommendation-cards
+        title: "🎯 Recommended Actions"
+        field: recommendations              # array of {title, detail_line1, detail_line2, drill_down_skill}
+        max_items: 4
+        card_height: 80
+        severity_accent: palette.accent     # left edge color (🟡 = yellow by default)
+        title_color: palette.accent
+        detail_color: palette.muted
+        drill_down_color: palette.primary   # "→ skill-name" link color
+
+  # ── ROW 6: Assessment Banner ────────────────────────────────────────────────
+  - id: assessment-banner
+    height: 70
+    widgets:
+      - type: assessment-banner
+        title: "Overall Assessment"
+        field: overall_assessment           # e.g. "STABLE"
+        detail_field: assessment_detail     # e.g. "No 🔴 Escalate or 🟠 Investigate verdicts..."
+        width_pct: 100
+        severity_color_map:
+          STABLE: palette.success
+          ELEVATED: palette.accent
+          CRITICAL: palette.danger
+        accent_position: "left"             # 4px colored left border
+
+# ─── Data Source Mapping ─────────────────────────────────────────────────────
+data_sources:
+  report_file: "reports/threat-pulse/Threat_Pulse_*.md"  # or inline chat context
+  field_mapping_notes: |
+    # Row 1 — Title
+    workspace_name: "config.json → azure_mcp.workspace_name or agent settings → workspace name"
+    scan_timestamp: "Report header → timestamp"
+    query_count: "Report header → total queries executed (always 12)"
+    domain_count: "Report header → domains scanned (always 7)"
+    lookback_period: "Report header → lookback (default 7d)"
+
+    # Row 2 — KPI Cards
+    open_high_incidents: "Q1 → count of open High/Critical incidents"
+    open_incident_detail: "Q1 → 'Assigned, Nd old' or 'All clear'"
+    risky_users_count: "Q3 → count of users matching hybrid filter"
+    risky_users_detail: "Q3 → 'No atRisk / compromised' or 'N users at risk'"
+    phish_delivered: "Q8 → count of phishing emails with DeliveryAction == 'Delivered'"
+    email_summary: "Q8 → 'N inbound, N spam blocked'"
+    exploitable_cves_count: "Q12 → count of CVEs with IsExploitAvailable == True"
+    top_cve_detail: "Q12 → top CVE ID + CVSS score, or 'No exploitable CVEs'"
+    closed_incidents_7d: "Q2 → total closed incidents in 7d"
+    classification_summary: "Q2 → '100% BenignPositive' or '%TP / %BP / %FP breakdown'"
+
+    # Row 3 — Verdict Table + Device Drift
+    domain_verdicts: "Dashboard Summary table — 12 rows with domain emoji+name, verdict, key finding (Q1-Q12)"
+    device_drift_scores: "Q6 → array of {device, score, breakdown with 5 dimensions}"
+
+    # Row 4 — Email Donut + Closed Classification + Critical Assets
+    email_threat_composition: "Q8 → {Clean, Spam, Phish, Malware} with counts"
+    closed_incident_classification: "Q2 → {BenignPositive, TruePositive, FalsePositive, Undetermined} counts"
+    critical_assets: "Q11 → array of {device, criticality, internet_facing, rce, privesc}"
+
+    # Row 5 — Recommendations
+    recommendations: "Top 4 recommended actions from report, each with title, 2 detail lines, drill-down skill"
+
+    # Row 6 — Assessment
+    overall_assessment: "STABLE | ELEVATED | CRITICAL — derived from verdict distribution"
+    assessment_detail: "Summary sentence citing verdict counts by category"
