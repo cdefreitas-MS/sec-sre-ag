@@ -202,7 +202,9 @@ def main():
     parser.add_argument('--workspace-name', default=None)
     parser.add_argument('--days', type=int, default=30, choices=[7, 14, 30, 60, 90])
     parser.add_argument('--phase', type=int, default=0, choices=[0, 1, 2, 3])
+    parser.add_argument('--prefetch-dir', default=None, help='Directory with prefetched m1.json-m9.json files (Mode B)')
     args = parser.parse_args()
+    prefetch_dir = Path(args.prefetch_dir) if args.prefetch_dir else None
 
     script_dir = Path(__file__).resolve().parent
     # Walk up to find workspace root (contains config.json)
@@ -245,11 +247,14 @@ def main():
     print()
 
     # ─── Prerequisites ───────────────────────────────────────────
-    acct, err = az_json(['account', 'show'])
-    if acct is None:
-        print(f'❌ Not logged in to Azure CLI. Run: az login --tenant <tenant_id>', file=sys.stderr)
-        sys.exit(1)
-    print(f'✅ Azure CLI authenticated — Tenant: {acct.get("tenantId", "?")}')
+    if prefetch_dir:
+        print(f'✅ Prefetch mode — reading data from {prefetch_dir}')
+    else:
+        acct, err = az_json(['account', 'show'])
+        if acct is None:
+            print(f'❌ Not logged in to Azure CLI. Run: az login --tenant ', file=sys.stderr)
+            sys.exit(1)
+        print(f'✅ Azure CLI authenticated — Tenant: {acct.get("tenantId", "?")}')
 
     # ─── Config Resolution ───────────────────────────────────────
     config = None
@@ -331,106 +336,147 @@ def main():
         p_val = int(qd.get('phase', 0))
         queries_by_phase.setdefault(p_val, []).append(qd)
 
-    for p in phases_to_run:
-        phase_queries = queries_by_phase.get(p, [])
-        if not phase_queries:
-            print(f'⚠️  No queries defined for Phase {p} — skipping')
-            continue
-        print(f'\n📂 Phase {p} — {len(phase_queries)} queries:')
-
-        for parsed in phase_queries:
-            q_id = parsed.get('id')
-            if not q_id:
+    if prefetch_dir:
+        query_id_to_file = {
+            'mitre-m1': 'm1.json', 'mitre-m2': 'm2.json', 'mitre-m3': 'm3.json',
+            'mitre-m4': 'm4.json', 'mitre-m5': 'm5.json', 'mitre-m6': 'm6.json',
+            'mitre-m7': 'm7.json', 'mitre-m8': 'm8.json', 'mitre-m9': 'm9.json',
+        }
+        for p in phases_to_run:
+            phase_queries = queries_by_phase.get(p, [])
+            if not phase_queries:
                 continue
-            all_queries[q_id] = parsed
-            q_type = parsed.get('type', '')
-            q_name = parsed.get('name', q_id)
-            print(f'   🔄 {q_name}...', end='', flush=True)
-            start = time.time()
-
-            if q_type == 'rest':
-                url = parsed.get('url', '')
-                url = url.replace('{subscription_id}', subscription_id)
-                url = url.replace('{resource_group}', resource_group)
-                url = url.replace('{workspace_name}', workspace_name)
-                jmespath = parsed.get('jmespath')
-                az_args = ['rest', '--method', 'get', '--url', url]
-                if jmespath:
-                    az_args += ['--query', jmespath]
-                data, err = az_json(az_args, timeout=120)
-                elapsed = round(time.time() - start, 1)
-                if data is not None:
-                    if not isinstance(data, list):
-                        data = [data]
-                    all_results[q_id] = data
-                    print(f' ✅ {len(data)} items ({elapsed}s)')
+            print(f'\n📂 Phase {p} — {len(phase_queries)} queries (prefetch):')
+            for parsed in phase_queries:
+                q_id = parsed.get('id')
+                if not q_id:
+                    continue
+                all_queries[q_id] = parsed
+                q_name = parsed.get('name', q_id)
+                fname = query_id_to_file.get(q_id)
+                if fname:
+                    fpath = prefetch_dir / fname
+                    if fpath.exists():
+                        with open(fpath, encoding='utf-8') as f:
+                            data = json.load(f)
+                        if isinstance(data, dict) and '_status' in data:
+                            all_results[q_id] = data
+                            print(f'   ⏭️  {q_name}: {data["_status"]}')
+                        elif isinstance(data, list):
+                            all_results[q_id] = data
+                            print(f'   ✅ {q_name}: {len(data)} items (prefetch)')
+                        else:
+                            all_results[q_id] = data if isinstance(data, list) else [data]
+                            print(f'   ✅ {q_name}: loaded (prefetch)')
+                    else:
+                        print(f'   ⚠️  {q_name}: prefetch file {fname} not found')
+                        all_results[q_id] = {'_status': 'SKIPPED', '_error': f'prefetch file {fname} not found'}
                 else:
-                    print(f' ❌ FAILED ({elapsed}s)')
-                    all_results[q_id] = {'_status': 'FAILED', '_error': err}
+                    print(f'   ⚠️  {q_name}: no prefetch mapping for {q_id}')
+                    all_results[q_id] = {'_status': 'SKIPPED', '_error': 'no prefetch mapping'}
+        total_query_time = round(time.time() - total_start, 1)
+        print(f'\n✅ All prefetch data loaded — {total_query_time}s')
+    else:
+        for p in phases_to_run:
+            phase_queries = queries_by_phase.get(p, [])
+            if not phase_queries:
+                print(f'⚠️  No queries defined for Phase {p} — skipping')
+                continue
+            print(f'\n📂 Phase {p} — {len(phase_queries)} queries:')
 
-            elif q_type == 'graph':
-                # Graph API via az rest (no PowerShell dependency)
-                endpoint = parsed.get('endpoint', '')
-                select_fields = parsed.get('select', '')
-                uri = f'https://graph.microsoft.com{endpoint}'
-                if select_fields:
-                    uri += f'?$select={select_fields}'
-                az_args = ['rest', '--method', 'get', '--url', uri, '--resource', 'https://graph.microsoft.com']
-                data, err = az_json(az_args, timeout=120)
-                elapsed = round(time.time() - start, 1)
-                if data is not None:
-                    values = data.get('value', []) if isinstance(data, dict) else data
-                    if not isinstance(values, list):
-                        values = [values]
-                    all_results[q_id] = values
-                    print(f' ✅ {len(values)} rules ({elapsed}s)')
+            for parsed in phase_queries:
+                q_id = parsed.get('id')
+                if not q_id:
+                    continue
+                all_queries[q_id] = parsed
+                q_type = parsed.get('type', '')
+                q_name = parsed.get('name', q_id)
+                print(f'   🔄 {q_name}...', end='', flush=True)
+                start = time.time()
+
+                if q_type == 'rest':
+                    url = parsed.get('url', '')
+                    url = url.replace('{subscription_id}', subscription_id)
+                    url = url.replace('{resource_group}', resource_group)
+                    url = url.replace('{workspace_name}', workspace_name)
+                    jmespath = parsed.get('jmespath')
+                    az_args = ['rest', '--method', 'get', '--url', url]
+                    if jmespath:
+                        az_args += ['--query', jmespath]
+                    data, err = az_json(az_args, timeout=120)
+                    elapsed = round(time.time() - start, 1)
+                    if data is not None:
+                        if not isinstance(data, list):
+                            data = [data]
+                        all_results[q_id] = data
+                        print(f' ✅ {len(data)} items ({elapsed}s)')
+                    else:
+                        print(f' ❌ FAILED ({elapsed}s)')
+                        all_results[q_id] = {'_status': 'FAILED', '_error': err}
+
+                elif q_type == 'graph':
+                    # Graph API via az rest (no PowerShell dependency)
+                    endpoint = parsed.get('endpoint', '')
+                    select_fields = parsed.get('select', '')
+                    uri = f'https://graph.microsoft.com{endpoint}'
+                    if select_fields:
+                        uri += f'?$select={select_fields}'
+                    az_args = ['rest', '--method', 'get', '--url', uri, '--resource', 'https://graph.microsoft.com']
+                    data, err = az_json(az_args, timeout=120)
+                    elapsed = round(time.time() - start, 1)
+                    if data is not None:
+                        values = data.get('value', []) if isinstance(data, dict) else data
+                        if not isinstance(values, list):
+                            values = [values]
+                        all_results[q_id] = values
+                        print(f' ✅ {len(values)} rules ({elapsed}s)')
+                    else:
+                        print(f' ⏭️  SKIPPED ({elapsed}s) — {err}')
+                        all_results[q_id] = {'_status': 'SKIPPED', '_error': err}
+
+                elif q_type == 'kql':
+                    raw_query = parsed.get('query', '').replace('{days}', str(days))
+                    raw_timespan = parsed.get('timespan', f'P{days}D').replace('{days}', str(days))
+                    single_line = re.sub(r'\s+', ' ', raw_query).strip()
+                    az_args = [
+                        'monitor', 'log-analytics', 'query',
+                        '--workspace', workspace_id,
+                        '--analytics-query', single_line,
+                        '--timespan', raw_timespan,
+                    ]
+                    data, err = az_json(az_args, timeout=180)
+                    elapsed = round(time.time() - start, 1)
+                    if data is not None:
+                        if not isinstance(data, list):
+                            data = [data]
+                        all_results[q_id] = data
+                        print(f' ✅ {len(data)} rows ({elapsed}s)')
+                    else:
+                        print(f' ❌ FAILED ({elapsed}s)')
+                        all_results[q_id] = {'_status': 'FAILED', '_error': err}
+
+                elif q_type == 'cli':
+                    cmd = parsed.get('command', '')
+                    cmd = cmd.replace('{subscription_id}', subscription_id)
+                    cmd = cmd.replace('{resource_group}', resource_group)
+                    cmd = cmd.replace('{workspace_name}', workspace_name)
+                    # Split the command and run through subprocess
+                    parts = cmd.split()
+                    data, err = az_json(parts[1:], timeout=120)  # strip leading 'az'
+                    elapsed = round(time.time() - start, 1)
+                    if data is not None:
+                        if not isinstance(data, list):
+                            data = [data]
+                        all_results[q_id] = data
+                        print(f' ✅ {len(data)} tables ({elapsed}s)')
+                    else:
+                        print(f' ❌ FAILED ({elapsed}s)')
+                        all_results[q_id] = {'_status': 'FAILED', '_error': err}
                 else:
-                    print(f' ⏭️  SKIPPED ({elapsed}s) — {err}')
-                    all_results[q_id] = {'_status': 'SKIPPED', '_error': err}
+                    print(f' ⏭️  Unknown type "{q_type}"')
 
-            elif q_type == 'kql':
-                raw_query = parsed.get('query', '').replace('{days}', str(days))
-                raw_timespan = parsed.get('timespan', f'P{days}D').replace('{days}', str(days))
-                single_line = re.sub(r'\s+', ' ', raw_query).strip()
-                az_args = [
-                    'monitor', 'log-analytics', 'query',
-                    '--workspace', workspace_id,
-                    '--analytics-query', single_line,
-                    '--timespan', raw_timespan,
-                ]
-                data, err = az_json(az_args, timeout=180)
-                elapsed = round(time.time() - start, 1)
-                if data is not None:
-                    if not isinstance(data, list):
-                        data = [data]
-                    all_results[q_id] = data
-                    print(f' ✅ {len(data)} rows ({elapsed}s)')
-                else:
-                    print(f' ❌ FAILED ({elapsed}s)')
-                    all_results[q_id] = {'_status': 'FAILED', '_error': err}
-
-            elif q_type == 'cli':
-                cmd = parsed.get('command', '')
-                cmd = cmd.replace('{subscription_id}', subscription_id)
-                cmd = cmd.replace('{resource_group}', resource_group)
-                cmd = cmd.replace('{workspace_name}', workspace_name)
-                # Split the command and run through subprocess
-                parts = cmd.split()
-                data, err = az_json(parts[1:], timeout=120)  # strip leading 'az'
-                elapsed = round(time.time() - start, 1)
-                if data is not None:
-                    if not isinstance(data, list):
-                        data = [data]
-                    all_results[q_id] = data
-                    print(f' ✅ {len(data)} tables ({elapsed}s)')
-                else:
-                    print(f' ❌ FAILED ({elapsed}s)')
-                    all_results[q_id] = {'_status': 'FAILED', '_error': err}
-            else:
-                print(f' ⏭️  Unknown type "{q_type}"')
-
-    total_query_time = round(time.time() - total_start, 1)
-    print(f'\n✅ All queries complete — {total_query_time}s total')
+        total_query_time = round(time.time() - total_start, 1)
+        print(f'\n✅ All queries complete — {total_query_time}s total')
 
     # ═══════════════════════════════════════════════════════════════
     # PHASE 1 POST-PROCESSING: Rule Inventory & MITRE Extraction
@@ -642,7 +688,7 @@ def main():
     phase2.write('\n### ThreatScenarios\n<!-- Scenario | State | ActiveDetections | RecommendedDetections | PlatformCovered | TemplateCovered | TemplateGap | CompletionRate | TacticSummary -->\n')
     parsed_scenarios: list[dict] = []
 
-    for rec in sorted(deduped, key=lambda r: r.get('useCaseName', '')):
+    for rec in sorted(deduped, key=lambda r: r.get('useCaseName') or ''):
         scenario = rec.get('useCaseName') or '(unnamed)'
         state = rec.get('state', '')
         active_count = rec_count = 0
@@ -841,29 +887,30 @@ def main():
             phase3.write(f'{dn} | techniques\n')
 
     # Supplementary product detection from SecurityAlert
-    try:
-        prod_query = f"SecurityAlert | where TimeGenerated > ago({days}d) | where ProviderName !in~ ('ASI Scheduled Alerts', 'ASI NRT Alerts') | where isnotempty(ProductName) | summarize AlertCount = count() by ProductName"
-        data, err = az_json([
-            'monitor', 'log-analytics', 'query',
-            '--workspace', workspace_id,
-            '--analytics-query', prod_query,
-            '--timespan', f'P{days}D',
-        ], timeout=60)
-        if data and isinstance(data, list):
-            for row in data:
-                rp = row.get('ProductName', '')
-                np = prod_aliases.get(rp, rp)
-                if np not in active_products:
-                    active_products[np] = True
-            for child in list(active_products.keys()):
-                if child in prod_families:
-                    parent = prod_families[child]
-                    if parent not in active_products:
-                        active_products[parent] = True
-                        family_only_products[parent] = True
-            display_products = sorted([p for p in active_products if p not in family_only_products])
-    except Exception:
-        pass
+    if not prefetch_dir:
+        try:
+            prod_query = f"SecurityAlert | where TimeGenerated > ago({days}d) | where ProviderName !in~ ('ASI Scheduled Alerts', 'ASI NRT Alerts') | where isnotempty(ProductName) | summarize AlertCount = count() by ProductName"
+            data, err = az_json([
+                'monitor', 'log-analytics', 'query',
+                '--workspace', workspace_id,
+                '--analytics-query', prod_query,
+                '--timespan', f'P{days}D',
+            ], timeout=60)
+            if data and isinstance(data, list):
+                for row in data:
+                    rp = row.get('ProductName', '')
+                    np = prod_aliases.get(rp, rp)
+                    if np not in active_products:
+                        active_products[np] = True
+                for child in list(active_products.keys()):
+                    if child in prod_families:
+                        parent = prod_families[child]
+                        if parent not in active_products:
+                            active_products[parent] = True
+                            family_only_products[parent] = True
+                display_products = sorted([p for p in active_products if p not in family_only_products])
+        except Exception:
+            pass
 
     # ─── CTID Tier Classification ────────────────────────────────
     tier1_techniques: dict[str, dict] = {}

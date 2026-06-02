@@ -303,7 +303,8 @@ def exec_cli(command, config):
     parts = shlex.split(cmd.strip())
     if parts and parts[0] == 'az':
         parts = parts[1:]
-    parts += ["-o", "json"]
+    if "-o" not in parts and "--output" not in parts:
+        parts += ["-o", "json"]
     return run_az(parts)
 
 
@@ -474,7 +475,9 @@ def post_process_phase3(all_results, ctx, config, days, deep, wow, deferred_quer
     extra = {'{DataLakeTables}': dl_names, '{BasicTables}': basic_names}
 
     q10b_def = next((q for q in deferred_queries if q['id'] == 'ingestion-q10b'), None)
-    if q10b_def:
+    if 'ingestion-q10b' in all_results:
+        print(f"   \u2705 ingestion-q10b: {len(all_results['ingestion-q10b']) if isinstance(all_results['ingestion-q10b'], list) else 'dict'} (already loaded)")
+    elif q10b_def:
         sq = substitute(q10b_def, days, deep, wow, config, extra)
         print(f"   \u25b6 {sq['id']}: {sq.get('name', '')} (deferred KQL)")
         data = exec_kql(sq.get('query', ''), config['workspace_id'], sq.get('timespan', ''))
@@ -1888,11 +1891,13 @@ def parse_args():
     p.add_argument('--config', type=str, default='')
     p.add_argument('--synthetic-data-dir', type=str, default='', help='Load pre-built JSON for testing')
     p.add_argument('--export-data-dir', type=str, default='', help='Export raw results to dir')
+    p.add_argument('--prefetch-dir', default=None, help='Directory with prefetched ingestion-q1.json..ingestion-q17b.json files')
     return p.parse_args()
 
 
 def main():
     args = parse_args()
+    prefetch_dir = Path(args.prefetch_dir) if args.prefetch_dir else None
     config = resolve_config(args)
     days = args.days
     deep, wow, labels = compute_windows(days)
@@ -1913,7 +1918,18 @@ def main():
     t0 = time.time()
     all_deferred = []
 
-    if args.synthetic_data_dir:
+    if prefetch_dir:
+        print(f"\U0001f4c2 Prefetch mode \u2014 reading data from {prefetch_dir}")
+        for q in queries:
+            fp = prefetch_dir / f"{q['id']}.json"
+            if fp.exists():
+                with open(fp, 'r', encoding='utf-8') as f:
+                    all_results[q['id']] = json.load(f)
+                cnt = len(all_results[q['id']]) if isinstance(all_results[q['id']], list) else 'dict'
+                print(f"   \u2705 {q['id']}: {cnt} (prefetch)")
+            else:
+                print(f"   \u26a0\ufe0f  {q['id']}: prefetch file not found")
+    elif args.synthetic_data_dir:
         syn = Path(args.synthetic_data_dir)
         print(f"\U0001f4c2 Loading synthetic data from {syn}")
         for q in queries:

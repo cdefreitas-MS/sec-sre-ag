@@ -114,7 +114,7 @@ GRAPH_STEPS: list[dict] = [
             "https://graph.microsoft.com/v1.0/identityProtection/riskyUsers"
             "?$select=id,userPrincipalName,userDisplayName,riskLevel,"
             "riskState,riskDetail,riskLastUpdatedDateTime,isDeleted,"
-            "isProcessing&$top=999"
+            "isProcessing&$top=500"
         ),
     },
     {
@@ -138,7 +138,7 @@ GRAPH_STEPS: list[dict] = [
             "?$select=id,userPrincipalName,userDisplayName,isMfaRegistered,"
             "isMfaCapable,isPasswordlessCapable,isSsprRegistered,"
             "isSsprEnabled,isSsprCapable,methodsRegistered,"
-            "defaultMfaMethod&$top=999"
+            "defaultMfaMethod&$top=500"
         ),
     },
 ]

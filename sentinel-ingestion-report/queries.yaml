@@ -6,8 +6,6 @@
 # 'phase', 'type', and the relevant query/url/endpoint fields.
 # ═══════════════════════════════════════════════════════════════════
 
-# ─── Phase 1: Usage Summary ──────────────────────────────────────
-
 id: ingestion-q1
 name: Usage by DataType with Billing Breakdown
 description: Top 20 tables ranked by billable volume with solution mapping
