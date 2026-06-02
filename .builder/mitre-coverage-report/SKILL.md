@@ -281,7 +281,7 @@ Apply SKILL-report.md templates to scratchpad data, following Rules A–D. See [
 **Before starting ANY MITRE coverage report:**
 
 1. **Run `invoke_mitre_scan.py`** — this single script handles ALL data gathering (Phases 1-3). The LLM does NOT run queries, transcribe output, or write scratchpad sections
-2. **Collect workspace parameters** from the user: `WorkspaceId`, `SubscriptionId`, `ResourceGroup`, `WorkspaceName`
+2. **Ensure `config.json` exists at the workspace root** — the agent auto-generates it from its `<agent_settings>` and `<log_analytics_access>` platform configuration. If the file already exists with a non-empty `sentinel_workspace_id`, skip regeneration. See the sentinel-ingestion-report skill for the full [Config Auto-Generation] procedure. Additionally, confirm workspace parameters with the user if they differ from the agent's defaults.
 3. **ALWAYS ask the user for output mode** if not specified: inline chat summary, markdown file report, or both (default: both)
 4. **ALWAYS ask the user for timeframe** if not specified: the `-Days` parameter controls the alert/incident KQL lookback (Phase 3). Default: 30 days. Phases 1-2 (REST API) are not time-bounded
 5. **ALWAYS use `create_file` for markdown reports** (never use terminal commands)
@@ -320,7 +320,7 @@ Apply SKILL-report.md templates to scratchpad data, following Rules A–D. See [
 
 > ℹ️ File materialization has already completed at skill activation — all scripts and data files are in `tmp/mitre-coverage-report/`. No action needed here.
 
-1. Collect workspace parameters from user: `WorkspaceId`, `SubscriptionId`, `ResourceGroup`, `WorkspaceName`
+1. **Auto-generate `config.json`** at the workspace root if missing or empty — use the same procedure as the sentinel-ingestion-report skill (Config Auto-Generation section). Then confirm workspace parameters match the user's intent (the workspace RG may differ from the agent's RG).
 2. **Verify workspace Resource Group** — the workspace RG may differ from the agent's RG. Always confirm via Resource Graph:
    ```
    az graph query -q "Resources | where type =~ 'Microsoft.OperationalInsights/workspaces' | where name =~ '<workspace_name>' | project name, resourceGroup, subscriptionId" --first 5

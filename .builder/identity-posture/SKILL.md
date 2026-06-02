@@ -264,6 +264,8 @@ python3 tmp/identity-posture/analyze-identity-posture.py \
     --tenant     <tenant_short_name>
 ```
 
+> **`--tenant` resolution:** The script reads `tenant_name` from `config.json` (auto-generated at the workspace root) as the default. If `config.json` is missing or `tenant_name` is empty, pass `--tenant <name>` explicitly or ask the user.
+
 The script:
 1. Finds the most recent file for each data type
 2. Computes inventory, privilege, stale, password, MFA, risk metrics

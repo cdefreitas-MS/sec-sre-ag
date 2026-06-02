@@ -120,15 +120,17 @@ Workspace parameters are automatically available from the agent's system context
 
 **When making Monitor MCP calls**, always pass `subscription` from agent settings. The `workspace` parameter accepts the workspace GUID directly.
 
-### Secondary: config.json (Optional)
+### Secondary: config.json (Auto-Generated)
 
-If a `config.json` file exists at the workspace root, it can provide additional configuration. See the original skill for field definitions.
+The agent auto-generates `config.json` at the workspace root from its platform settings before running any skill script. See the sentinel-ingestion-report skill for the full Config Auto-Generation procedure.
 
 ### Configuration Resolution Order
 
 1. **Agent settings** (`<log_analytics_access>`, `<azure_resource_access>`) — always available
-2. **config.json** — read if present, skip if absent
+2. **config.json** — auto-generated at workspace root; read if present, skip if absent
 3. **Never prompt the user** for workspace parameters if either source is available
+
+> **API tokens:** `enrich_ips.py` reads API tokens from environment variables (`ABUSEIPDB_TOKEN`, `IPINFO_TOKEN`, `VPNAPI_TOKEN`, `SHODAN_TOKEN`) or from `api_tokens` in `config.json`. The agent retrieves these tokens from Azure Key Vault (`slrakv1`) at runtime and sets them as environment variables before executing the script. No manual token configuration is needed in `config.json`.
 
 ---
 

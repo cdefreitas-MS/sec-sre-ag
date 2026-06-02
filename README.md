@@ -281,3 +281,40 @@ of all SKILL.md and LLM instruction files is the one in the agent's **Builder**
 
 API tokens and environment parameters are NOT in the repo.
 See `shared/.env.example` for the template of required environment variables.
+
+---
+
+## Configuration
+
+The SRE Agent auto-generates `config.json` at the workspace root from its platform
+settings (`<agent_settings>`, `<log_analytics_access>`) before running any skill script.
+No manual configuration file is needed.
+
+### config.json schema (auto-generated)
+
+```json
+{
+  "tenant_name": "<short tenant name for report filenames>",
+  "sentinel_workspace_id": "<Log Analytics workspace GUID>",
+  "subscription_id": "<Azure subscription ID>",
+  "azure_mcp": {
+    "subscription_id": "<same as above>",
+    "resource_group": "<resource group containing the LA workspace>",
+    "workspace_name": "<Log Analytics workspace name>"
+  },
+  "api_tokens": {
+    "abuseipdb": "<retrieved from Key Vault at runtime>",
+    "ipinfo": "<retrieved from Key Vault at runtime>",
+    "vpnapi": "<retrieved from Key Vault at runtime>",
+    "shodan": "<optional>"
+  }
+}
+```
+
+The agent reads these values from:
+- `sentinel_workspace_id`, `subscription_id`, `azure_mcp.*` → from `<agent_settings>` and `<log_analytics_access>` injected by the platform
+- `tenant_name` → from agent memory or user prompt
+- `api_tokens.*` → from Azure Key Vault at runtime (for `enrich_ips.py` only)
+
+Scripts also accept CLI arguments (`--workspace-id`, `--subscription-id`, etc.)
+which override `config.json` values.

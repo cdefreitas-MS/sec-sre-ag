@@ -153,7 +153,7 @@ python <resolved_path>/invoke_ingestion_scan.py --phase 3
 python <resolved_path>/invoke_ingestion_scan.py --redo
 ```
 
-> **Note:** The script looks for `config.json` by walking up from its location. Place `config.json` at the workspace root with `sentinel_workspace_id`, `subscription_id`, and `azure_mcp.resource_group` / `azure_mcp.workspace_name` fields.
+> **Note:** The script looks for `config.json` by walking up from its location. The agent auto-generates this file at the workspace root from its platform settings before first execution. See [Config Auto-Generation](#config-auto-generation).
 
 **Output:** Scratchpad file at `tmp/sentinel-ingestion-report/scratchpad_<workspace>_<timestamp>.md` (~50 KB, 64 sections).
 
@@ -183,12 +183,59 @@ Render the **complete report (§1-§8) inline in chat**. This is the default and
 
 ---
 
+## Config Auto-Generation
+
+The agent auto-generates `config.json` at the workspace root before running any script. This replaces the need for a manually-maintained config file.
+
+### When to generate
+
+- **First execution in a session:** If `config.json` does not exist at the workspace root, or exists but has an empty `sentinel_workspace_id`, generate it immediately.
+- **Subsequent executions:** Skip — the file persists for the duration of the session.
+- **Never regenerate** if the file already has a non-empty `sentinel_workspace_id` (it may have been customized by the user).
+
+### How to generate
+
+Use `CreateFile` to write the following to the workspace root `config.json`:
+
+```json
+{
+  "tenant_name": "<from agent memory (overview.md) or ask user if unknown>",
+  "sentinel_workspace_id": "<from <log_analytics_access> workspace GUID>",
+  "subscription_id": "<from <azure_resource_access> subscription ID>",
+  "azure_mcp": {
+    "subscription_id": "<same as subscription_id above>",
+    "resource_group": "<from <log_analytics_access> or agent memory — NOTE: this is the workspace RG, which may differ from the agent RG>",
+    "workspace_name": "<from <log_analytics_access> workspace name>"
+  },
+  "api_tokens": {}
+}
+```
+
+**Field sources at runtime:**
+
+| Field | Source |
+|-------|--------|
+| `tenant_name` | Agent memory (`overview.md`) or user prompt |
+| `sentinel_workspace_id` | `<log_analytics_access>` → workspace GUID |
+| `subscription_id` | `<azure_resource_access>` → subscription ID |
+| `azure_mcp.resource_group` | `<log_analytics_access>` or agent memory — **verify via Resource Graph if uncertain** |
+| `azure_mcp.workspace_name` | `<log_analytics_access>` → workspace name |
+| `api_tokens` | Empty object — `enrich_ips.py` reads tokens from Key Vault / env vars independently |
+
+### Path
+
+Write to the **workspace root** (the top-level directory of the agent workspace). All Python scripts find it by walking up from their execution directory (up to 6–10 levels).
+
+**⛔ Do NOT write `config.json` inside `codeRefs/` or inside skill-specific directories.** The workspace root is the canonical location.
+
+---
+
 ## ⚠️ CRITICAL WORKFLOW RULES - READ FIRST ⚠️
 
 **Before starting ANY ingestion report:**
 
 1. **Run `invoke_ingestion_scan.py`** — this single script handles ALL data gathering (Phases 1-5). The LLM does NOT run queries, transcribe output, or write scratchpad sections
-2. **Read `config.json`** for workspace ID, tenant, subscription, and Azure MCP parameters
+2. **Ensure `config.json` exists at the workspace root** — the agent auto-generates it from its `<agent_settings>` and `<log_analytics_access>` platform configuration. If the file already exists with a non-empty `sentinel_workspace_id`, skip regeneration. See [Config Auto-Generation](#config-auto-generation) for the exact procedure.
 3. **Output is always inline** — do NOT ask the user for output mode. Render the report inline in chat. Only generate md/html files when the user explicitly requests export
 4. **ALWAYS ask the user for timeframe** if not specified: supported values are 1, 7, 30 (default), 60, or 90 days. The `--days` parameter controls the primary window; deep-dive and comparison windows are derived automatically
 
@@ -244,7 +291,7 @@ The `-Days` parameter drives three time windows used across all queries:
 
 ### Phase 0: Initialization
 
-1. Read `config.json` for `sentinel_workspace_id`, `subscription_id`, Azure MCP parameters
+1. **Auto-generate `config.json`** at the workspace root if missing or empty (see [Config Auto-Generation](#config-auto-generation))
 2. Confirm output mode and timeframe with user (pass `--days` to the script; default 30)
 3. Verify prerequisites: `az login` session active, correct subscription set
 
