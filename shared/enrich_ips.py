@@ -46,14 +46,19 @@ def load_config() -> dict:
     """Load config from config.json, with API tokens overridden by environment variables."""
     # Auto-load .env file from the project root if present
     load_dotenv(Path(__file__).parent / '.env')
-    config = {}  # FIXED: start with empty dict — config.json is optional
-    config_path = Path(__file__).parent / 'config.json'
-    if config_path.exists():  # FIXED: only read if file actually exists
-        try:
-            with open(config_path, 'r') as f:
-                config = json.load(f)
-        except (json.JSONDecodeError, IOError) as e:
-            print(f"  [config] Warning: could not read config.json: {e}", file=sys.stderr)
+    config = {}  # config.json is optional
+    # Walk up from script dir to find config.json (max 6 levels)
+    d = Path(__file__).parent.resolve()
+    for _ in range(6):
+        candidate = d / 'config.json'
+        if candidate.exists():
+            try:
+                with open(candidate, 'r') as f:
+                    config = json.load(f)
+            except (json.JSONDecodeError, IOError) as e:
+                print(f"  [config] Warning: could not read {candidate}: {e}", file=sys.stderr)
+            break
+        d = d.parent
     # Environment variables take precedence over config.json for API tokens
     env_token_map = {
         'ipinfo_token': 'IPINFO_TOKEN',
