@@ -100,7 +100,7 @@ GRAPH_STEPS: list[dict] = [
         "label": "PIM Eligible Roles",
         "prefix": "pim_eligible_roles",
         "uri": (
-            "https://graph.microsoft.com/v1.0/roleManagement/directory/"
+            "https://graph.microsoft.com/beta/roleManagement/directory/"
             "roleEligibilityScheduleInstances"
             "?$expand=principal($select=id,userPrincipalName,displayName),"
             "roleDefinition($select=displayName)"
