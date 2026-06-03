@@ -5,6 +5,10 @@ threat_pulse_domains: [admin]
 drill_down_prompt: 'Run MCP usage monitoring report — Graph/Sentinel/Azure MCP activity, user attribution'
 ---
 
+> ⚠️ **CRITICAL TOOL RULE — ALWAYS PASS --subscription TO MCP MONITOR**
+>
+> When calling `monitor-client_monitor_workspace_log_query`, the `subscription` parameter is MANDATORY. Without it, the tool returns a 400 error that produces 0 results. Always pass it.
+
 # MCP Server Usage Monitoring — Instructions
 
 ## Purpose

@@ -11,6 +11,19 @@ description: >
   TVM tables (software inventory, vulnerabilities) are NOT available through Log Analytics.
 ---
 
+> ⚠️ **CRITICAL OUTPUT RULE — ALWAYS PRESENT RESULTS INLINE FIRST**
+>
+> The investigation results MUST be presented **inline in chat** as the primary output. This is mandatory and non-negotiable.
+> - Phase 2 findings: present the full analysis inline (timeline, alerts, key findings, risk assessment)
+> - HTML report generation: ONLY when the user explicitly requests it (e.g., "generate HTML", "create report")
+> - JSON export: ONLY when needed for HTML generation or user explicitly requests it
+>
+> **NEVER** skip the inline presentation and jump directly to file generation. The user expects to see results in chat immediately. File exports are supplements, not replacements.
+
+> ⚠️ **CRITICAL TOOL RULE — ALWAYS PASS --subscription TO MCP MONITOR**
+>
+> When calling `monitor-client_monitor_workspace_log_query`, the `subscription` parameter is MANDATORY. Without it, the tool returns a 400 error that may be silently interpreted as "no data". Always read the subscription ID from the agent's `<azure_resource_access>` settings and pass it in every call. Never omit it.
+
 # Computer Security Investigation — Monitor MCP + Azure CLI
 
 ## Purpose

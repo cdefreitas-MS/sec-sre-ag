@@ -12,6 +12,10 @@ threat_pulse_domains: [identity, endpoint, email, exposure]
 drill_down_prompt: 'Investigate IoC {entity} — threat intel, organizational exposure, affected devices'
 ---
 
+> ⚠️ **CRITICAL TOOL RULE — ALWAYS PASS --subscription TO MCP MONITOR**
+>
+> When calling `monitor-client_monitor_workspace_log_query`, the `subscription` parameter is MANDATORY. Without it, the tool returns a 400 error. Always pass it.
+
 # IoC (Indicator of Compromise) Investigation — Monitor MCP + Azure CLI
 
 ## Purpose

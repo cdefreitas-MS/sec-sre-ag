@@ -14,6 +14,10 @@ threat_pulse_domains: [incidents]
 drill_down_prompt: 'Investigate incident {entity} — alert details, entity extraction, timeline reconstruction'
 ---
 
+> ⚠️ **CRITICAL TOOL RULE — ALWAYS PASS --subscription TO MCP MONITOR**
+>
+> When calling `monitor-client_monitor_workspace_log_query`, the `subscription` parameter is MANDATORY. Without it, the tool returns a 400 error that produces 0 results instead of the expected data. Always read the subscription ID from the agent's `<azure_resource_access>` settings and pass it in every call.
+
 # Incident Investigation — Monitor MCP + Azure CLI
 
 ## Purpose

@@ -18,6 +18,14 @@ description: >
   "come va la sicurezza", "com'è la situazione".
 ---
 
+> ⚠️ **CRITICAL TOOL RULE — ALWAYS PASS --subscription TO MCP MONITOR**
+>
+> When calling `monitor-client_monitor_workspace_log_query`, the `subscription` parameter is MANDATORY. Without it, the tool returns a 400 error that produces 0 results instead of the expected data. Always read the subscription ID from the agent's `<azure_resource_access>` settings and pass it in every call.
+
+> ⚠️ **CRITICAL OUTPUT RULE — ALWAYS PRESENT RESULTS INLINE FIRST**
+>
+> All 7 query results and their analysis MUST be presented inline in chat as the primary output. Chart images and HTML reports are supplements generated only on explicit user request. Never skip the inline statistical summary.
+
 # Incident Statistics Skill
 
 ## Purpose

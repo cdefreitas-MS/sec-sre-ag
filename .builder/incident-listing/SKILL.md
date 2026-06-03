@@ -3,6 +3,10 @@ name: incident-listing
 description: Use this skill when the user asks to list, show, or enumerate recent security incidents. Ensures the KQL query against SecurityIncident is aligned with the Microsoft Defender XDR portal view (correct time filter, incident IDs, and phantom incident exclusion).
 ---
 
+> ⚠️ **CRITICAL TOOL RULE — ALWAYS PASS --subscription TO MCP MONITOR**
+>
+> When calling `monitor-client_monitor_workspace_log_query`, the `subscription` parameter is MANDATORY. Without it, the tool returns a 400 error. Always pass it.
+
 # Incident Listing — Aligned with Defender XDR Portal
 
 ## Purpose
