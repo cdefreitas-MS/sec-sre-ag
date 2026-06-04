@@ -223,22 +223,24 @@ The script is idempotent — it skips permissions already assigned. After runnin
 
 The UAMI also needs Azure RBAC roles for Sentinel workspace access and (optionally) Key Vault secret retrieval.
 
-| Role | Scope | Purpose |
-|---|---|---|
-| **Microsoft Sentinel Reader** | Log Analytics workspace | All skills querying Sentinel tables via Azure Monitor MCP (includes Log Analytics Reader) |
-| **Microsoft Sentinel Responder** | Log Analytics workspace | incident-comment skill — post comments via ARM/Sentinel API (fallback; not needed if using Graph API) |
-| **Key Vault Secrets User** | Key Vault resource | Optional — only needed for IP enrichment API tokens |
+| Role | Scope | Required | Purpose |
+|---|---|---|---|
+| **Microsoft Sentinel Reader** | Log Analytics workspace | Yes | All skills querying Sentinel tables via Azure Monitor MCP (includes Log Analytics Reader) |
+| **Microsoft Sentinel Responder** | Log Analytics workspace | Yes (incident-comment) | Post comments on incidents via ARM/Sentinel API |
+| **Key Vault Secrets User** | Key Vault resource | Optional | Only needed for IP enrichment API tokens |
+
+> **Why is Sentinel Responder required?** The Graph API `SecurityIncident.ReadWrite.All` permission is assigned to the UAMI as an Application permission, but the agent's sandbox uses a **delegated user token** for Graph API calls — which does not carry Application-level scopes. The ARM/Sentinel REST API uses the UAMI's own token (where RBAC roles apply), making it the reliable path for posting incident comments.
 
 Assign with Azure CLI:
 
 ```bash
-# Sentinel Reader (required)
+# Sentinel Reader (required — all skills)
 az role assignment create \
   --assignee <UAMI_PRINCIPAL_ID> \
   --role "Microsoft Sentinel Reader" \
   --scope "/subscriptions/<SUBSCRIPTION_ID>/resourceGroups/<WORKSPACE_RG>/providers/Microsoft.OperationalInsights/workspaces/<WORKSPACE_NAME>"
 
-# Sentinel Responder (optional — only if using ARM API for incident comments)
+# Sentinel Responder (required — incident-comment skill)
 az role assignment create \
   --assignee <UAMI_PRINCIPAL_ID> \
   --role "Microsoft Sentinel Responder" \
