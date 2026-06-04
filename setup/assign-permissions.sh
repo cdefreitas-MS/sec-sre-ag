@@ -13,21 +13,17 @@
 #
 # Usage:
 #   chmod +x assign-permissions.sh
-#   ./assign-permissions.sh <UAMI_OBJECT_ID> [WORKSPACE_SCOPE] [KEYVAULT_SCOPE]
+#   ./assign-permissions.sh <UAMI_OBJECT_ID>
 #
 # Where:
-#   UAMI_OBJECT_ID  = Object ID of the User-Assigned Managed Identity
-#                     (find it in Azure Portal → Managed Identities → Overview)
-#   WORKSPACE_SCOPE = (Optional) Full resource ID of the Log Analytics workspace
-#                     e.g. /subscriptions/.../providers/Microsoft.OperationalInsights/workspaces/<name>
-#                     If provided, assigns Microsoft Sentinel Reader + Responder RBAC roles.
-#   KEYVAULT_SCOPE  = (Optional) Full resource ID of the Key Vault
-#                     e.g. /subscriptions/.../providers/Microsoft.KeyVault/vaults/<name>
-#                     If provided, assigns Key Vault Secrets User RBAC role.
+#   UAMI_OBJECT_ID = Object ID of the User-Assigned Managed Identity
+#                    (find it in Azure Portal → Managed Identities → Overview)
 #
 # After running: wait up to 1 hour for Entra ID token cache to refresh,
 # or force a new token in the agent's next session.
-# Azure RBAC roles typically propagate within 5-10 minutes.
+#
+# For Azure RBAC roles (Sentinel Reader/Responder, Key Vault), use the
+# companion script: assign-azure-roles.sh
 # ============================================================================
 
 set -euo pipefail
@@ -42,8 +38,6 @@ if [[ $# -lt 1 ]]; then
 fi
 
 UAMI_OBJECT_ID="$1"
-WORKSPACE_SCOPE="${2:-}"
-KEYVAULT_SCOPE="${3:-}"
 
 # --- Well-known Application IDs ---
 GRAPH_APP_ID="00000003-0000-0000-c000-000000000000"   # Microsoft Graph
@@ -171,73 +165,9 @@ if [[ $FAILED -gt 0 ]]; then
   exit 1
 fi
 
-# ============================================================================
-# RBAC Role Assignments (optional — if workspace/keyvault scope provided)
-# ============================================================================
-
-RBAC_ASSIGNED=0
-
-if [[ -n "$WORKSPACE_SCOPE" ]]; then
-  echo ""
-  echo "--- Azure RBAC — Sentinel workspace ---"
-  echo ""
-  echo "  Scope: $WORKSPACE_SCOPE"
-  echo ""
-
-  # Get the UAMI's Client ID (appId) for RBAC assignment
-  UAMI_CLIENT_ID=$(az ad sp show --id "$UAMI_OBJECT_ID" --query appId -o tsv 2>/dev/null) || {
-    echo "  WARN  Could not resolve UAMI Client ID; using Object ID for RBAC."
-    UAMI_CLIENT_ID="$UAMI_OBJECT_ID"
-  }
-
-  for ROLE in "Microsoft Sentinel Reader" "Microsoft Sentinel Responder"; do
-    if az role assignment list --assignee "$UAMI_CLIENT_ID" --role "$ROLE" --scope "$WORKSPACE_SCOPE" --query '[0].id' -o tsv 2>/dev/null | grep -q .; then
-      echo "  SKIP  $ROLE (already assigned)"
-    else
-      if az role assignment create --assignee "$UAMI_CLIENT_ID" --role "$ROLE" --scope "$WORKSPACE_SCOPE" -o none 2>/dev/null; then
-        echo "  OK    $ROLE"
-        ((RBAC_ASSIGNED++))
-      else
-        echo "  FAIL  $ROLE"
-      fi
-    fi
-  done
-fi
-
-if [[ -n "$KEYVAULT_SCOPE" ]]; then
-  echo ""
-  echo "--- Azure RBAC — Key Vault ---"
-  echo ""
-  echo "  Scope: $KEYVAULT_SCOPE"
-  echo ""
-
-  UAMI_CLIENT_ID=${UAMI_CLIENT_ID:-$(az ad sp show --id "$UAMI_OBJECT_ID" --query appId -o tsv 2>/dev/null || echo "$UAMI_OBJECT_ID")}
-
-  ROLE="Key Vault Secrets User"
-  if az role assignment list --assignee "$UAMI_CLIENT_ID" --role "$ROLE" --scope "$KEYVAULT_SCOPE" --query '[0].id' -o tsv 2>/dev/null | grep -q .; then
-    echo "  SKIP  $ROLE (already assigned)"
-  else
-    if az role assignment create --assignee "$UAMI_CLIENT_ID" --role "$ROLE" --scope "$KEYVAULT_SCOPE" -o none 2>/dev/null; then
-      echo "  OK    $ROLE"
-      ((RBAC_ASSIGNED++))
-    else
-      echo "  FAIL  $ROLE"
-    fi
-  fi
-fi
-
-# --- Final summary ---
-echo ""
-echo "============================================"
-echo " Complete"
-echo "============================================"
-echo "  API permissions assigned: $ASSIGNED"
-echo "  API permissions skipped:  $SKIPPED (already present)"
-if [[ -n "$WORKSPACE_SCOPE" || -n "$KEYVAULT_SCOPE" ]]; then
-  echo "  RBAC roles assigned:     $RBAC_ASSIGNED"
-fi
-echo ""
 echo "✅ Done. Token cache may take up to 1 hour to refresh."
-echo "   Azure RBAC roles typically propagate within 5-10 minutes."
-echo "   After that, Graph API, MDE API, and Sentinel API calls"
-echo "   from the agent will work without additional configuration."
+echo "   After that, Graph API and MDE API calls from the agent"
+echo "   will work without additional consent prompts."
+echo ""
+echo "Next step: run assign-azure-roles.sh to assign Azure RBAC roles"
+echo "(Sentinel Reader/Responder, Key Vault Secrets User)."
