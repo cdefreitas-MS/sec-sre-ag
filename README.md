@@ -32,6 +32,18 @@ Audits organization-wide identity security posture using Microsoft Graph API and
 | 4 | *What's the distribution of privileged roles across the tenant?* |
 | 5 | *Show me risky users flagged by Entra ID Identity Protection* |
 
+### incident-comment
+
+Posts content as a comment on a Microsoft Sentinel incident. Accepts plain text, Markdown, or HTML. Plain text is posted as-is; Markdown is converted to HTML optimized for the narrow Activities panel; HTML is adapted for single-column display. All input content is preserved in full — no summarization or truncation — unless the user explicitly requests it.
+
+| # | Example prompt |
+|---|---|
+| 1 | *Post this investigation summary as a comment on incident 12345* |
+| 2 | *Scrivi il report come commento sull'incidente 98765* |
+| 3 | *Add a comment to incident 54321 with the analysis results* |
+| 4 | *Aggiungi questo testo come commento all'incidente* |
+| 5 | *Comment on the incident with the HTML report* |
+
 ### incident-investigation
 
 Deep-dives into individual security incidents from Microsoft Defender XDR / Microsoft Sentinel. Retrieves incident metadata, associated alerts, affected assets, and evidence, then orchestrates sub-investigations for involved users, devices, and IoCs. Includes cache management for reusable investigation data across sessions.
