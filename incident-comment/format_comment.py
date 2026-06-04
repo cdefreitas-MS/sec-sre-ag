@@ -61,6 +61,171 @@ _MD_SIGNALS = [
     re.compile(r"~~[^~]+~~"),                           # strikethrough
 ]
 
+
+# ═══════════════════════════════════════════════════════════════════
+# DUAL-THEME COLOR NORMALIZATION
+# ═══════════════════════════════════════════════════════════════════
+
+_BG_GRADIENT_RE = re.compile(r"background\s*:\s*linear-gradient", re.IGNORECASE)
+
+
+def _hex_luminance(hex_color: str) -> float:
+    """Perceived luminance 0.0 (black) → 1.0 (white)."""
+    h = hex_color.lstrip("#")
+    if len(h) == 3:
+        h = "".join(c * 2 for c in h)
+    if len(h) < 6:
+        return 0.5
+    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    return (0.299 * r + 0.587 * g + 0.114 * b) / 255
+
+
+def _normalize_for_dual_theme(html: str) -> str:
+    """Strip dark-mode colors so content is readable in both light and dark themes.
+
+    Strategy:
+    - Strip ALL explicit ``color:`` properties → text inherits the platform theme
+      (black in light mode, white in dark mode).
+    - Strip dark ``background:`` / ``background-color:`` (luminance < 0.3) → removes
+      dark row stripes that clash with light-mode pages.
+    - Keep ``background: linear-gradient(...)`` → decorative banners stay.
+    - Keep bright ``background:`` colours (luminance ≥ 0.3) → badges / pills stay.
+    """
+
+    def _process_style(style_val: str) -> str:
+        # Strip ALL explicit foreground colors
+        result = re.sub(
+            r"color\s*:\s*#[0-9a-fA-F]{3,8}\b[^;]*;?",
+            "",
+            style_val,
+        )
+        # Strip dark backgrounds (but not gradients)
+        if not _BG_GRADIENT_RE.search(result):
+            def _check_bg(m):
+                if _hex_luminance(m.group(1)) < 0.3:
+                    return ""  # strip dark background
+                return m.group(0)  # keep bright background
+            result = re.sub(
+                r"background(?:-color)?\s*:\s*#([0-9a-fA-F]{3,8})\b[^;]*;?",
+                _check_bg,
+                result,
+            )
+        # Clean up stray semicolons / whitespace
+        result = re.sub(r";\s*;", ";", result)
+        result = re.sub(r"^\s*;\s*", "", result)
+        result = re.sub(r"\s*;\s*$", "", result)
+        return result.strip()
+
+    def _fix_style_attr(m):
+        new_val = _process_style(m.group(1))
+        if not new_val:
+            return ""  # remove empty style attribute
+        return f'style="{new_val}"'
+
+    return re.sub(
+        r'style="([^"]*)"',
+        _fix_style_attr,
+        html,
+        flags=re.IGNORECASE,
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════
+# OVERFLOW HANDLING  (reduce / split)
+# ═══════════════════════════════════════════════════════════════════
+
+
+def _reduce_html(html: str, max_chars: int) -> str:
+    """Aggressively minify HTML to fit within *max_chars*.
+
+    Reduction pipeline (each step is tried in order):
+    1. Strip HTML comments
+    2. Collapse redundant whitespace
+    3. Strip all inline ``style=`` attributes
+    4. Hard-truncate with a notice
+    """
+    result = html
+
+    # Step 1 — strip HTML comments
+    result = re.sub(r"<!--.*?-->", "", result, flags=re.DOTALL)
+    result = re.sub(r"\n\s*\n", "\n", result)
+    if len(result) <= max_chars:
+        return result
+
+    # Step 2 — collapse whitespace
+    result = re.sub(r"  +", " ", result)
+    result = re.sub(r">\s+<", "><", result)
+    if len(result) <= max_chars:
+        return result
+
+    # Step 3 — strip all inline styles
+    result = re.sub(r'\s*style="[^"]*"', "", result, flags=re.IGNORECASE)
+    if len(result) <= max_chars:
+        return result
+
+    # Step 4 — hard truncate
+    notice = "\n<p><em>[Content truncated — exceeded {:,} character limit]</em></p>".format(
+        max_chars
+    )
+    result = result[: max_chars - len(notice)] + notice
+    return result
+
+
+def _split_html(html: str, max_chars: int) -> list[str]:
+    r"""Split HTML into chunks that each fit within *max_chars*.
+
+    Splits at top-level block-element boundaries (``</div>``, ``</table>``,
+    ``</p>``, ``</h\d>``) and adds a "Part N of M" header to each chunk.
+    """
+    if len(html) <= max_chars:
+        return [html]
+
+    # Collect candidate split points
+    split_points = [m.end() for m in re.finditer(r"</(?:div|table|p|h[1-6])>\s*", html)]
+    if not split_points:
+        # No good split points — hard split
+        return [html[i : i + max_chars - 200] for i in range(0, len(html), max_chars - 200)]
+
+    # Build chunks by grouping split-points that fit within max_chars
+    reserve = 150  # room for part header
+    limit = max_chars - reserve
+    chunks: list[str] = []
+    start = 0
+    for sp in split_points:
+        if sp - start > limit and start != sp:
+            chunks.append(html[start : sp if len(html[start:sp]) <= limit else start + limit])
+            start = sp if len(html[start:sp]) <= limit else start + limit
+    if start < len(html):
+        chunks.append(html[start:])
+
+    # Merge small consecutive chunks
+    merged: list[str] = []
+    current = ""
+    for chunk in chunks:
+        if len(current) + len(chunk) <= limit:
+            current += chunk
+        else:
+            if current:
+                merged.append(current)
+            current = chunk
+    if current:
+        merged.append(current)
+
+    # Add part headers
+    total = len(merged)
+    if total <= 1:
+        return merged
+    result = []
+    for i, chunk in enumerate(merged, 1):
+        hdr = (
+            f'<div style="background:#0078d4;color:#fff;padding:4px 10px;'
+            f'border-radius:4px;margin-bottom:8px;font-size:12px;'
+            f'font-weight:600;">Part {i} of {total}</div>'
+        )
+        result.append(hdr + chunk)
+    return result
+
+
 # ═══════════════════════════════════════════════════════════════════
 # CONTENT TYPE DETECTION
 # ═══════════════════════════════════════════════════════════════════
@@ -165,13 +330,13 @@ def markdown_to_html(md: str) -> str:
         html = '<div style="overflow-x:auto;"><table style="border-collapse:collapse;width:100%;font-size:13px;">'
         html += "<thead><tr>"
         for cell in header_cells:
-            html += f'<th style="border:1px solid #555;padding:4px 8px;text-align:left;background:#2a2a2a;">{_md_inline(cell)}</th>'
+            html += f'<th style="border:1px solid rgba(128,128,128,0.3);padding:4px 8px;text-align:left;font-weight:700;">{_md_inline(cell)}</th>'
         html += "</tr></thead><tbody>"
         for row in rows[data_start:]:
             cells = [c.strip() for c in row.strip("|").split("|")]
             html += "<tr>"
             for cell in cells:
-                html += f'<td style="border:1px solid #555;padding:4px 8px;">{_md_inline(cell)}</td>'
+                html += f'<td style="border:1px solid rgba(128,128,128,0.3);padding:4px 8px;">{_md_inline(cell)}</td>'
             html += "</tr>"
         html += "</tbody></table></div>"
         out.append(html)
@@ -182,7 +347,8 @@ def markdown_to_html(md: str) -> str:
             if in_code:
                 code_text = "\n".join(code_buf)
                 out.append(
-                    f'<pre style="background:#1e1e1e;padding:8px;border-radius:4px;'
+                    f'<pre style="padding:8px;border-radius:4px;'
+                    f'border:1px solid rgba(128,128,128,0.3);'
                     f'overflow-x:auto;white-space:pre-wrap;word-wrap:break-word;'
                     f'font-size:12px;"><code>{code_text}</code></pre>'
                 )
@@ -230,8 +396,8 @@ def markdown_to_html(md: str) -> str:
             flush_list()
             bq_text = _md_inline(stripped.lstrip("> "))
             out.append(
-                f'<blockquote style="border-left:3px solid #666;padding-left:10px;'
-                f'margin:6px 0;color:#aaa;">{bq_text}</blockquote>'
+                f'<blockquote style="border-left:3px solid rgba(128,128,128,0.4);padding-left:10px;'
+                f'margin:6px 0;opacity:0.85;">{bq_text}</blockquote>'
             )
             continue
 
@@ -268,7 +434,8 @@ def markdown_to_html(md: str) -> str:
     if in_code and code_buf:
         code_text = "\n".join(code_buf)
         out.append(
-            f'<pre style="background:#1e1e1e;padding:8px;border-radius:4px;'
+            f'<pre style="padding:8px;border-radius:4px;'
+            f'border:1px solid rgba(128,128,128,0.3);'
             f'overflow-x:auto;white-space:pre-wrap;word-wrap:break-word;'
             f'font-size:12px;"><code>{code_text}</code></pre>'
         )
@@ -278,7 +445,7 @@ def markdown_to_html(md: str) -> str:
     body = "\n".join(out)
     return (
         f'<div style="font-family:Segoe UI,sans-serif;font-size:14px;'
-        f'line-height:1.5;color:#e0e0e0;max-width:100%;'
+        f'line-height:1.5;max-width:100%;'
         f'word-wrap:break-word;overflow-wrap:break-word;">'
         f"{body}</div>"
     )
@@ -424,7 +591,10 @@ def adapt_html(html: str) -> str:
 
     result = re.sub(r"<pre\b[^>]*>", _fix_pre, result, flags=re.IGNORECASE)
 
-    # 9. Wrap in a column container
+    # 9. Normalize colors for dual-theme compatibility (light + dark mode)
+    result = _normalize_for_dual_theme(result)
+
+    # 10. Wrap in a column container
     result = (
         f'<div style="font-family:Segoe UI,sans-serif;font-size:14px;'
         f'line-height:1.5;max-width:100%;'
@@ -506,6 +676,15 @@ def main():
         default=None,
         help="Optional title banner prepended to the comment",
     )
+    parser.add_argument(
+        "--on-overflow",
+        choices=["error", "reduce", "split"],
+        default="error",
+        help="Action when content exceeds --max-chars: "
+             "error (exit 2, default), "
+             "reduce (minify to fit — recommended for unattended runs), "
+             "split (output multiple JSON files)",
+    )
 
     args = parser.parse_args()
 
@@ -538,14 +717,41 @@ def main():
         banner = _make_title_banner(args.title)
         converted = banner + converted
 
-    # Check length
+    # Check length and handle overflow
     if len(converted) > args.max_chars:
-        print(
-            f"ERROR: Converted content is {len(converted)} chars, "
-            f"exceeds limit of {args.max_chars}.",
-            file=sys.stderr,
-        )
-        sys.exit(2)
+        if args.on_overflow == "error":
+            print(
+                f"ERROR: Converted content is {len(converted):,} chars, "
+                f"exceeds limit of {args.max_chars:,}.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+
+        elif args.on_overflow == "reduce":
+            converted = _reduce_html(converted, args.max_chars)
+            print(
+                f"WARN: Content reduced from {len(converted):,} to fit "
+                f"{args.max_chars:,} char limit.",
+                file=sys.stderr,
+            )
+
+        elif args.on_overflow == "split":
+            parts = _split_html(converted, args.max_chars)
+            out_stem = Path(args.output_json).stem
+            out_dir = Path(args.output_json).parent
+            out_dir.mkdir(parents=True, exist_ok=True)
+            build_fn = build_graph_body if args.api == "graph" else build_sentinel_body
+            for i, part in enumerate(parts, 1):
+                part_path = out_dir / f"{out_stem}_{i}.json"
+                part_path.write_text(
+                    json.dumps(build_fn(part), ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+            print(
+                f"OK | type={content_type} | api={args.api} | "
+                f"split={len(parts)} parts | output_dir={out_dir}"
+            )
+            sys.exit(0)
 
     # Build JSON body
     if args.api == "graph":
@@ -559,7 +765,7 @@ def main():
     out_path.write_text(json.dumps(body, ensure_ascii=False, indent=2), encoding="utf-8")
 
     # Report
-    print(f"OK | type={content_type} | api={args.api} | chars={len(converted)} | output={out_path}")
+    print(f"OK | type={content_type} | api={args.api} | chars={len(converted):,} | output={out_path}")
 
 
 if __name__ == "__main__":

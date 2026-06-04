@@ -90,14 +90,20 @@ If the incident ID is **numeric** or **INxx-xxxxx** format and you need the GUID
 SecurityIncident
 | where IncidentNumber == <NUMERIC_ID> or ProviderIncidentId == "<ID>"
 | summarize arg_max(TimeGenerated, *) by IncidentNumber
-| project IncidentNumber, IncidentName, Title
+| project IncidentNumber, IncidentName, Title, ProviderIncidentId
 ```
+
+> **Note:** User-provided numeric IDs are typically the `ProviderIncidentId`
+> (Defender XDR), not the Sentinel `IncidentNumber`. The KQL above searches both
+> fields. Always set `hours` to at least **720** (30 days) to avoid missing older
+> incidents.
 
 Execute via `monitor-client_monitor_workspace_log_query` with:
 - `workspace`: `951fd5ab-18a2-40c9-8b77-aca135d16fb9`
 - `subscription`: `d6116047-3fe1-46f0-aa50-14dd661af84e`
 - `resource-group`: `sentinel-us-rg`
 - `table`: `SecurityIncident`
+- `hours`: `720`
 
 ### Step 2: Identify the Content
 
@@ -126,9 +132,10 @@ Resolve `format_comment.py` via the [File Resolution cascade](#file-resolution-c
 ```bash
 python3 <resolved_path>/format_comment.py <input_file> \
     --output-json tmp/incident-comment/comment_body.json \
-    --api graph \
+    --api sentinel \
     [--type auto] \
-    [--title "Optional Title"]
+    [--title "Optional Title"] \
+    [--on-overflow reduce]
 ```
 
 **CLI arguments:**
@@ -137,65 +144,102 @@ python3 <resolved_path>/format_comment.py <input_file> \
 |----------|----------|---------|-------------|
 | `input_file` | Yes | — | Path to the content file |
 | `--output-json` | Yes | — | Where to write the JSON body |
-| `--api` | No | `graph` | `graph` or `sentinel` — target API format |
+| `--api` | No | `sentinel` | `sentinel` or `graph` — target API format |
 | `--type` | No | `auto` | `auto`, `text`, `markdown`, `html` — content type |
 | `--max-chars` | No | 30000 | Character limit |
 | `--title` | No | None | Optional title banner prepended to comment |
+| `--on-overflow` | No | `error` | `error` (exit 2), `reduce` (minify to fit — default for unattended), `split` (multiple files) |
 
 **Exit codes:**
 - `0` — success
 - `1` — argument / runtime error
-- `2` — content exceeds `--max-chars`
+- `2` — content exceeds `--max-chars` (only when `--on-overflow error`)
 
-If exit code is `2`, inform the user that the content exceeds the 30,000 character limit
-and ask whether to split into multiple comments or truncate.
+**Overflow handling (content > 30,000 chars):**
+
+If exit code is `2`, ask the user whether to **reduce** (minify to fit — recommended
+default for unattended runs) or **split** into multiple comments. Then re-run with
+the appropriate `--on-overflow` flag:
+
+- `--on-overflow reduce` — strips HTML comments, collapses whitespace, removes inline
+  styles, and truncates with a notice if still too long.
+- `--on-overflow split` — splits at block-element boundaries and outputs numbered
+  JSON files (`comment_body_1.json`, `comment_body_2.json`, …). Post each file as
+  a separate comment.
+
+For **unattended / autonomous** runs, default to `--on-overflow reduce`.
 
 ### Step 4: Post the Comment
 
-#### Primary: Microsoft Graph API
+#### Primary: ARM / Sentinel REST API (Python urllib)
 
-```bash
-az rest --method POST \
-    --url "https://graph.microsoft.com/v1.0/security/incidents/<INCIDENT_ID>/comments" \
-    --headers "Content-Type=application/json" \
-    --body @tmp/incident-comment/comment_body.json \
-    --subscription d6116047-3fe1-46f0-aa50-14dd661af84e
-```
+The ARM/Sentinel API uses the UAMI token (obtained via `RunAzCliReadCommands`),
+which carries Azure RBAC roles. This is the **reliable path** for posting comments.
 
-Where `<INCIDENT_ID>` is the **numeric** incident ID (from Defender XDR / Sentinel
-`IncidentNumber` field).
+> **Why not `--body @file`?** The `RunAzCliWriteCommands` tool environment does not
+> mount the workspace filesystem — `@/path/to/file` sends the literal string instead
+> of reading the file, and shell substitutions like `$(cat ...)` also fail. Use
+> Python `urllib.request` in `RunInTerminal` instead.
 
-**Required permission:** `SecurityIncident.ReadWrite.All` (Application) on the UAMI.
+**Steps:**
 
-Execute via `RunAzCliReadCommands` (yes — `az rest --method POST` works through this
-tool; it is a REST call, not a resource mutation via ARM).
+1. **Get an ARM token** via `RunAzCliReadCommands`:
 
-#### Fallback: ARM / Sentinel REST API
+   ```
+   az account get-access-token --resource https://management.azure.com --query accessToken -o tsv --subscription d6116047-3fe1-46f0-aa50-14dd661af84e
+   ```
 
-If the Graph API fails (403, 404, or permission error), use the ARM API:
+2. **POST via Python** in `RunInTerminal`:
 
-```bash
-az rest --method PUT \
-    --url "https://management.azure.com/subscriptions/d6116047-3fe1-46f0-aa50-14dd661af84e/resourceGroups/sentinel-us-rg/providers/Microsoft.OperationalInsights/workspaces/sentinel-us/providers/Microsoft.SecurityInsights/incidents/<INCIDENT_GUID>/comments/<NEW_COMMENT_GUID>?api-version=2024-03-01" \
-    --headers "Content-Type=application/json" \
-    --body @tmp/incident-comment/comment_body.json \
-    --subscription d6116047-3fe1-46f0-aa50-14dd661af84e
-```
+   ```python
+   import json, urllib.request, ssl, uuid
+
+   token = "<TOKEN_FROM_STEP_1>"
+
+   with open("tmp/incident-comment/comment_body.json", "r") as f:
+       body = json.load(f)
+
+   payload = json.dumps(body).encode("utf-8")
+   incident_guid = "<INCIDENT_GUID>"   # from Step 1 KQL
+   comment_guid = str(uuid.uuid4())
+
+   url = (
+       f"https://management.azure.com/subscriptions/d6116047-3fe1-46f0-aa50-14dd661af84e"
+       f"/resourceGroups/sentinel-us-rg/providers/Microsoft.OperationalInsights/workspaces/sentinel-us"
+       f"/providers/Microsoft.SecurityInsights/incidents/{incident_guid}/comments/{comment_guid}"
+       f"?api-version=2024-03-01"
+   )
+
+   req = urllib.request.Request(url, data=payload, method="PUT")
+   req.add_header("Authorization", f"Bearer {token}")
+   req.add_header("Content-Type", "application/json")
+
+   with urllib.request.urlopen(req, context=ssl.create_default_context()) as resp:
+       result = json.loads(resp.read().decode())
+       print(f"SUCCESS — Comment ID: {result['name']}")
+   ```
 
 Where:
 - `<INCIDENT_GUID>` is the `IncidentName` field (GUID) from SecurityIncident — resolved in Step 1.
-- `<NEW_COMMENT_GUID>` is a freshly generated UUID (use `python3 -c "import uuid; print(uuid.uuid4())"` to generate one).
+- `<TOKEN_FROM_STEP_1>` is the ARM access token obtained in the first sub-step.
 
-**Required permission:** `Microsoft Sentinel Responder` role on the workspace.
+**Required permission:** `Microsoft Sentinel Responder` role on the workspace (**required**).
 
-For the Sentinel API, re-run `format_comment.py` with `--api sentinel` to get the
-correct JSON body format:
+**Short-body fallback (< 1 KB):** For very short comments, you can use
+`RunAzCliWriteCommands` with inline JSON body:
 
-```bash
-python3 <resolved_path>/format_comment.py <input_file> \
-    --output-json tmp/incident-comment/comment_body_sentinel.json \
-    --api sentinel
 ```
+az rest --method PUT --url "<ARM_URL>" --body "{\"properties\":{\"message\":\"<SHORT_TEXT>\"}}" --subscription d6116047-3fe1-46f0-aa50-14dd661af84e
+```
+
+#### Why not Graph API?
+
+The Graph API endpoint (`POST /security/incidents/{id}/comments`) requires the
+`SecurityIncident.ReadWrite.All` **Application** permission. However, the agent's
+`RunAzCliWriteCommands` tool uses a **delegated user token** for Graph API calls —
+not the UAMI's application token. Delegated tokens do not carry Application-level
+scopes, so the Graph API always returns **403 Forbidden**. The ARM/Sentinel API
+path uses the UAMI token where RBAC roles apply correctly.
 
 ### Step 5: Confirm to User
 
@@ -219,12 +263,14 @@ If the API call fails:
 
 | Issue | Solution |
 |-------|----------|
-| Incident not found | Verify ID format; try numeric, GUID, and ProviderIncidentId |
-| Graph API 403 | UAMI needs `SecurityIncident.ReadWrite.All` app permission |
-| ARM API 403 | UAMI needs `Microsoft Sentinel Responder` role |
-| Content > 30,000 chars | Ask user: split into multiple comments or truncate? |
+| Incident not found | Verify ID format; try numeric, GUID, and ProviderIncidentId. Use `hours: 720` in KQL. |
+| ARM API 403 | UAMI needs `Microsoft Sentinel Responder` RBAC role on the workspace (**required**). |
+| Graph API 403 | **Expected** — Graph uses delegated tokens that lack Application scopes. Use ARM API instead. |
+| `@file` / `$(cat)` in body | **Not supported** — tool environment doesn't mount workspace FS. Use Python urllib. |
+| Content > 30,000 chars | Re-run with `--on-overflow reduce` (default for unattended) or `--on-overflow split`. |
 | format_comment.py not found | Follow file resolution cascade (codeRefs → tmp → Builder) |
 | Empty input | Reject with error message |
+| Colors unreadable in light/dark mode | `format_comment.py` normalizes colors automatically for dual-theme compatibility. |
 
 ---
 

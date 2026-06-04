@@ -168,9 +168,9 @@ Performs comprehensive security investigations on Entra ID user accounts. Collec
 
 ## Setup
 
-### 1. API Permissions (Graph + MDE)
+### 1. API Permissions (Entra ID — Graph + MDE)
 
-The agent's **User-Assigned Managed Identity (UAMI)** needs read-only **Application permissions** on Microsoft Graph and WindowsDefenderATP APIs.
+The agent's **User-Assigned Managed Identity (UAMI)** needs **Application permissions** on Microsoft Graph and WindowsDefenderATP APIs.
 
 #### Microsoft Graph
 
@@ -185,7 +185,7 @@ The agent's **User-Assigned Managed Identity (UAMI)** needs read-only **Applicat
 | `IdentityRiskEvent.Read.All` | user-investigation, identity-posture | Requires Entra ID P2 |
 | `AuditLog.Read.All` | user-investigation, identity-posture | |
 | `Reports.Read.All` | identity-posture | |
-| `SecurityIncident.ReadWrite.All` | incident-comment | Write comments on Sentinel incidents via Graph API |
+| `SecurityIncident.ReadWrite.All` | incident-comment | Write comments on Sentinel incidents |
 
 #### WindowsDefenderATP (MDE)
 
@@ -200,11 +200,11 @@ The agent's **User-Assigned Managed Identity (UAMI)** needs read-only **Applicat
 | `AdvancedQuery.Read.All` | computer-investigation, ioc-investigation | Advanced Hunting queries |
 | `Vulnerability.Read.All` | computer-investigation, ioc-investigation | |
 
-All permissions above are **read-only** (Application type, not Delegated), except `SecurityIncident.ReadWrite.All` which is **read-write** (required to post incident comments).
+All permissions above are **Application** type (not Delegated). All are read-only except `SecurityIncident.ReadWrite.All` which is read-write (required to post incident comments).
 
 #### How to assign
 
-Run the setup script from **Azure Cloud Shell (Bash)** with an account that has **Global Administrator** or **Privileged Role Administrator** role:
+Run [`setup/assign-permissions.sh`](setup/assign-permissions.sh) from **Azure Cloud Shell (Bash)** with an account that has **Global Administrator** or **Privileged Role Administrator** role:
 
 ```bash
 git clone https://github.com/stefanpems/sec-sre-ag.git
@@ -213,9 +213,7 @@ chmod +x assign-permissions.sh
 ./assign-permissions.sh <UAMI_OBJECT_ID>
 ```
 
-Where `<UAMI_OBJECT_ID>` is the Object ID of the agent's User-Assigned Managed Identity (Azure Portal → Managed Identities → *your-identity* → Overview).
-
-The script is idempotent — it skips permissions already assigned. After running, wait up to 1 hour for the Entra ID token cache to refresh.
+The script takes a single argument — the **Object ID** of the UAMI (Azure Portal → Managed Identities → *your-identity* → Overview). It is idempotent (skips permissions already assigned). After running, wait up to 1 hour for the Entra ID token cache to refresh.
 
 > **Note:** Skills that depend on Graph API (`user-investigation`, `computer-investigation`, `identity-posture`) include KQL-based fallback queries that work even when Graph API permissions are not yet effective.
 
@@ -223,35 +221,31 @@ The script is idempotent — it skips permissions already assigned. After runnin
 
 The UAMI also needs Azure RBAC roles for Sentinel workspace access and (optionally) Key Vault secret retrieval.
 
-| Role | Scope | Purpose |
-|---|---|---|
-| **Microsoft Sentinel Reader** | Log Analytics workspace | All skills querying Sentinel tables via Azure Monitor MCP (includes Log Analytics Reader) |
-| **Microsoft Sentinel Responder** | Log Analytics workspace | incident-comment skill — post comments via ARM/Sentinel API (fallback; not needed if using Graph API) |
-| **Key Vault Secrets User** | Key Vault resource | Optional — only needed for IP enrichment API tokens |
+| Role | Scope | Required | Purpose |
+|---|---|---|---|
+| **Microsoft Sentinel Reader** | Log Analytics workspace | Yes | All skills querying Sentinel tables via Azure Monitor MCP (includes Log Analytics Reader) |
+| **Microsoft Sentinel Responder** | Log Analytics workspace | Yes (incident-comment) | Post comments on incidents via ARM/Sentinel API |
+| **Key Vault Secrets User** | Key Vault resource | Optional | Only needed for IP enrichment API tokens |
 
-Assign with Azure CLI:
+> **Why is Sentinel Responder required?** The Graph API `SecurityIncident.ReadWrite.All` permission is assigned to the UAMI as an Application permission, but the agent's sandbox uses a **delegated user token** for Graph API calls — which does not carry Application-level scopes. The ARM/Sentinel REST API uses the UAMI's own token (where RBAC roles apply), making it the reliable path for posting incident comments.
+
+#### How to assign
+
+Run [`setup/assign-azure-roles.sh`](setup/assign-azure-roles.sh) from **Azure Cloud Shell (Bash)** with an account that has **Owner** or **User Access Administrator** on the target scope:
 
 ```bash
-# Sentinel Reader (required)
-az role assignment create \
-  --assignee <UAMI_PRINCIPAL_ID> \
-  --role "Microsoft Sentinel Reader" \
-  --scope "/subscriptions/<SUBSCRIPTION_ID>/resourceGroups/<WORKSPACE_RG>/providers/Microsoft.OperationalInsights/workspaces/<WORKSPACE_NAME>"
-
-# Sentinel Responder (optional — only if using ARM API for incident comments)
-az role assignment create \
-  --assignee <UAMI_PRINCIPAL_ID> \
-  --role "Microsoft Sentinel Responder" \
-  --scope "/subscriptions/<SUBSCRIPTION_ID>/resourceGroups/<WORKSPACE_RG>/providers/Microsoft.OperationalInsights/workspaces/<WORKSPACE_NAME>"
-
-# Key Vault Secrets User (optional — only if using IP enrichment)
-az role assignment create \
-  --assignee <UAMI_PRINCIPAL_ID> \
-  --role "Key Vault Secrets User" \
-  --scope "/subscriptions/<SUBSCRIPTION_ID>/resourceGroups/<KEYVAULT_RG>/providers/Microsoft.KeyVault/vaults/<KEYVAULT_NAME>"
+cd sec-sre-ag/setup
+chmod +x assign-azure-roles.sh
+./assign-azure-roles.sh <UAMI_CLIENT_ID> <WORKSPACE_RESOURCE_ID> [KEYVAULT_RESOURCE_ID]
 ```
 
-Replace the `<PLACEHOLDERS>` with your actual values.
+| Argument | Required | Where to find it |
+|---|---|---|
+| `UAMI_CLIENT_ID` | Yes | Azure Portal → Managed Identities → *your-identity* → Properties → **Client ID** |
+| `WORKSPACE_RESOURCE_ID` | Yes | Azure Portal → Log Analytics workspace → Properties → **Resource ID** |
+| `KEYVAULT_RESOURCE_ID` | Optional | Azure Portal → Key Vault → Properties → **Resource ID** |
+
+The script is idempotent (skips roles already assigned). RBAC roles typically propagate within 5–10 minutes.
 
 ### 3. Key Vault Setup (optional — IP enrichment)
 

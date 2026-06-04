@@ -21,6 +21,9 @@
 #
 # After running: wait up to 1 hour for Entra ID token cache to refresh,
 # or force a new token in the agent's next session.
+#
+# For Azure RBAC roles (Sentinel Reader/Responder, Key Vault), use the
+# companion script: assign-azure-roles.sh
 # ============================================================================
 
 set -euo pipefail
@@ -165,3 +168,6 @@ fi
 echo "✅ Done. Token cache may take up to 1 hour to refresh."
 echo "   After that, Graph API and MDE API calls from the agent"
 echo "   will work without additional consent prompts."
+echo ""
+echo "Next step: run assign-azure-roles.sh to assign Azure RBAC roles"
+echo "(Sentinel Reader/Responder, Key Vault Secrets User)."
