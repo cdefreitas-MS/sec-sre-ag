@@ -1,0 +1,67 @@
+# SPN Scope Drift — Query Definitions
+# Must union BOTH tables: AADServicePrincipalSignInLogs + AADManagedIdentitySignInLogs
+# UAMIs appear ONLY in AADManagedIdentitySignInLogs.
+
+id: drift-q1
+name: Full Scope Drift Analysis
+phase: 1
+type: kql
+query: |
+  let baseline_start = ago({baseline_days}d);
+  let recent_start = ago({recent_days}d);
+  let combined = union AADServicePrincipalSignInLogs, AADManagedIdentitySignInLogs
+  | where TimeGenerated > baseline_start
+  | extend IPCorrected = iff(IPAddress startswith "fd00:", "AzureFabric", IPAddress)
+  | extend Period = iff(TimeGenerated > recent_start, "Recent", "Baseline");
+  combined
+  | summarize
+      BaselineResources = make_set_if(ResourceDisplayName, Period == "Baseline"),
+      RecentResources = make_set_if(ResourceDisplayName, Period == "Recent"),
+      BaselineIPs = make_set_if(IPCorrected, Period == "Baseline"),
+      RecentIPs = make_set_if(IPCorrected, Period == "Recent"),
+      BaselineHits = countif(Period == "Baseline"),
+      RecentHits = countif(Period == "Recent"),
+      FailCount = countif(ResultType != "0" and Period == "Recent"),
+      TotalHits = count()
+    by AppId, ServicePrincipalName
+  | extend NewResources = set_difference(RecentResources, BaselineResources)
+  | extend NewIPs = set_difference(RecentIPs, BaselineIPs)
+  | extend NewResourceCount = array_length(NewResources)
+  | extend NewIPCount = array_length(NewIPs)
+  | extend DriftScore = NewResourceCount * 10 + NewIPCount * 5 + iff(BaselineHits == 0 and RecentHits > 0, 50, 0)
+  | where TotalHits >= {low_volume_floor}
+  | order by DriftScore desc, NewResourceCount desc
+
+---
+
+id: drift-q4
+name: UAMI Self-Audit
+phase: 2
+type: kql
+query: |
+  AADManagedIdentitySignInLogs
+  | where TimeGenerated > ago({baseline_days}d)
+  | where AppId == "{target_appid}"
+  | summarize
+      BaselineHits = countif(TimeGenerated between(ago({baseline_days}d) .. ago({recent_days}d))),
+      RecentHits = countif(TimeGenerated > ago({recent_days}d)),
+      BaselineResources = dcountif(ResourceDisplayName, TimeGenerated between(ago({baseline_days}d) .. ago({recent_days}d))),
+      RecentResources = dcountif(ResourceDisplayName, TimeGenerated > ago({recent_days}d)),
+      FailCount = countif(ResultType != "0"),
+      SuccessCount = countif(ResultType == "0")
+
+---
+
+id: drift-q4b
+name: UAMI Resource Breakdown
+phase: 2
+type: kql
+query: |
+  AADManagedIdentitySignInLogs
+  | where TimeGenerated > ago({baseline_days}d)
+  | where AppId == "{target_appid}"
+  | summarize Hits = count(), FirstSeen = min(TimeGenerated), LastSeen = max(TimeGenerated)
+    by ResourceDisplayName, IPAddress
+  | extend IPCorrected = iff(IPAddress startswith "fd00:", "AzureFabric", IPAddress)
+  | project ResourceDisplayName, IPCorrected, Hits, FirstSeen, LastSeen
+  | order by Hits desc
