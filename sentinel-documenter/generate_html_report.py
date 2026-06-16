@@ -1298,6 +1298,7 @@ def collect(q, args):
     def fmt(s):
         return (s.replace("{sub}", args.sub).replace("{rg}", args.rg).replace("{ws}", args.ws)
                  .replace("{api_oi}", api["api_oi"]).replace("{api_securityinsights}", api["api_securityinsights"])
+                 .replace("{api_securityinsights_preview}", api.get("api_securityinsights_preview", api["api_securityinsights"]))
                  .replace("{api_insights}", api["api_insights"]))
     data = {}
     print("• coletando REST endpoints…", file=sys.stderr)
@@ -1366,6 +1367,13 @@ def main():
             data = json.load(f)
     elif args.workspace and args.sub and args.rg and args.ws:
         data = collect(q, args)
+        # Modo A — guarda contra inventário vazio (az sem contexto de auth / token MI sem permissão).
+        # workspace=None = não autenticou/não alcançou o ARM (um workspace real SEMPRE retorna o objeto).
+        if data.get("workspace") is None:
+            if all(not data.get(k) for k in ("tables_with_data", "alert_rules", "data_connectors")):
+                sys.exit("❌ Modo A falhou: workspace=None e fontes críticas vazias (falha de auth/coleta).\n"
+                         "   Use o Modo B: colete via ferramentas nativas e rode com --from-json.")
+            print("⚠  workspace=None mas há dados parciais — seguindo com degradação.", file=sys.stderr)
         if args.save_raw:
             os.makedirs(args.output, exist_ok=True)
             with open(os.path.join(args.output, "_raw.json"), "w", encoding="utf-8") as f:
