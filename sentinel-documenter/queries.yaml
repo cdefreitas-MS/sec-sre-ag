@@ -91,6 +91,7 @@ cost:
   analytics_usd_per_gb: 2.30      # PerGB2018 ilustrativo (real vem do Retail Prices API por região)
   basic_usd_per_gb: 0.65
   auxiliary_usd_per_gb: 0.15
+  orphan_cost_min: 20             # rule-cost-matrix: tabela ≥ US$X/30d sem nenhuma regra = candidata a tier/drop
   commitment_tiers_gb_day: [100, 200, 300, 400, 500, 1000, 2000, 5000]
   commitment_discount_pct: 15
   # NÃO precifica: query-time (Basic/Aux), search/restore, data-export egress, cross-region, meters XDR.
@@ -147,3 +148,149 @@ best_practices:
   - {id: SENT-047, title: "Custom log ainda no HTTP Data Collector API (CLv1) — aposenta 2026-09-14", category: Foundation, severity: Critical, check: Test-CustomLogsV1Migration, remediation: "CLv1 para em 14/09/2026; migre cada _CL via tables/{name}/migrate + DCR (Logs Ingestion API).", learn: "https://learn.microsoft.com/azure/azure-monitor/logs/custom-logs-migrate"}
   - {id: SENT-048, title: "Agente Log Analytics legado (MMA/OMS) ainda heartbeating — aposentado 2024-08-31", category: Foundation, severity: Critical, check: Test-MmaAgentStillHeartbeating, remediation: "MMA aposentou em 31/08/2024 (degradado após 01/02/2025); migre tudo p/ AMA + DCR.", learn: "https://learn.microsoft.com/azure/azure-monitor/agents/azure-monitor-agent-migration"}
   - {id: SENT-049, title: "TI ainda na tabela legada ThreatIntelligenceIndicator — parou 2025-07-31", category: Foundation, severity: Critical, check: Test-LegacyThreatIntelligenceTable, remediation: "Ingestão legada parou em 31/07/2025; aponte rules/hunts/workbooks p/ ThreatIntelIndicators/Objects.", learn: "https://learn.microsoft.com/azure/sentinel/understand-threat-intelligence"}
+
+# =============================================================================
+# SOA PROCESSES (#2..#6) — portados do Solution Optimization Assessment (Microsoft,
+# interno). Re-implementados a partir do modelo público (Recs-All taxonomy, Maturity,
+# TableFacts, SOC Optimization). NADA copiado verbatim de .ps1/.csv internos.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# (#2) TAXONOMY — Area/Topic/Importance + dimensão de maturidade, por achado.
+# Mapa único id→{a:Area, t:Topic, i:Importance(1=alta .. 4=baixa), d:Dimensão}.
+# Dimensões: DC=Coleta de Dados · DET=Cobertura de Detecção · OPS=Excelência Operacional ·
+#            COST=Otimização de Custo · IAM=Identidade & Acesso · RES=Resiliência & Fundação
+# -----------------------------------------------------------------------------
+taxonomy:
+  SENT-001: {a: Configuration, t: Log Ingestion, i: 2, d: COST}
+  SENT-002: {a: Configuration, t: Log Ingestion, i: 2, d: COST}
+  SENT-003: {a: Configuration, t: Log Ingestion, i: 2, d: COST}
+  SENT-004: {a: Configuration, t: Connectors,    i: 3, d: DC}
+  SENT-005: {a: Configuration, t: UEBA,          i: 2, d: DC}
+  SENT-006: {a: Architecture,  t: Detection,     i: 2, d: DET}
+  SENT-007: {a: Operations,    t: Alerting,      i: 2, d: DET}
+  SENT-008: {a: Configuration, t: Content,       i: 3, d: DET}
+  SENT-009: {a: Configuration, t: Permissions,   i: 2, d: IAM}
+  SENT-010: {a: Operations,    t: Workspace,     i: 3, d: OPS}
+  SENT-011: {a: Operations,    t: Automation,    i: 2, d: OPS}
+  SENT-012: {a: Configuration, t: Log Ingestion, i: 3, d: COST}
+  SENT-013: {a: Configuration, t: Content,       i: 3, d: DET}
+  SENT-014: {a: Architecture,  t: Defender portal, i: 3, d: RES}
+  SENT-015: {a: Configuration, t: Log Ingestion, i: 3, d: COST}
+  SENT-016: {a: Configuration, t: Log Ingestion, i: 3, d: COST}
+  SENT-017: {a: Configuration, t: Log Ingestion, i: 3, d: COST}
+  SENT-018: {a: Architecture,  t: Log Ingestion, i: 4, d: COST}
+  SENT-019: {a: Configuration, t: Log Ingestion, i: 2, d: COST}
+  SENT-020: {a: Architecture,  t: Workspace,     i: 3, d: RES}
+  SENT-021: {a: Configuration, t: Network,       i: 2, d: RES}
+  SENT-022: {a: Configuration, t: Workspace,     i: 1, d: RES}
+  SENT-023: {a: Architecture,  t: Log Ingestion, i: 3, d: COST}
+  SENT-024: {a: Configuration, t: Permissions,   i: 2, d: IAM}
+  SENT-025: {a: Configuration, t: Permissions,   i: 3, d: IAM}
+  SENT-026: {a: Operations,    t: Connectors,    i: 2, d: DC}
+  SENT-027: {a: Operations,    t: Workspace,     i: 3, d: DC}
+  SENT-028: {a: Operations,    t: Connectors,    i: 2, d: DC}
+  SENT-029: {a: Operations,    t: Incidents,     i: 2, d: OPS}
+  SENT-030: {a: Operations,    t: Incidents,     i: 2, d: OPS}
+  SENT-031: {a: Operations,    t: Alerting,      i: 3, d: OPS}
+  SENT-032: {a: Configuration, t: Content,       i: 3, d: DET}
+  SENT-033: {a: Operations,    t: Alerting,      i: 2, d: OPS}
+  SENT-034: {a: Operations,    t: Automation,    i: 2, d: OPS}
+  SENT-035: {a: Operations,    t: Alerting,      i: 3, d: DET}
+  SENT-039: {a: Configuration, t: Permissions,   i: 2, d: IAM}
+  SENT-040: {a: Configuration, t: Permissions,   i: 2, d: IAM}
+  SENT-042: {a: Architecture,  t: Workspace,     i: 2, d: RES}
+  SENT-043: {a: Configuration, t: Log Ingestion, i: 3, d: COST}
+  SENT-044: {a: Configuration, t: Log Ingestion, i: 3, d: COST}
+  SENT-045: {a: Configuration, t: Log Ingestion, i: 3, d: COST}
+  SENT-046: {a: Configuration, t: Log Ingestion, i: 3, d: COST}
+  SENT-047: {a: Configuration, t: Agents,        i: 1, d: RES}
+  SENT-048: {a: Configuration, t: Agents,        i: 1, d: RES}
+  SENT-049: {a: Configuration, t: Content,       i: 1, d: RES}
+
+# -----------------------------------------------------------------------------
+# (#3) MATURITY — rótulos das dimensões + limiares de nível (estilo CMMI).
+# Score/dimensão = 100×(1 − penalidade_sev_achados / penalidade_total_avaliada).
+# Dimensão sem nenhum check avaliável = n/a (nunca 100).
+# -----------------------------------------------------------------------------
+maturity:
+  dimensions:
+    DC:   "Coleta de Dados"
+    DET:  "Cobertura de Detecção"
+    OPS:  "Excelência Operacional"
+    COST: "Otimização de Custo"
+    IAM:  "Identidade & Acesso"
+    RES:  "Resiliência & Fundação"
+  levels:               # piso de score → rótulo
+    - {min: 90, label: "Otimizado"}
+    - {min: 75, label: "Gerenciado"}
+    - {min: 55, label: "Definido"}
+    - {min: 35, label: "Em desenvolvimento"}
+    - {min: 0,  label: "Inicial"}
+
+# -----------------------------------------------------------------------------
+# (#5) DEFAULT RECOMMENDATIONS — famílias SOA novas (Agents/Architecture/Defender
+# for Cloud/Content Hub). "Sempre-ligadas": lembretes de best practice que NÃO
+# entram no Documenter Score. `detect` (condição no inventário) eleva de
+# Informational → Ação recomendada. detect: always | connector_missing:<kind> |
+# mma_present | content_present
+# -----------------------------------------------------------------------------
+default_recommendations:
+  - id: SOA-AR-001
+    area: Architecture
+    topic: Documentation
+    importance: 3
+    detect: always
+    title: "Documente decisões arquiteturais e mantenha um diagrama do SOC/Sentinel"
+    remediation: "Diagrama lógico (especialmente multi-tenant/multi-workspace) acelera onboarding e costuma revelar gaps de cobertura."
+    learn: "https://learn.microsoft.com/azure/sentinel/best-practices"
+  - id: SOA-AR-002
+    area: Architecture
+    topic: Alerting
+    importance: 2
+    detect: always
+    title: "Onboard e enriqueça alertas de AV/EDR de terceiros (alert promotion)"
+    remediation: "Promover alertas de terceiros é um dos maiores valor/menor custo: logs de alerta são pequenos e a correlação de entidades é alta."
+    learn: "https://learn.microsoft.com/azure/sentinel/detect-threats-built-in"
+  - id: SOA-CN-001
+    area: Configuration
+    topic: Defender for Cloud
+    importance: 2
+    detect: connector_missing:AzureSecurityCenter
+    title: "Conecte o Microsoft Defender for Cloud a todas as subscriptions"
+    remediation: "Centralize alertas do Defender for Cloud no Sentinel (ou via XDR) e garanta que todas as subscriptions relevantes estão incluídas."
+    learn: "https://learn.microsoft.com/azure/sentinel/connect-defender-for-cloud"
+  - id: SOA-CN-002
+    area: Configuration
+    topic: Content
+    importance: 2
+    detect: content_present
+    title: "Finalize a migração de conteúdo gallery → Content Hub (gold bar)"
+    remediation: "Conteúdo 'gallery' retirado não recebe mais updates; dispare o assistente de centralização do Content Hub p/ religar templates OOTB ao pack atual."
+    learn: "https://learn.microsoft.com/azure/sentinel/sentinel-content-centralize"
+  - id: SOA-AG-001
+    area: Configuration
+    topic: Agents
+    importance: 2
+    detect: mma_present
+    title: "Migre agentes legados (MMA/OMS) e padronize em AMA + DCR"
+    remediation: "AMA suporta multi-homing, múltiplos DCRs e cache de disco estendido; o MMA foi aposentado em 2024-08-31. Use o AMA Migration Helper workbook."
+    learn: "https://learn.microsoft.com/azure/azure-monitor/agents/azure-monitor-agent-migration"
+  - id: SOA-AR-003
+    area: Architecture
+    topic: Defender portal
+    importance: 3
+    detect: always
+    title: "Planeje a transição do Sentinel p/ o portal do Defender (USX)"
+    remediation: "Siga a orientação de portal transition p/ um cutover suave; alinhe RBAC, automation e conectores ao modelo unificado antes do deadline."
+    learn: "https://learn.microsoft.com/azure/sentinel/move-to-defender"
+
+# -----------------------------------------------------------------------------
+# (#6) COST OPTIMIZER — premissas do playbook de economia (ESTIMATIVAS, não fatura).
+# Cada lever vira uma ação rankeada por US$/mês. Reusa o rule-cost-matrix p/ órfãs.
+# -----------------------------------------------------------------------------
+cost_optimizer:
+  split_reduction_pct: 40        # CEF/Syslog/WinEvent/AzureDiag: % de ruído de rotina roteável p/ _CL/Basic ou dropável
+  tierdown_min_gb30: 50          # tabela ≥X GB/30d sem regra → candidata a Basic/Auxiliary (poupa Analytics−Basic)
+  min_action_usd: 10             # não lista ações com economia estimada < US$X/mês (reduz ruído)
+  benefit_note: "Tabelas elegíveis a benefício (M365 E5 / Defender for Servers P2) podem já estar cobertas por allowance — confirme no faturamento antes de agir."

@@ -643,9 +643,300 @@ def estimate_cost(inv, cost_cfg, retail=None):
     }
 
 # =============================================================================
+# RULE COST MATRIX — custo por tabela × regras (enabled) que a referenciam.
+# Processo inspirado no SOA da Microsoft. O mapa ASIM = conhecimento público dos
+# parsers (im_*), re-implementado aqui (nada copiado verbatim).
+# =============================================================================
+ASIM_MATCH_MAP = {
+    "AlertEvidence": ["im_alertevent"],
+    "ASimAuditEventLogs": ["im_auditevent"], "AzureActivity": ["im_auditevent"],
+    "OfficeActivity": ["im_auditevent", "im_fileevent"],
+    "ASimAuthenticationEventLogs": ["im_authentication"], "SigninLogs": ["im_authentication"],
+    "AADNonInteractiveUserSignInLogs": ["im_authentication"], "AADServicePrincipalSignInLogs": ["im_authentication"],
+    "AADManagedIdentitySignInLogs": ["im_authentication"], "ADFSSignInLogs": ["im_authentication"],
+    "DeviceLogonEvents": ["im_authentication"], "IdentityLogonEvents": ["im_authentication"],
+    "ASimDnsActivityLogs": ["im_dns"], "DnsEvents": ["im_dns"], "AZFWDnsQuery": ["im_dns"],
+    "ASimFileEventLogs": ["im_fileevent"], "DeviceFileEvents": ["im_fileevent"],
+    "ASimNetworkSessionLogs": ["im_networksession"], "DeviceNetworkEvents": ["im_networksession"], "VMConnection": ["im_networksession"],
+    "ASimProcessEventLogs": ["im_processevent", "im_processcreate", "im_processterminate"],
+    "DeviceProcessEvents": ["im_processevent", "im_processcreate", "im_processterminate"],
+    "ASimRegistryEventLogs": ["im_registryevent"], "DeviceRegistryEvents": ["im_registryevent"],
+    "ASimWebSessionLogs": ["im_websession"],
+    "CommonSecurityLog": ["im_auditevent", "im_authentication", "im_networksession", "im_websession"],
+    "Syslog": ["im_auditevent", "im_authentication", "im_networksession", "im_usermanagement", "im_websession"],
+    "SecurityEvent": ["im_auditevent", "im_authentication", "im_fileevent", "im_networksession", "im_processcreate", "im_processterminate", "im_registryevent", "im_usermanagement"],
+    "WindowsEvent": ["im_auditevent", "im_authentication", "im_dns", "im_fileevent", "im_networksession", "im_processcreate", "im_processterminate", "im_registryevent", "im_usermanagement"],
+}
+
+def _table_plan_map(inv):
+    m = {}
+    for t in inv["Tables"]:
+        nm = prop(t, "name")
+        if nm:
+            m[str(nm).lower()] = str(prop(t, "properties.plan", "Analytics"))
+    return m
+
+def _price_for_plan(plan, cost_cfg, retail):
+    p = (plan or "Analytics").lower()
+    if p.startswith("basic"):
+        return num(cost_cfg.get("basic_usd_per_gb", 0.65))
+    if p.startswith("aux"):
+        return num(cost_cfg.get("auxiliary_usd_per_gb", 0.15))
+    return num((retail or {}).get("analytics_usd_per_gb") or cost_cfg.get("analytics_usd_per_gb", 2.30))
+
+def rule_cost_matrix(inv, cost_cfg, retail=None, top=15):
+    plans = _table_plan_map(inv)
+    enabled = [r for r in inv["AlertRules"]
+               if str(prop(r, "kind", "")) in ("Scheduled", "NRT")
+               and prop(r, "properties.enabled", False)
+               and prop(r, "properties.query")]
+    rules_available = len(inv["AlertRules"]) > 0
+    rows = []
+    for t in inv["TablesWithData"]:
+        name = str(t.get("DataType", ""))
+        if not name or name == "Operation":
+            continue
+        usage = num(t.get("BillableLast30d"))
+        plan = plans.get(name.lower(), "Analytics")
+        per_gb = _price_for_plan(plan, cost_cfg, retail)
+        frags = ASIM_MATCH_MAP.get(name, [])
+        name_re = re.compile(r"\b" + re.escape(name) + r"\b", re.IGNORECASE)
+        direct, asim = set(), set()
+        for r in enabled:
+            q = str(prop(r, "properties.query", ""))
+            dn = prop(r, "properties.displayName", "?")
+            if name_re.search(q):
+                direct.add(dn)
+            if frags and any(fr in q.lower() for fr in frags):
+                asim.add(dn)
+        allrules = direct | asim
+        rows.append({"table": name, "plan": plan, "usage30d": usage, "per_gb": per_gb,
+                     "cost30d": usage * per_gb, "rule_count": len(allrules),
+                     "asim_count": len(asim), "rules": sorted(allrules)})
+    rows.sort(key=lambda x: x["cost30d"], reverse=True)
+    floor = num(cost_cfg.get("orphan_cost_min", 20))
+    orphan_cost = [x for x in rows if x["cost30d"] >= floor and x["rule_count"] == 0]
+    return {"rows": rows[:top], "all_rows": rows, "rules_available": rules_available,
+            "enabled_rules": len(enabled), "orphan_cost": orphan_cost}
+
+# =============================================================================
+# PROCESSOS SOA (#2..#6) — taxonomia, maturidade dimensional, table facts, default
+# recs e cost optimizer. Portados do Solution Optimization Assessment (Microsoft,
+# interno). Re-implementados a partir do modelo público; NADA copiado verbatim de
+# .ps1/.csv internos. Tudo deriva do mesmo inventário read-only.
+# =============================================================================
+
+# (#2) Fallbacks quando um id não está no mapa taxonomy → deriva de category/severity.
+_AREA_BY_CATEGORY = {
+    "Cost": "Configuration", "Coverage": "Configuration", "Operational": "Operations",
+    "Identity": "Configuration", "Network": "Configuration", "Resilience": "Architecture",
+    "Hygiene": "Operations", "Foundation": "Configuration", "Strategic": "Architecture",
+}
+_DIM_BY_CATEGORY = {
+    "Cost": "COST", "Coverage": "DET", "Operational": "OPS", "Identity": "IAM",
+    "Network": "RES", "Resilience": "RES", "Hygiene": "DC", "Foundation": "RES", "Strategic": "RES",
+}
+_IMP_BY_SEV = {"Critical": 1, "Warning": 2, "Info": 3}
+
+def tax_of(rule, tax):
+    """(#2) Retorna (area, topic, importance, dimension) p/ um rule do catálogo."""
+    t = (tax or {}).get(rule.get("id")) or {}
+    area = t.get("a") or _AREA_BY_CATEGORY.get(rule.get("category"), "Configuration")
+    topic = t.get("t") or rule.get("category", "—")
+    imp = int(t.get("i") or _IMP_BY_SEV.get(rule.get("severity"), 3))
+    dim = t.get("d") or _DIM_BY_CATEGORY.get(rule.get("category"), "OPS")
+    return area, topic, imp, dim
+
+def recs_by_area(findings, tax):
+    """(#2) Agrupa achados por Area → Topic, ordenados por Importance e severidade."""
+    sev_order = {"Critical": 0, "Warning": 1, "Info": 2}
+    groups = {}
+    for f in findings:
+        area, topic, imp, _ = tax_of(f, tax)
+        groups.setdefault(area, {}).setdefault(topic, []).append({**f, "_imp": imp})
+    out = []
+    for area in sorted(groups):
+        topics = []
+        for topic in sorted(groups[area]):
+            items = sorted(groups[area][topic], key=lambda x: (x["_imp"], sev_order.get(x["severity"], 3)))
+            topics.append({"topic": topic, "items": items})
+        area_imp = min((it["_imp"] for tp in topics for it in tp["items"]), default=4)
+        out.append({"area": area, "topics": topics, "imp": area_imp,
+                    "count": sum(len(tp["items"]) for tp in topics)})
+    out.sort(key=lambda a: (a["imp"], -a["count"]))
+    return out
+
+def compute_maturity(findings, passed, tax, maturity_cfg):
+    """(#3) Scorecard dimensional. Por dimensão: 100×(1 − pen_achados/pen_avaliada).
+    Dimensão sem nenhum check avaliável → n/a (nunca 100)."""
+    dims = maturity_cfg.get("dimensions", {}) or {}
+    levels = maturity_cfg.get("levels", []) or []
+    acc = {d: {"pen": 0.0, "max": 0.0, "findings": 0, "evaluated": 0} for d in dims}
+    def add(rule, is_finding):
+        _, _, _, dim = tax_of(rule, tax)
+        a = acc.setdefault(dim, {"pen": 0.0, "max": 0.0, "findings": 0, "evaluated": 0})
+        w = SEV_WEIGHT.get(rule.get("severity"), 2)
+        a["max"] += w; a["evaluated"] += 1
+        if is_finding:
+            a["pen"] += w; a["findings"] += 1
+    for f in findings:
+        add(f, True)
+    for p in passed:
+        add(p, False)
+    def level_of(score):
+        for lv in levels:
+            if score >= num(lv.get("min")):
+                return lv.get("label")
+        return levels[-1].get("label") if levels else "—"
+    rows, scored = [], []
+    for dim, label in dims.items():
+        a = acc.get(dim, {"pen": 0, "max": 0, "findings": 0, "evaluated": 0})
+        if a["max"] <= 0:
+            rows.append({"dim": dim, "label": label, "score": None, "level": "n/a",
+                         "findings": a["findings"], "evaluated": a["evaluated"]})
+            continue
+        score = round(100 * (1 - a["pen"] / a["max"]))
+        rows.append({"dim": dim, "label": label, "score": score, "level": level_of(score),
+                     "findings": a["findings"], "evaluated": a["evaluated"]})
+        scored.append(score)
+    overall = round(sum(scored) / len(scored)) if scored else None
+    return {"rows": rows, "overall": overall,
+            "overall_level": (level_of(overall) if overall is not None else "n/a")}
+
+# (#4) Mapa público de tabelas Defender XDR → benefício de licença (conhecimento
+# notório dos planos M365 E5 / Defender for Servers P2; re-implementado, não copiado).
+BENEFIT_MAP = {
+    "DeviceInfo": ("M365 E5", "MDE"), "DeviceNetworkInfo": ("M365 E5", "MDE"),
+    "DeviceProcessEvents": ("M365 E5", "MDE"), "DeviceNetworkEvents": ("M365 E5", "MDE"),
+    "DeviceFileEvents": ("M365 E5", "MDE"), "DeviceRegistryEvents": ("M365 E5", "MDE"),
+    "DeviceLogonEvents": ("M365 E5", "MDE"), "DeviceImageLoadEvents": ("M365 E5", "MDE"),
+    "DeviceEvents": ("M365 E5", "MDE"), "DeviceFileCertificateInfo": ("M365 E5", "MDE"),
+    "EmailEvents": ("M365 E5", "MDO"), "EmailUrlInfo": ("M365 E5", "MDO"),
+    "EmailAttachmentInfo": ("M365 E5", "MDO"), "EmailPostDeliveryEvents": ("M365 E5", "MDO"),
+    "UrlClickEvents": ("M365 E5", "MDO"), "CloudAppEvents": ("M365 E5", "MDCA"),
+    "IdentityLogonEvents": ("M365 E5", "MDI"), "IdentityQueryEvents": ("M365 E5", "MDI"),
+    "IdentityDirectoryEvents": ("M365 E5", "MDI"), "IdentityInfo": ("M365 E5", "MDI/UEBA"),
+    "AlertInfo": ("M365 E5", "Shared"), "AlertEvidence": ("M365 E5", "Shared"),
+    "SecurityEvent": ("Defender for Servers P2", "MDFC"),
+}
+
+def build_table_facts(inv, matrix, top=20):
+    """(#4) Registro por tabela: plano, retenção, volume, tendência, regras, ASIM,
+    benefício de licença, status (active/silent/idle)."""
+    by_name = {x["table"]: x for x in matrix["all_rows"]}
+    props = {}
+    for t in inv["Tables"]:
+        nm = prop(t, "name")
+        if nm:
+            props[str(nm)] = {
+                "retention": num(prop(t, "properties.retentionInDays", 0)),
+                "plan": str(prop(t, "properties.plan", "Analytics")),
+            }
+    rows, benefit_gb = [], 0.0
+    for t in inv["TablesWithData"]:
+        name = str(t.get("DataType", ""))
+        if not name or name == "Operation":
+            continue
+        g30 = num(t.get("BillableLast30d")); g7 = num(t.get("BillableLast7d")); g90 = num(t.get("BillableLast90d"))
+        m = by_name.get(name, {}); pr = props.get(name, {})
+        rate7, rate30 = g7 / 7.0, g30 / 30.0
+        if rate30 <= 0:
+            trend = "•"
+        elif rate7 > rate30 * 1.15:
+            trend = "▲"
+        elif rate7 < rate30 * 0.85:
+            trend = "▼"
+        else:
+            trend = "▬"
+        status = "silent" if (g7 == 0 and g90 > 0) else ("active" if g30 > 0 else "idle")
+        bgroup, basis = BENEFIT_MAP.get(name, ("", ""))
+        if bgroup:
+            benefit_gb += g30
+        rows.append({"table": name, "plan": m.get("plan") or pr.get("plan", "Analytics"),
+                     "retention": pr.get("retention", 0), "g30": g30, "g7": g7, "g90": g90,
+                     "rule_count": m.get("rule_count", 0), "asim_count": m.get("asim_count", 0),
+                     "benefit": bgroup, "basis": basis, "status": status, "trend": trend})
+    rows.sort(key=lambda x: x["g30"], reverse=True)
+    have = {str(t.get("DataType", "")).lower() for t in inv["TablesWithData"] if num(t.get("BillableLast90d")) > 0}
+    orphan = [prop(t, "name") for t in inv["Tables"]
+              if str(prop(t, "properties.schema.tableType", "")) == "CustomLog"
+              and str(prop(t, "name", "")).lower() not in have]
+    silent = [r["table"] for r in rows if r["status"] == "silent"]
+    return {"rows": rows[:top], "all": rows, "benefit_gb30": benefit_gb,
+            "orphan": orphan, "silent": silent, "total": len(rows)}
+
+def eval_default_recs(inv, default_recs):
+    """(#5) Avalia as default recommendations (famílias SOA novas). `action`=True só
+    quando há evidência concreta de gap (conector ausente, MMA presente)."""
+    deployed = {str(prop(c, "kind", "")).lower() for c in inv["DataConnectors"]}
+    mma = num(prop(inv["AmaMma"], "MMACount", 0)) > 0
+    content_n = len(inv["ContentPackages"])
+    out = []
+    for r in (default_recs or []):
+        detect = str(r.get("detect", "always")); action = False; note = ""
+        if detect == "mma_present":
+            action = mma; note = "MMA legado detectado" if mma else "nenhum MMA detectado"
+        elif detect == "content_present":
+            note = (f"{content_n} solução(ões) instalada(s)" if content_n else "sem inventário de Content Hub")
+        elif detect.startswith("connector_missing:"):
+            kind = detect.split(":", 1)[1].lower()
+            if not inv["DataConnectors"]:
+                note = "conectores não coletados"
+            else:
+                action = kind not in deployed
+                note = "conector ausente" if action else "conector presente"
+        out.append({**r, "action": action, "note": note})
+    out.sort(key=lambda x: (not x["action"], num(x.get("importance", 3))))
+    return out
+
+def cost_optimizer(inv, matrix, cost, cost_cfg, opt_cfg, retail=None):
+    """(#6) Playbook de economia: levers (órfã cara, split DCR, commitment tier)
+    rankeados por US$/mês estimado. Reusa o rule-cost-matrix p/ as órfãs."""
+    a_price = num((retail or {}).get("analytics_usd_per_gb") or cost_cfg.get("analytics_usd_per_gb", 2.30))
+    b_price = num(cost_cfg.get("basic_usd_per_gb", 0.65))
+    split_pct = num(opt_cfg.get("split_reduction_pct", 40)) / 100.0
+    floor = num(opt_cfg.get("min_action_usd", 10))
+    actions, claimed = [], set()
+    # (a) splits CEF/Syslog/WinEvent/AzureDiag — lever específico, reivindica a tabela
+    for tbl, label in (("CommonSecurityLog", "CEF → _CL split"), ("Syslog", "Syslog facility filter"),
+                       ("SecurityEvent", "WinEvent XPath filter"), ("WindowsEvent", "WinEvent XPath filter"),
+                       ("AzureDiagnostics", "→ resource-specific")):
+        g30 = tdata_gb(inv, tbl, "BillableLast30d")
+        if g30 >= 150.0:
+            save = g30 * split_pct * a_price
+            if save >= floor:
+                claimed.add(tbl)
+                actions.append({"action": f"{tbl} ≈ {g30:.0f} GB/30d → filtrar ~{int(split_pct*100)}% de ruído de rotina ({label})",
+                                "lever": "Filtro/split DCR", "save": save, "conf": "média",
+                                "basis": f"{g30:.0f} GB × {int(split_pct*100)}% × US$ {a_price:.2f}"})
+    # (b) órfãs caras (do matrix) — pula tabelas já reivindicadas por split; benefício E5/MDFC = conf baixa
+    for o in matrix["orphan_cost"]:
+        if o["table"] in claimed:
+            continue
+        save = o["usage30d"] * max(0.0, a_price - b_price)
+        if save < floor:
+            continue
+        benefit = o["table"] in BENEFIT_MAP
+        suffix = " — benefício E5/MDFC pode já cobrir, confirmar" if benefit else ""
+        actions.append({"action": f"Tabela '{o['table']}' (≥US$ {o['cost30d']:,.0f}/30d, 0 regras) → Basic/Auxiliary ou drop{suffix}",
+                        "lever": "Órfã cara", "save": save, "conf": ("baixa" if benefit else "alta"),
+                        "basis": f"{o['usage30d']:.0f} GB/30d × (US$ {a_price:.2f}−{b_price:.2f})"})
+    # (c) commitment tier
+    if cost.get("whatif"):
+        save = cost["est_monthly_usd"] - cost["whatif"]["monthly"]
+        if save >= floor:
+            actions.append({"action": f"Migrar PerGB2018 → commitment tier {cost['whatif']['tier']} GB/dia",
+                            "lever": "Commitment tier", "save": save, "conf": "média",
+                            "basis": f"US$ {cost['est_monthly_usd']:,.0f} − {cost['whatif']['monthly']:,.0f}/mês"})
+    actions.sort(key=lambda x: x["save"], reverse=True)
+    return {"actions": actions, "total_monthly": sum(a["save"] for a in actions),
+            "benefit_note": opt_cfg.get("benefit_note", "")}
+
+# =============================================================================
 # RENDER — HTML (dark) + Markdown
 # =============================================================================
 SEV_BADGE = {"Critical": "#ff4d6d", "Warning": "#ffb454", "Info": "#7aa2f7"}
+IMP_LABEL = {1: "Crítica", 2: "Alta", 3: "Média", 4: "Baixa"}
 
 def render_html(ctx) -> str:
     inv = ctx["inv"]; findings = ctx["findings"]; passed = ctx["passed"]; skipped = ctx["skipped"]
@@ -677,7 +968,92 @@ def render_html(ctx) -> str:
         whatif = f"<div class='wi'>What-if commitment tier <b>{cost['whatif']['tier']} GB/dia</b>: ~US$ {cost['whatif']['monthly']:,.0f}/mês (−{int(num(ctx['cost_cfg'].get('commitment_discount_pct',15)))}%)</div>"
     priced_note = "" if cost["priced"] else "<div class='disc'>⚠ preço ilustrativo (Retail Prices API não consultada neste run). NÃO inclui query-time/search/restore/egress/XDR.</div>"
 
+    mtx = ctx["matrix"]
+    mtx_rows = ""
+    for x in mtx["rows"]:
+        if x["rule_count"] > 0:
+            extra = f" <span class='sub'>({x['asim_count']} ASIM)</span>" if x["asim_count"] else ""
+            cov = f"<span style='color:#36d399'>✓ {x['rule_count']} regra(s)</span>{extra}"
+        elif mtx["rules_available"]:
+            cov = "<span style='color:#ff8c66'>— nenhuma</span>"
+        else:
+            cov = "<span class='sub'>n/d</span>"
+        mtx_rows += (f"<tr><td>{esc(x['table'])}</td><td>{esc(x['plan'])}</td>"
+                     f"<td class='r'>{x['usage30d']:.1f}</td><td class='r'>{x['cost30d']:,.0f}</td>"
+                     f"<td class='r'>{x['rule_count']}</td><td>{cov}</td></tr>")
+    mtx_orphan = ""
+    if mtx["orphan_cost"] and mtx["rules_available"]:
+        names = ", ".join(f"{o['table']} (US$ {o['cost30d']:,.0f})" for o in mtx["orphan_cost"][:6])
+        mtx_orphan = (f"<div class='disc'>⚠ {len(mtx['orphan_cost'])} tabela(s) custando ≥US$ "
+                      f"{num(ctx['cost_cfg'].get('orphan_cost_min',20)):.0f}/30d sem nenhuma regra de detecção: "
+                      f"{esc(names)} — candidatas a tier Basic/Auxiliary, filtro DCR ou drop.</div>")
+    mtx_note = "" if mtx["rules_available"] else "<div class='disc'>⚠ regras não coletadas neste run — a coluna de cobertura fica indisponível (o custo por tabela permanece válido).</div>"
+
     skip_li = "".join(f"<li><code>{esc(s['id'])}</code> {esc(s['title'])} — <i>{esc(s['reason'])}</i></li>" for s in skipped)
+
+    # ---- (#3) maturidade dimensional ----
+    mat = ctx["maturity"]
+    def _mcol(s):
+        return "#36d399" if s >= 75 else "#ffb454" if s >= 55 else "#ff8c66" if s >= 35 else "#ff4d6d"
+    mat_rows = ""
+    for d in mat["rows"]:
+        if d["score"] is None:
+            sc, lvl, bar = "n/a", d["level"], "<span class='sub'>nenhum check avaliável neste inventário</span>"
+        else:
+            col = _mcol(d["score"]); sc, lvl = str(d["score"]), d["level"]
+            bar = f"<div class='bar'><div class='fill' style='width:{d['score']}%;background:{col}'></div></div>"
+        mat_rows += (f"<tr><td><b>{esc(d['label'])}</b><div class='ev'>{d['findings']} achado(s) · {d['evaluated']} avaliado(s)</div></td>"
+                     f"<td class='r'>{sc}</td><td>{esc(lvl)}</td><td style='width:42%'>{bar}</td></tr>")
+    mat_col = _mcol(mat["overall"]) if mat["overall"] is not None else "#7d8590"
+    mat_overall = str(mat["overall"]) if mat["overall"] is not None else "n/a"
+
+    # ---- (#2) recomendações por Area → Topic (Importance) ----
+    rba_html = ""
+    for a in ctx["recs_by_area"]:
+        inner = ""
+        for tp in a["topics"]:
+            lis = ""
+            for it in tp["items"]:
+                lis += (f"<li><span class='ibadge i{it['_imp']}'>I{it['_imp']}</span>"
+                        f"<code>{esc(it['id'])}</code> {esc(it['title'])}"
+                        f"<span class='sub'> · {esc(it['evidence'])}</span></li>")
+            inner += f"<div class='topic'><div class='tname'>{esc(tp['topic'])}</div><ul>{lis}</ul></div>"
+        rba_html += (f"<div class='areacard'><div class='ahead'><b>{esc(a['area'])}</b>"
+                     f"<span class='sub'>{a['count']} item(ns) · prioridade {esc(IMP_LABEL.get(a['imp'],'—'))}</span></div>{inner}</div>")
+
+    # ---- (#6) cost optimizer ----
+    opt = ctx["optimizer"]
+    opt_rows = ""
+    for ac in opt["actions"]:
+        cc = {"alta": "#36d399", "média": "#ffb454", "baixa": "#ff8c66"}.get(ac["conf"], "#7d8590")
+        opt_rows += (f"<tr><td>{esc(ac['action'])}<div class='ev'>{esc(ac['basis'])}</div></td>"
+                     f"<td>{esc(ac['lever'])}</td>"
+                     f"<td><span class='badge' style='background:{cc}22;color:{cc};border:1px solid {cc}55'>{esc(ac['conf'])}</span></td>"
+                     f"<td class='r'>~US$ {ac['save']:,.0f}</td></tr>")
+
+    # ---- (#4) table facts registry ----
+    tf = ctx["tablefacts"]
+    tf_rows = ""
+    for r in tf["rows"]:
+        ben = f"<span class='bbadge'>{esc(r['benefit'])} · {esc(r['basis'])}</span>" if r["benefit"] else "<span class='sub'>—</span>"
+        st = {"active": "#36d399", "silent": "#ff8c66", "idle": "#7d8590"}.get(r["status"], "#7d8590")
+        ret = str(int(r["retention"])) if r["retention"] else "—"
+        tf_rows += (f"<tr><td>{esc(r['table'])}</td><td>{esc(r['plan'])}</td><td class='r'>{ret}</td>"
+                    f"<td class='r'>{r['g30']:.1f}</td><td class='r'>{r['trend']}</td>"
+                    f"<td class='r'>{r['rule_count']}</td><td>{ben}</td>"
+                    f"<td><span style='color:{st}'>{esc(r['status'])}</span></td></tr>")
+
+    # ---- (#5) default recommendations ----
+    dr_rows = ""
+    for r in ctx["default_recs"]:
+        if r["action"]:
+            st = "<span class='badge' style='background:#ff8c6622;color:#ff8c66;border:1px solid #ff8c6655'>Ação recomendada</span>"
+        else:
+            st = "<span class='badge' style='background:#7aa2f722;color:#7aa2f7;border:1px solid #7aa2f755'>Lembrete</span>"
+        note = f"<span class='sub'> · {esc(r['note'])}</span>" if r.get("note") else ""
+        dr_rows += (f"<tr><td><code>{esc(r['id'])}</code></td><td>{esc(r['area'])} / {esc(r['topic'])}</td>"
+                    f"<td><b>{esc(r['title'])}</b>{note}<div class='rem'>{esc(r['remediation'])} "
+                    f"<a href='{esc(r.get('learn',''))}'>learn ↗</a></div></td><td>{st}</td></tr>")
 
     return f"""<!DOCTYPE html><html lang="pt-BR"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -712,6 +1088,19 @@ code{{background:#161b22;padding:1px 6px;border-radius:5px;color:#9bd1ff;font-si
 details{{margin-top:10px}} summary{{cursor:pointer;color:#7d8590}}
 .foot{{margin-top:34px;padding-top:14px;border-top:1px solid #1f2733;color:#586069;font-size:11.5px;text-align:center}}
 ul{{margin:6px 0;padding-left:18px}} li{{margin:3px 0;font-size:12.5px;color:#8b949e}}
+.bar{{height:9px;background:#0b0e14;border:1px solid #1f2733;border-radius:6px;overflow:hidden}}
+.fill{{height:100%;border-radius:6px}}
+.matover{{display:flex;gap:14px;align-items:baseline;margin:4px 0 2px}}
+.matover b{{font-size:26px}}
+.areacard{{background:#11151d;border:1px solid #1f2733;border-radius:12px;padding:14px 16px;margin-top:12px}}
+.ahead{{display:flex;justify-content:space-between;align-items:baseline;border-bottom:1px solid #1f2733;padding-bottom:6px;margin-bottom:6px}}
+.topic{{margin:8px 0}} .tname{{color:#9bd1ff;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.4px}}
+.ibadge{{display:inline-block;min-width:24px;text-align:center;padding:1px 5px;border-radius:5px;font-size:10.5px;font-weight:800;margin-right:5px}}
+.i1{{background:#ff4d6d22;color:#ff4d6d;border:1px solid #ff4d6d55}} .i2{{background:#ffb45422;color:#ffb454;border:1px solid #ffb45455}}
+.i3{{background:#7aa2f722;color:#7aa2f7;border:1px solid #7aa2f755}} .i4{{background:#586cb022;color:#8b9bd0;border:1px solid #586cb055}}
+.bbadge{{display:inline-block;padding:1px 7px;border-radius:20px;font-size:10.5px;font-weight:700;background:#0d1b13;color:#7ee0a8;border:1px solid #1d3326;white-space:nowrap}}
+.savebanner{{margin-top:10px;padding:12px 16px;background:#0d1b13;border:1px solid #1d3326;border-radius:10px;display:flex;gap:14px;align-items:baseline}}
+.savebanner b{{font-size:24px;color:#7ee0a8}}
 </style></head><body><div class="wrap">
 <h1>🛡️ Sentinel Documenter</h1>
 <div class="sub">{esc(ws_name)} · gerado {now} · catálogo SENT-NNN (Sentinel-As-Code Wave 4) · <b>read-only</b></div>
@@ -726,11 +1115,21 @@ ul{{margin:6px 0;padding-left:18px}} li{{margin:3px 0;font-size:12.5px;color:#8b
   </div>
 </div>
 
-<h2>🔎 Gap analysis</h2>
+<h2>� Maturidade dimensional</h2>
+<div class="matover">Índice geral <b style="color:{mat_col}">{mat_overall}</b><span class="sub">/100 · {esc(mat['overall_level'])}</span></div>
+<div class="sub">Por dimensão: 100×(1 − penalidade_dos_achados / penalidade_total_avaliada). Dimensão sem check avaliável aparece como n/a (nunca 100). <i>Processo inspirado no SOA da Microsoft.</i></div>
+<table><thead><tr><th>Dimensão</th><th class="r">Score</th><th>Nível</th><th>Progresso</th></tr></thead>
+<tbody>{mat_rows}</tbody></table>
+
+<h2>�🔎 Gap analysis</h2>
 <table><thead><tr><th>ID</th><th>Sev</th><th>Categoria</th><th>Achado</th><th>Remediação</th></tr></thead>
 <tbody>{rows or '<tr><td colspan=5>Nenhum gap detectado nos checks avaliados. 🎉</td></tr>'}</tbody></table>
 
-<h2>💰 Estimativa de custo</h2>
+<h2>�️ Recomendações por Área · Tópico (Importance)</h2>
+<div class="sub">Achados reagrupados na taxonomia do SOA (Area → Topic, Importance 1=alta … 4=baixa). <i>Processo inspirado no SOA da Microsoft.</i></div>
+{rba_html or '<div class="sub">Nenhum achado a priorizar. 🎉</div>'}
+
+<h2>�💰 Estimativa de custo</h2>
 <div class="grid2">
   <div class="card">
     <div class="sub">Ingest billable (Analytics, 30d)</div>
@@ -745,6 +1144,30 @@ ul{{margin:6px 0;padding-left:18px}} li{{margin:3px 0;font-size:12.5px;color:#8b
     <table><thead><tr><th>Tabela</th><th class="r">30d</th><th class="r">7d</th></tr></thead><tbody>{cost_rows}</tbody></table>
   </div>
 </div>
+
+<h2>🧮 Custo por tabela × cobertura de detecção</h2>
+<div class="sub">Quais regras habilitadas consomem cada tabela — referência direta no KQL ou via parser ASIM (<code>im_*</code>). Tabela cara sem nenhuma regra = candidata a tier/filtro/drop. <i>Processo inspirado no SOA da Microsoft.</i></div>
+<table><thead><tr><th>Tabela</th><th>Plano</th><th class="r">GB/30d</th><th class="r">US$/30d</th><th class="r">Regras</th><th>Cobertura de detecção</th></tr></thead>
+<tbody>{mtx_rows or '<tr><td colspan=6>Sem dados de uso de tabela neste inventário.</td></tr>'}</tbody></table>
+{mtx_orphan}{mtx_note}
+
+<h2>🪙 Cost optimizer — playbook de economia</h2>
+<div class="sub">Levers de custo rankeados por economia mensal <b>estimada</b> (estimativa, não a fatura). <i>Processo inspirado no SOC Optimization / Costs do SOA.</i></div>
+<div class="savebanner">Oportunidade total estimada <b>~US$ {opt['total_monthly']:,.0f}</b><span class="sub">/mês · {len(opt['actions'])} ação(ões)</span></div>
+<table><thead><tr><th>Ação</th><th>Lever</th><th>Confiança</th><th class="r">Economia/mês</th></tr></thead>
+<tbody>{opt_rows or '<tr><td colspan=4>Nenhuma oportunidade de economia ≥ piso detectada neste inventário. 🎉</td></tr>'}</tbody></table>
+<div class="disc">{esc(opt['benefit_note'])}</div>
+
+<h2>🧾 Table facts registry</h2>
+<div class="sub">Registro por tabela: plano, retenção, volume, tendência (▲ subindo / ▼ caindo / ▬ estável), regras que a consomem, benefício de licença e status. <i>Processo inspirado no SOA (Table Facts).</i></div>
+<table><thead><tr><th>Tabela</th><th>Plano</th><th class="r">Ret (d)</th><th class="r">GB/30d</th><th class="r">Tend</th><th class="r">Regras</th><th>Benefício de licença</th><th>Status</th></tr></thead>
+<tbody>{tf_rows or '<tr><td colspan=8>Sem dados de tabela neste inventário.</td></tr>'}</tbody></table>
+<div class="sub" style="margin-top:8px">{tf['total']} tabela(s) com dado · benefício-elegível (E5/MDFC) ≈ {tf['benefit_gb30']:,.0f} GB/30d · {len(tf['silent'])} silenciosa(s) · {len(tf['orphan'])} órfã(s) de schema</div>
+
+<h2>📌 Recomendações padrão (famílias SOA)</h2>
+<div class="sub">Best practices sempre-ligadas (Architecture · Agents · Defender for Cloud · Content Hub). <b>Não entram no Documenter Score</b> — um "Lembrete" vira "Ação recomendada" quando há evidência no inventário. <i>Processo inspirado no SOA (Default Recommendations).</i></div>
+<table><thead><tr><th>ID</th><th>Área / Tópico</th><th>Recomendação</th><th>Status</th></tr></thead>
+<tbody>{dr_rows}</tbody></table>
 
 <details><summary>Checks não avaliados ({len(skipped)}) — exigem dado fora do inventário deste run</summary>
 <ul>{skip_li}</ul></details>
@@ -762,6 +1185,13 @@ def render_md(ctx) -> str:
     out = [f"# Sentinel Documenter — `{ws_name}`",
            f"_Gerado {now} · Documenter Score **{ctx['score']}/100** ({ctx['verdict']}) · read-only_\n",
            f"**{len(findings)} achados** · {len(ctx['passed'])} ok · {len(skipped)} não avaliados\n",
+           "## Maturidade dimensional\n",
+           f"Índice geral: **{ctx['maturity']['overall'] if ctx['maturity']['overall'] is not None else 'n/a'}/100** ({ctx['maturity']['overall_level']})\n",
+           "| Dimensão | Score | Nível | Achados | Avaliados |",
+           "|----------|------:|-------|--------:|----------:|",
+           *[f"| {d['label']} | {d['score'] if d['score'] is not None else 'n/a'} | {d['level']} | {d['findings']} | {d['evaluated']} |"
+             for d in ctx['maturity']['rows']],
+           "",
            "## Gap analysis\n",
            "| ID | Sev | Categoria | Achado | Evidência |",
            "|----|-----|-----------|--------|-----------|"]
@@ -770,6 +1200,17 @@ def render_md(ctx) -> str:
     out.append("\n### Remediação\n")
     for f in findings:
         out.append(f"- **{f['id']} · {f['title']}** — {f.get('remediation','')} ([learn]({f.get('learn','')}))")
+    # (#2) recomendações por Área → Tópico
+    out.append("\n## Recomendações por Área · Tópico (Importance)\n")
+    if ctx["recs_by_area"]:
+        for a in ctx["recs_by_area"]:
+            out.append(f"### {a['area']} — {a['count']} item(ns) · prioridade {IMP_LABEL.get(a['imp'],'—')}")
+            for tp in a["topics"]:
+                out.append(f"- **{tp['topic']}**")
+                for it in tp["items"]:
+                    out.append(f"  - I{it['_imp']} · `{it['id']}` {it['title']} — {it['evidence']}")
+    else:
+        out.append("_Nenhum achado a priorizar._")
     out.append("\n## Custo (estimado)\n")
     out.append(f"- Ingest billable Analytics (30d): **{cost['analytics_gb30']:,.0f} GB** (~{cost['daily_gb']:.1f} GB/dia)")
     out.append(f"- Estimativa: **~US$ {cost['est_monthly_usd']:,.0f}/mês** @ US$ {cost['price_per_gb']:.2f}/GB (benefício {cost['free_gb_day']:.0f} GB/dia)")
@@ -777,6 +1218,49 @@ def render_md(ctx) -> str:
         out.append(f"- What-if commitment tier {cost['whatif']['tier']} GB/dia: ~US$ {cost['whatif']['monthly']:,.0f}/mês")
     if not cost["priced"]:
         out.append("- ⚠ preço ilustrativo (Retail Prices API não consultada). Não inclui query-time/search/restore/egress/XDR.")
+    mtx = ctx["matrix"]
+    out.append("\n## Custo por tabela × cobertura de detecção\n")
+    out.append("_Quais regras habilitadas consomem cada tabela (KQL direto ou parser ASIM). Processo inspirado no SOA._\n")
+    out.append("| Tabela | Plano | GB/30d | US$/30d | Regras | ASIM |")
+    out.append("|--------|-------|-------:|--------:|-------:|-----:|")
+    for x in mtx["rows"]:
+        out.append(f"| {x['table']} | {x['plan']} | {x['usage30d']:.1f} | {x['cost30d']:,.0f} | {x['rule_count']} | {x['asim_count']} |")
+    if mtx["orphan_cost"] and mtx["rules_available"]:
+        names = ", ".join(f"{o['table']} (US$ {o['cost30d']:,.0f})" for o in mtx["orphan_cost"][:6])
+        out.append(f"\n⚠ **{len(mtx['orphan_cost'])} tabela(s) caras sem nenhuma detecção**: {names} — candidatas a Basic/Auxiliary, filtro DCR ou drop.")
+    if not mtx["rules_available"]:
+        out.append("\n⚠ regras não coletadas neste run — cobertura indisponível (custo por tabela permanece válido).")
+    # (#6) cost optimizer
+    opt = ctx["optimizer"]
+    out.append("\n## Cost optimizer — playbook de economia\n")
+    out.append(f"Oportunidade total estimada: **~US$ {opt['total_monthly']:,.0f}/mês** · {len(opt['actions'])} ação(ões) _(estimativa, não a fatura)_\n")
+    out.append("| Ação | Lever | Confiança | Economia/mês |")
+    out.append("|------|-------|-----------|-------------:|")
+    for ac in opt["actions"]:
+        out.append(f"| {ac['action']} | {ac['lever']} | {ac['conf']} | ~US$ {ac['save']:,.0f} |")
+    if not opt["actions"]:
+        out.append("| _Nenhuma oportunidade ≥ piso detectada._ | | | |")
+    if opt.get("benefit_note"):
+        out.append(f"\n> {opt['benefit_note']}")
+    # (#4) table facts registry
+    tf = ctx["tablefacts"]
+    out.append("\n## Table facts registry\n")
+    out.append("| Tabela | Plano | Ret(d) | GB/30d | Tend | Regras | Benefício | Status |")
+    out.append("|--------|-------|-------:|-------:|:----:|-------:|-----------|--------|")
+    for r in tf["rows"]:
+        ret = int(r["retention"]) if r["retention"] else "—"
+        ben = f"{r['benefit']} ({r['basis']})" if r["benefit"] else "—"
+        out.append(f"| {r['table']} | {r['plan']} | {ret} | {r['g30']:.1f} | {r['trend']} | {r['rule_count']} | {ben} | {r['status']} |")
+    out.append(f"\n_{tf['total']} tabela(s) · benefício-elegível ≈ {tf['benefit_gb30']:,.0f} GB/30d · {len(tf['silent'])} silenciosa(s) · {len(tf['orphan'])} órfã(s) de schema._")
+    # (#5) recomendações padrão (famílias SOA)
+    out.append("\n## Recomendações padrão (famílias SOA)\n")
+    out.append("_Sempre-ligadas (Architecture · Agents · Defender for Cloud · Content Hub); NÃO entram no Documenter Score._\n")
+    out.append("| ID | Área / Tópico | Recomendação | Status |")
+    out.append("|----|---------------|--------------|--------|")
+    for r in ctx["default_recs"]:
+        st = "Ação recomendada" if r["action"] else "Lembrete"
+        note = f" ({r['note']})" if r.get("note") else ""
+        out.append(f"| `{r['id']}` | {r['area']} / {r['topic']} | {r['title']}{note} | {st} |")
     out.append("\n<details><summary>Checks não avaliados</summary>\n")
     for s in skipped:
         out.append(f"- `{s['id']}` {s['title']} — _{s['reason']}_")
@@ -853,6 +1337,12 @@ def load_yaml(path):
 
 # =============================================================================
 def main():
+    # console UTF-8 (evita UnicodeEncodeError em consoles cp1252 do Windows quando stdout é redirecionado)
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
     here = os.path.dirname(os.path.abspath(__file__))
     ap = argparse.ArgumentParser(description="Sentinel Documenter — gap-scored living docs (read-only)")
     ap.add_argument("--from-json", help="inventário pré-coletado (modo offline/primário)")
@@ -866,6 +1356,10 @@ def main():
 
     q = load_yaml(args.queries)
     catalog = q["best_practices"]; cost_cfg = q["cost"]
+    tax = q.get("taxonomy", {}) or {}
+    maturity_cfg = q.get("maturity", {}) or {}
+    default_recs_cfg = q.get("default_recommendations", []) or []
+    opt_cfg = q.get("cost_optimizer", {}) or {}
 
     if args.from_json:
         with open(args.from_json, encoding="utf-8") as f:
@@ -883,9 +1377,17 @@ def main():
     findings, passed, skipped = run_gaps(inv, catalog)
     score, verdict, klass = documenter_score(findings)
     cost = estimate_cost(inv, cost_cfg, retail=data.get("retail"))
+    matrix = rule_cost_matrix(inv, cost_cfg, retail=data.get("retail"))
+    maturity = compute_maturity(findings, passed, tax, maturity_cfg)        # (#3)
+    rba = recs_by_area(findings, tax)                                        # (#2)
+    tablefacts = build_table_facts(inv, matrix)                             # (#4)
+    optimizer = cost_optimizer(inv, matrix, cost, cost_cfg, opt_cfg, retail=data.get("retail"))  # (#6)
+    default_recs = eval_default_recs(inv, default_recs_cfg)                  # (#5)
 
     ctx = {"inv": inv, "findings": findings, "passed": passed, "skipped": skipped,
            "score": score, "verdict": verdict, "klass": klass, "cost": cost,
+           "matrix": matrix, "maturity": maturity, "recs_by_area": rba,
+           "tablefacts": tablefacts, "optimizer": optimizer, "default_recs": default_recs,
            "cost_cfg": cost_cfg, "ws": args.ws or args.workspace or "workspace"}
 
     os.makedirs(args.output, exist_ok=True)
