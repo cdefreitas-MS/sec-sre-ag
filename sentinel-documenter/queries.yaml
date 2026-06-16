@@ -1,0 +1,149 @@
+# =============================================================================
+# sentinel-documenter — verified collector + gap catalog (single source of truth)
+# Pattern: collector↔renderer. This file = CAPTURE + RULES. generate_html_report.py = RENDER.
+# Catálogo SENT-NNN portado FIEL do Sentinel-As-Code Wave 4 (TobyG / noodlemctwoodle),
+#   best-practices.json v2.0.0 + GapChecks.ps1. Read-only (GET/query/anônimo). NÃO muta nada.
+# Placeholders: {sub} {rg} {ws} {ws_guid} {usage_days} {silent_days} {region}
+# =============================================================================
+metadata:
+  skill: sentinel-documenter
+  title: Sentinel Documenter — Living Workspace Docs
+  description: >
+    Daily read-only documentation of a Sentinel workspace: inventory (rules, connectors,
+    DCRs/DCEs, tables, RBAC, settings), a SCORED gap analysis against Sentinel best
+    practices (SENT-NNN, portado do Sentinel-As-Code Wave 4), a cost estimate (Usage ×
+    Azure Retail Prices + free benefit + commitment-tier what-if) and an effective-connectors
+    view. Collector↔renderer; renderer offline+determinístico. Saída HTML (email) + Markdown (repo).
+  inspiration: "https://sentinel.blog/sentinel-as-code-wave-4-the-docs-nobody-wanted-to-write/"
+  catalog_source: "github.com/noodlemctwoodle/Sentinel-As-Code · best-practices.json v2.0.0"
+
+parameters:
+  usage_days: 30
+  silent_days: 7
+  noisy_table_gb30: 50.0       # SENT-003/016: tabela Analytics "barulhenta"
+  split_gb30: 150.0            # SENT-043/044/045: split de roteamento de dados
+  cluster_gb_day: 500.0        # SENT-018: candidato a dedicated cluster
+  region: "eastus2"
+
+# -----------------------------------------------------------------------------
+# COLLECTOR — capture para tmp/documenter/_raw/. Tudo GET/query (read-only).
+# No SRE Agent: REST via RunAzCliReadCommands (`az rest`), KQL via QueryLogAnalyticsByWorkspaceId.
+# -----------------------------------------------------------------------------
+collector:
+  rest:
+    api_securityinsights: "2024-03-01"
+    api_oi: "2023-09-01"
+    api_insights: "2023-03-11"
+    base: "https://management.azure.com/subscriptions/{sub}/resourceGroups/{rg}/providers"
+    endpoints:
+      workspace:        "/Microsoft.OperationalInsights/workspaces/{ws}?api-version={api_oi}"
+      tables:           "/Microsoft.OperationalInsights/workspaces/{ws}/tables?api-version={api_oi}"
+      data_exports:     "/Microsoft.OperationalInsights/workspaces/{ws}/dataExports?api-version={api_oi}"
+      alert_rules:      "/Microsoft.OperationalInsights/workspaces/{ws}/providers/Microsoft.SecurityInsights/alertRules?api-version={api_securityinsights}"
+      alert_templates:  "/Microsoft.OperationalInsights/workspaces/{ws}/providers/Microsoft.SecurityInsights/alertRuleTemplates?api-version={api_securityinsights}"
+      data_connectors:  "/Microsoft.OperationalInsights/workspaces/{ws}/providers/Microsoft.SecurityInsights/dataConnectors?api-version={api_securityinsights}"
+      automation_rules: "/Microsoft.OperationalInsights/workspaces/{ws}/providers/Microsoft.SecurityInsights/automationRules?api-version={api_securityinsights}"
+      ueba_settings:    "/Microsoft.OperationalInsights/workspaces/{ws}/providers/Microsoft.SecurityInsights/settings/Ueba?api-version={api_securityinsights}"
+      content_packages: "/Microsoft.OperationalInsights/workspaces/{ws}/providers/Microsoft.SecurityInsights/contentPackages?api-version={api_securityinsights}"
+      dcrs:             "/Microsoft.Insights/dataCollectionRules?api-version={api_insights}"
+      dces:             "/Microsoft.Insights/dataCollectionEndpoints?api-version={api_insights}"
+
+  # KQL via az monitor log-analytics query --workspace {ws_guid}
+  kql:
+    # tables_with_data: janelas de billable GB por DataType (24h/7d/30d/90d) — base de muitos checks + custo
+    tables_with_data: |
+      Usage | where TimeGenerated > ago(90d) | where IsBillable == true
+      | summarize BillableLast24h = sumif(Quantity, TimeGenerated > ago(1d)) / 1024.0,
+                  BillableLast7d  = sumif(Quantity, TimeGenerated > ago(7d)) / 1024.0,
+                  BillableLast30d = sumif(Quantity, TimeGenerated > ago(30d)) / 1024.0,
+                  BillableLast90d = sum(Quantity) / 1024.0
+            by DataType
+      | order by BillableLast30d desc
+    # ama_mma_migration: agentes MMA/OMS legados (SENT-048)
+    ama_mma_migration: |
+      Heartbeat | where TimeGenerated > ago(7d)
+      | summarize MMACount = dcountif(Computer, Category == "Direct Agent"),
+                  AMACount = dcountif(Computer, Category == "Azure Monitor Agent")
+    # incidents_mttr: MTTR + acknowledge (SENT-029/030)
+    incidents_mttr: |
+      SecurityIncident | where TimeGenerated > ago(30d)
+      | summarize arg_max(TimeGenerated, *) by IncidentNumber
+      | summarize ClosedCount = countif(Status == "Closed"),
+                  AcknowledgedCount = countif(isnotempty(FirstModifiedTime)),
+                  MTTRMinutes = avg(datetime_diff('minute', ClosedTime, CreatedTime))
+    # rule_volumes: alertas por regra em 30d (SENT-033/035)
+    rule_volumes: |
+      SecurityAlert | where TimeGenerated > ago(30d)
+      | summarize Alerts = count() by AlertName
+      | order by Alerts desc
+
+  # RBAC (read-only) — az role assignment / Resource Graph
+  rbac: "az role assignment list --scope <workspace_resource_id> -o json   # → RbacWorkspace [{RoleDefinitionName, ObjectType, DisplayName}]"
+
+  # Public, anônimo — sem auth
+  pricing: "GET https://prices.azure.com/api/retail/prices?$filter=serviceName eq 'Log Analytics' and armRegionName eq '{region}'"
+
+# -----------------------------------------------------------------------------
+# COST — metodologia (reproduzida no relatório p/ o leitor poder discordar)
+# -----------------------------------------------------------------------------
+cost:
+  free_benefit_gb_day: 5
+  analytics_usd_per_gb: 2.30      # PerGB2018 ilustrativo (real vem do Retail Prices API por região)
+  basic_usd_per_gb: 0.65
+  auxiliary_usd_per_gb: 0.15
+  commitment_tiers_gb_day: [100, 200, 300, 400, 500, 1000, 2000, 5000]
+  commitment_discount_pct: 15
+  # NÃO precifica: query-time (Basic/Aux), search/restore, data-export egress, cross-region, meters XDR.
+
+# -----------------------------------------------------------------------------
+# GAP ENGINE — catálogo SENT-NNN (FIEL ao best-practices.json v2.0.0).
+# Cada `check` mapeia p/ uma função no renderer (dispatch por nome). Data-driven:
+# adicionar regra = 1 linha aqui + 1 função no renderer. Categories: Cost/Coverage/
+# Operational/Identity/Network/Resilience/Hygiene/Foundation/Strategic. Sev: Critical/Warning/Info.
+# -----------------------------------------------------------------------------
+best_practices:
+  - {id: SENT-001, title: "Daily cap não configurado no workspace", category: Cost, severity: Warning, check: Test-DailyCapConfigured, remediation: "Defina workspaceCapping.dailyQuotaGb (~110% do ingest diário) p/ um conector descontrolado não estourar a conta.", learn: "https://learn.microsoft.com/azure/azure-monitor/logs/daily-cap"}
+  - {id: SENT-002, title: "Retenção padrão abaixo do benefício grátis de 90d do Sentinel", category: Cost, severity: Warning, check: Test-WorkspaceRetentionMeetsSentinelBenefit, remediation: "Suba retentionInDays p/ 90 — o upgrade 30→90d é grátis em tabelas elegíveis.", learn: "https://learn.microsoft.com/azure/sentinel/billing"}
+  - {id: SENT-003, title: "Tabela de alto volume no plano Analytics sem transform de DCR", category: Cost, severity: Warning, check: Test-NoisyTableHasTransform, remediation: "Tabelas >50GB/30d sem transformKql: aplique transform p/ dropar ruído, ou mude p/ Basic/Auxiliary.", learn: "https://learn.microsoft.com/azure/sentinel/manage-table-tiers-retention"}
+  - {id: SENT-004, title: "Data connectors recomendados não implantados", category: Coverage, severity: Info, check: Test-RecommendedConnectorsDeployed, remediation: "Compare connectors do Content Hub com os implantados; faltantes deixam gaps de detecção.", learn: "https://learn.microsoft.com/azure/sentinel/data-connectors-reference"}
+  - {id: SENT-005, title: "UEBA desabilitado", category: Coverage, severity: Warning, check: Test-UebaEnabled, remediation: "Habilite UEBA p/ anomaly scores + timelines de entidade.", learn: "https://learn.microsoft.com/azure/sentinel/enable-entity-behavior-analytics"}
+  - {id: SENT-006, title: "Tática MITRE ATT&CK sem nenhuma detecção habilitada", category: Coverage, severity: Warning, check: Test-MitreTacticCoverage, remediation: "Toda tática sem cobertura é blind spot; onboard rules do Content Hub p/ as faltantes.", learn: "https://learn.microsoft.com/azure/sentinel/mitre-coverage"}
+  - {id: SENT-007, title: "Analytic rules desabilitadas ou em erro", category: Operational, severity: Warning, check: Test-RulesDisabledOrFailing, remediation: "Regra off/falhando não gera alerta — investigue (fonte ausente, parser quebrado) ou remova.", learn: "https://learn.microsoft.com/azure/sentinel/detect-threats-built-in"}
+  - {id: SENT-008, title: "Templates de regra High-severity não implantados", category: Coverage, severity: Info, check: Test-HighSeverityTemplatesDeployed, remediation: "Templates High não implantados costumam ser quick wins; onboard os que casam com suas fontes.", learn: "https://learn.microsoft.com/azure/sentinel/detect-threats-from-template"}
+  - {id: SENT-009, title: "RBAC Owner/Contributor no escopo do workspace", category: Identity, severity: Warning, check: Test-RbacOverPrivileged, remediation: "Owner/Contributor dá mais que qualquer analista precisa; troque por Sentinel Reader/Responder/Contributor.", learn: "https://learn.microsoft.com/azure/sentinel/roles"}
+  - {id: SENT-010, title: "Diagnostic settings do workspace não configurados", category: Operational, severity: Info, check: Test-DiagnosticSettingsConfigured, remediation: "Sem diag settings o workspace não se auto-monitora; encaminhe LAQueryLogs/SentinelHealth a outro workspace.", learn: "https://learn.microsoft.com/azure/azure-monitor/logs/monitor-workspace"}
+  - {id: SENT-011, title: "Managed identity de playbook sem role Sentinel Responder", category: Operational, severity: Warning, check: Test-PlaybookMiHasResponder, remediation: "Playbook que comenta/muda incidente precisa de Sentinel Responder; sem isso falha em silêncio.", learn: "https://learn.microsoft.com/azure/sentinel/automation/automate-responses-with-playbooks"}
+  - {id: SENT-012, title: "Transform de DCR ausente em custom tables barulhentas", category: Cost, severity: Info, check: Test-DcrTransformMissing, remediation: "Custom _CL no Analytics se beneficiam de transform KQL p/ dropar linhas de baixo valor antes do bill.", learn: "https://learn.microsoft.com/azure/azure-monitor/data-collection/data-collection-transformations"}
+  - {id: SENT-013, title: "Atualizações de solução do Content Hub disponíveis", category: Hygiene, severity: Info, check: Test-ContentHubUpdatesAvailable, remediation: "Solução instalada mais antiga que o template disponível = detecções desatualizadas; atualize.", learn: "https://learn.microsoft.com/azure/sentinel/sentinel-solutions"}
+  - {id: SENT-014, title: "Sentinel ainda no Azure portal — migração p/ Defender XDR (deadline 2027-03-31)", category: Strategic, severity: Info, check: Test-OnboardedToDefender, remediation: "Sentinel no portal Azure aposenta em 2027-03-31; planeje a migração p/ o Defender XDR unificado.", learn: "https://learn.microsoft.com/azure/sentinel/move-to-defender"}
+  - {id: SENT-015, title: "PerGB2018 com ingest acima do break-even do próximo commitment tier", category: Cost, severity: Info, check: Test-CommitmentTierOpportunity, remediation: "Se o p95 diário (30d) passa de um tier, migrar reduz custo; ver delta na página de custo.", learn: "https://learn.microsoft.com/azure/azure-monitor/logs/cost-logs"}
+  - {id: SENT-016, title: "Tabela Analytics de alto volume candidata a Basic/Auxiliary", category: Cost, severity: Info, check: Test-HighVolumeTablePlanCandidate, remediation: "Tabelas >50GB/30d raramente consultadas (sem rule/query) são boas p/ Basic/Auxiliary.", learn: "https://learn.microsoft.com/azure/azure-monitor/logs/basic-logs-configure"}
+  - {id: SENT-017, title: "Dado de longo prazo em retenção interativa em vez de archive", category: Cost, severity: Info, check: Test-RetentionOverArchive, remediation: "Retenção interativa é cara; baixe retentionInDays e use totalRetentionInDays p/ archive.", learn: "https://learn.microsoft.com/azure/azure-monitor/logs/data-retention-archive"}
+  - {id: SENT-018, title: "Ingest >500 GB/dia sem dedicated cluster", category: Cost, severity: Info, check: Test-DedicatedClusterCandidate, remediation: "A >500GB/dia sustentado, um dedicated cluster dá CR pricing, CMK e AZ.", learn: "https://learn.microsoft.com/azure/azure-monitor/logs/logs-dedicated-clusters"}
+  - {id: SENT-019, title: "Benefício grátis Sentinel não detectado com planos Defender elegíveis", category: Cost, severity: Warning, check: Test-SentinelBenefitApplied, remediation: "DfS P2/DfC/M365 E5 dão allowance grátis; se há ingest billable em tabelas de segurança, abra caso.", learn: "https://learn.microsoft.com/azure/sentinel/billing-reduce-costs"}
+  - {id: SENT-020, title: "Replicação de workspace desabilitada em tenant produção paired-region", category: Resilience, severity: Info, check: Test-ReplicationEnabled, remediation: "Workspace replication (GA) mantém mirror síncrono p/ failover; habilite em produção.", learn: "https://learn.microsoft.com/azure/azure-monitor/logs/workspace-replication"}
+  - {id: SENT-021, title: "Public network access habilitado p/ ingestão ou query (sem AMPLS)", category: Network, severity: Warning, check: Test-PublicNetworkAccessDisabled, remediation: "Ponha publicNetworkAccessForIngestion/Query = Disabled + AMPLS (Private Link).", learn: "https://learn.microsoft.com/azure/azure-monitor/logs/private-link-security"}
+  - {id: SENT-022, title: "Resource provider Sentinel/Log Analytics não registrado na subscription", category: Foundation, severity: Critical, check: Test-ResourceProvidersRegistered, remediation: "Registre Microsoft.SecurityInsights e Microsoft.OperationalInsights; sem isso todo deploy falha.", learn: "https://learn.microsoft.com/azure/azure-resource-manager/management/resource-providers-and-types"}
+  - {id: SENT-023, title: "Tabelas elegíveis não avaliadas p/ Sentinel Data Lake mirroring", category: Cost, severity: Info, check: Test-DataLakeMirroringCandidate, remediation: "Long-tail de segurança (firewall raw p/ hunt/forensics) é candidato a Data Lake a fração do custo Analytics.", learn: "https://learn.microsoft.com/azure/sentinel/datalake/sentinel-lake-overview"}
+  - {id: SENT-024, title: "disableLocalAuth = false (ingestão por shared-key permitida)", category: Identity, severity: Warning, check: Test-DisableLocalAuth, remediation: "Ponha features.disableLocalAuth = true p/ exigir auth Entra na ingestão e desabilitar shared keys.", learn: "https://learn.microsoft.com/azure/azure-monitor/logs/manage-access"}
+  - {id: SENT-025, title: "enableLogAccessUsingOnlyResourcePermissions inconsistente com o modelo de acesso", category: Identity, severity: Info, check: Test-AccessModeConsistent, remediation: "Decida entre workspace-context e resource-context e alinhe a flag; mismatch gera gaps de autorização.", learn: "https://learn.microsoft.com/azure/azure-monitor/logs/manage-access"}
+  - {id: SENT-026, title: "Tabela silenciosa — teve ingestão, nada nos últimos 7 dias", category: Operational, severity: Warning, check: Test-SilentTables, remediation: "Última ingestão >7d e <90d normalmente = conector quebrado; cheque estado/agent/DCR.", learn: "https://learn.microsoft.com/azure/sentinel/monitor-data-connectors-health"}
+  - {id: SENT-027, title: "Tabela órfã — schema provisionado, sem dado em 90d", category: Hygiene, severity: Info, check: Test-OrphanTables, remediation: "Custom _CL com schema mas sem dado em 90d = candidata a delete ou fonte nunca onboarded.", learn: "https://learn.microsoft.com/azure/azure-monitor/logs/create-custom-table"}
+  - {id: SENT-028, title: "Connector 'Connected' mas tabela-alvo com zero ingestão em 24h", category: Operational, severity: Warning, check: Test-ConnectorTableMismatch, remediation: "Connector conectado sem dado recente na tabela-alvo = quebra quase certa; cheque health/DCR.", learn: "https://learn.microsoft.com/azure/sentinel/monitor-data-connectors-health"}
+  - {id: SENT-029, title: "Incident MTTR acima do limite de 24h", category: Operational, severity: Warning, check: Test-IncidentMttrThreshold, remediation: "MTTR >24h (30d) = SOC sobrecarregado, regras barulhentas ou gap de automação.", learn: "https://learn.microsoft.com/azure/sentinel/manage-soc-with-incident-metrics"}
+  - {id: SENT-030, title: "Maioria dos incidentes fechada sem nunca ser acknowledged", category: Operational, severity: Warning, check: Test-IncidentClosedWithoutAcknowledgement, remediation: ">50% fechados sem ack = automação auto-fechando sem revisão, ou regras inundando a fila.", learn: "https://learn.microsoft.com/azure/sentinel/manage-soc-with-incident-metrics"}
+  - {id: SENT-031, title: "Regra habilitada não modificada há mais de 12 meses", category: Operational, severity: Info, check: Test-MouldyAnalyticsRules, remediation: "Scheduled/NRT com lastModifiedUtc >1 ano pode estar driftando do dado; revise ou aposente.", learn: "https://learn.microsoft.com/azure/sentinel/monitor-analytics-rule-integrity"}
+  - {id: SENT-032, title: "Regra implantada atrás da última versão do template", category: Hygiene, severity: Info, check: Test-AnalyticsRuleTemplateDrift, remediation: "templateVersion da regra < último alertRuleTemplate = melhorias da Microsoft não aplicadas; atualize.", learn: "https://learn.microsoft.com/azure/sentinel/detect-threats-from-template"}
+  - {id: SENT-033, title: "Uma única regra gera >30% do volume de alertas", category: Operational, severity: Warning, check: Test-DominantNoisyRule, remediation: "Regra com >30% dos alertas = candidata a tuning (threshold largo, exclusão faltando).", learn: "https://learn.microsoft.com/azure/sentinel/monitor-optimize-analytics-rule-execution"}
+  - {id: SENT-034, title: "Nenhuma automation rule definida — todo incidente cai no analista", category: Operational, severity: Warning, check: Test-AutomationRulesPresent, remediation: "Sem automation rules tudo é triagem manual; comece com enriquecimento (owner, tag, suppress).", learn: "https://learn.microsoft.com/azure/sentinel/automate-incident-handling-with-automation-rules"}
+  - {id: SENT-035, title: "Regra habilitada com zero alertas nos últimos 90d", category: Operational, severity: Info, check: Test-DeadAnalyticsRule, remediation: "Zero alertas em 90d = fonte silenciosa, query quebrada ou evento raro; confirme intenção.", learn: "https://learn.microsoft.com/azure/sentinel/troubleshoot-analytics-rules"}
+  - {id: SENT-039, title: "Service principal com Owner/Contributor no escopo do workspace", category: Identity, severity: Warning, check: Test-ServicePrincipalOverPrivileged, remediation: "SP com Owner/Contributor = blast-radius programático; troque por Sentinel Contributor/Responder/Reader.", learn: "https://learn.microsoft.com/azure/sentinel/roles"}
+  - {id: SENT-040, title: "Nenhuma identidade com o role Microsoft Sentinel Responder", category: Identity, severity: Warning, check: Test-ResponderRoleAssigned, remediation: "Sem Responder o SOC não age em incidente por least-privilege; atribua aos grupos tier-1/2.", learn: "https://learn.microsoft.com/azure/sentinel/roles"}
+  - {id: SENT-042, title: "Sem lock de proteção contra deleção no workspace", category: Resilience, severity: Warning, check: Test-WorkspaceLockPresent, remediation: "CanNotDelete lock evita deleção acidental/maliciosa (perderia rules, watchlists, hunting, histórico).", learn: "https://learn.microsoft.com/azure/azure-resource-manager/management/lock-resources"}
+  - {id: SENT-043, title: "Volume de CommonSecurityLog justifica split p/ vendor _CL", category: Cost, severity: Info, check: Test-CefSplitOpportunity, remediation: "CSL é cobrado à taxa de segurança; registros de rotina podem ir p/ _CL via DCR filter+split.", learn: "https://learn.microsoft.com/azure/sentinel/transformation-filter-split"}
+  - {id: SENT-044, title: "Volume de Syslog justifica filtro de facility/_CL split", category: Cost, severity: Info, check: Test-SyslogSplitOpportunity, remediation: "Use facilityNames/logLevels do DCR p/ dropar facilities não-segurança; roteie o resto p/ _CL.", learn: "https://learn.microsoft.com/azure/azure-monitor/vm/data-collection-syslog"}
+  - {id: SENT-045, title: "Volume de SecurityEvent/WindowsEvent justifica XPath filter no DCR AMA", category: Cost, severity: Info, check: Test-WindowsEventXPathFilterOpportunity, remediation: "Adicione XPath ao DCR p/ dropar 4624/4634/4672/5379 (alto volume) na coleta.", learn: "https://learn.microsoft.com/azure/azure-monitor/vm/data-collection-windows-events"}
+  - {id: SENT-046, title: "AzureDiagnostics carregando múltiplos RPs — usar tabelas resource-specific", category: Cost, severity: Info, check: Test-AzureDiagnosticsResourceSpecific, remediation: "Tabelas resource-specific são mais baratas/rápidas; troque o diag setting p/ 'Resource-specific'.", learn: "https://learn.microsoft.com/azure/azure-monitor/platform/resource-logs"}
+  - {id: SENT-047, title: "Custom log ainda no HTTP Data Collector API (CLv1) — aposenta 2026-09-14", category: Foundation, severity: Critical, check: Test-CustomLogsV1Migration, remediation: "CLv1 para em 14/09/2026; migre cada _CL via tables/{name}/migrate + DCR (Logs Ingestion API).", learn: "https://learn.microsoft.com/azure/azure-monitor/logs/custom-logs-migrate"}
+  - {id: SENT-048, title: "Agente Log Analytics legado (MMA/OMS) ainda heartbeating — aposentado 2024-08-31", category: Foundation, severity: Critical, check: Test-MmaAgentStillHeartbeating, remediation: "MMA aposentou em 31/08/2024 (degradado após 01/02/2025); migre tudo p/ AMA + DCR.", learn: "https://learn.microsoft.com/azure/azure-monitor/agents/azure-monitor-agent-migration"}
+  - {id: SENT-049, title: "TI ainda na tabela legada ThreatIntelligenceIndicator — parou 2025-07-31", category: Foundation, severity: Critical, check: Test-LegacyThreatIntelligenceTable, remediation: "Ingestão legada parou em 31/07/2025; aponte rules/hunts/workbooks p/ ThreatIntelIndicators/Objects.", learn: "https://learn.microsoft.com/azure/sentinel/understand-threat-intelligence"}
