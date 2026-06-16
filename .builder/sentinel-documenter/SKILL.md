@@ -126,8 +126,8 @@ If terminal `az` fails (token cache / auth), fall back to **Mode B**.
 | `workspace` | REST `workspace` | ARM resource object |
 | `tables` | REST `tables` | `{value:[ARM table…]}` |
 | `tables_with_data` | KQL `tables_with_data` | `[{DataType,BillableLast24h,BillableLast7d,BillableLast30d,BillableLast90d}…]` |
-| `alert_rules` | REST `alert_rules` | `{value:[…]}` |
-| `alert_templates` | REST `alert_templates` | `{value:[…]}` |
+| `alert_rules` | REST `alert_rules` (`/alertRules` — **deployed rules only**, usually tens) | `{value:[…]}` — keep `properties.enabled`. Do **NOT** put `/alertRuleTemplates` here. |
+| `alert_templates` | REST `alert_templates` (`/alertRuleTemplates` — Content Hub, can be **hundreds**) | `{value:[…]}` |
 | `data_connectors` | REST `data_connectors` | `{value:[…]}` |
 | `automation_rules` | REST `automation_rules` | `{value:[…]}` |
 | `dcrs` | REST `dcrs` | `{value:[…]}` |
@@ -137,6 +137,8 @@ If terminal `az` fails (token cache / auth), fall back to **Mode B**.
 | `incidents_mttr` | KQL `incidents_mttr` | `[{MTTRMinutes,ClosedCount,AcknowledgedCount}]` |
 | `rule_volumes` | KQL `rule_volumes` | `[{AlertName,Alerts}…]` |
 | `ama_mma_migration` | KQL `ama_mma_migration` | `[{MMACount,AMACount}]` |
+
+> ⚠️ **Do not conflate `alert_rules` with `alert_templates`.** `/alertRules` returns the *deployed* analytic rules (tens); `/alertRuleTemplates` returns Content Hub templates (often hundreds). Putting templates into `alert_rules` inflates the rule count and corrupts rule checks (e.g. SENT-007 disabled-rules). The renderer now self-defends — it strips template-shaped items (those without `properties.enabled`) out of `alert_rules` and logs `⚠ N item(ns) … removidos de alert_rules` — but collect them into the correct bucket anyway.
 
 Then:
 ```bash

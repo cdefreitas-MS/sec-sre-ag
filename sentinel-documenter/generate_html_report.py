@@ -72,14 +72,47 @@ def F(evidence, detail=""):
 # =============================================================================
 # Inventário normalizado a partir do JSON (--from-json) ou _raw coletado
 # =============================================================================
+def _split_rules_templates(rules):
+    """Separa itens com cara de TEMPLATE que vazaram p/ o balde de `alert_rules`
+    (ex.: /alertRuleTemplates coletado dentro de alert_rules — infla a contagem em
+    centenas e corrompe checks de regra). Uma analytic rule IMPLANTADA sempre carrega
+    a propriedade `enabled`; um alertRuleTemplate nunca. Retorna (regras_reais, vazados)."""
+    rules = as_list(rules)
+    if not rules:
+        return [], []
+    def has_enabled(r):
+        if not isinstance(r, dict):
+            return False
+        if "enabled" in r:
+            return True
+        p = r.get("properties")
+        return isinstance(p, dict) and "enabled" in p
+    def is_template_type(r):
+        return "alertruletemplates" in str(prop(r, "type", "")).lower()
+    any_enabled = any(has_enabled(r) for r in rules)
+    kept, leaked = [], []
+    for r in rules:
+        if is_template_type(r) or (any_enabled and not has_enabled(r)):
+            leaked.append(r)
+        else:
+            kept.append(r)
+    return kept, leaked
+
 def build_inventory(data: dict) -> dict:
     ws = data.get("workspace") or {}
+    # higieniza alert_rules: tira templates vazados; se o balde de templates veio vazio
+    # mas houve vazamento, recupera-os p/ não perder o check de templates (SENT-008).
+    rules, leaked_templates = _split_rules_templates(data.get("alert_rules"))
+    templates = as_list(data.get("alert_templates"))
+    if not templates and leaked_templates:
+        templates = leaked_templates
     inv = {
         "Workspace": ws,
         "Tables": as_list(data.get("tables")),
         "TablesWithData": as_list(data.get("tables_with_data")),
-        "AlertRules": as_list(data.get("alert_rules")),
-        "AlertRuleTemplates": as_list(data.get("alert_templates")),
+        "AlertRules": rules,
+        "AlertRuleTemplates": templates,
+        "LeakedTemplateRules": len(leaked_templates),
         "DataConnectors": as_list(data.get("data_connectors")),
         "AutomationRules": as_list(data.get("automation_rules")),
         "Dcrs": as_list(data.get("dcrs")),
@@ -1382,6 +1415,10 @@ def main():
         ap.error("informe --from-json OU (--workspace --sub --rg --ws)")
 
     inv = build_inventory(data)
+    if inv.get("LeakedTemplateRules"):
+        print(f"⚠  {inv['LeakedTemplateRules']} item(ns) com cara de template foram removidos de "
+              f"alert_rules (colete /alertRuleTemplates em alert_templates, não em alert_rules).",
+              file=sys.stderr)
     findings, passed, skipped = run_gaps(inv, catalog)
     score, verdict, klass = documenter_score(findings)
     cost = estimate_cost(inv, cost_cfg, retail=data.get("retail"))
