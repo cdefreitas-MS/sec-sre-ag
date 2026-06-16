@@ -8,6 +8,18 @@ Each skill is a self-contained capability that the agent can invoke in response 
 
 ## Skills
 
+### aitm-dashboard
+
+Tenant-wide Adversary-in-the-Middle (AiTM) and token-theft hunt. Surfaces the hallmark signal — risky *successful* sign-ins where MFA was satisfied via a stolen session token — plus anomalous-token risk events, session anomalies (same user from 2+ countries in a short window), MFA-method tampering, and BEC inbox-rule persistence. Routes by data origin: identity signals via Sentinel KQL; BEC inbox rules via Defender XDR (`CloudAppEvents`) through Graph `runHuntingQuery`. Computes a weighted AiTM score and delivers an executive HTML.
+
+| # | Example prompt |
+|---|---|
+| 1 | *Run an AiTM and token-theft hunt for the last 7 days* |
+| 2 | *Are there any risky successful sign-ins where MFA was satisfied from anomalous locations?* |
+| 3 | *Detect token-replay / impossible-travel sessions across the tenant* |
+| 4 | *Find suspicious inbox rules (forward/redirect/delete) created after risky sign-ins* |
+| 5 | *Show me the top AiTM target users with their risk indicators* |
+
 ### computer-investigation
 
 Performs comprehensive security investigations on Windows, macOS, and Linux devices registered in Microsoft Entra ID and onboarded to Microsoft Defender for Endpoint. Collects device context, process execution history, network connections, registry persistence, file activity, vulnerability assessment, and risk scoring.
@@ -19,6 +31,18 @@ Performs comprehensive security investigations on Windows, macOS, and Linux devi
 | 3 | *Show me all vulnerabilities on device my-laptop and their exploitation risk* |
 | 4 | *Is device WIN-12345 internet-facing and what ports are exposed?* |
 | 5 | *Analyze device my-mac for anomalous logon patterns* |
+
+### exposure-graph
+
+Synthesizes an attack-surface / blast-radius graph without requiring a dedicated Exposure Management license. Correlates Defender for Endpoint exposure (org exposure score, most-exposed machines, exploitable exposed recommendations) with Microsoft Graph identity context — privileged identities as *crown jewels*, high-risk users as *entry points* — to compute heuristic attack paths (risky entry → privileged target) and an exposure verdict (BAIXA / MODERADA / ALTA).
+
+| # | Example prompt |
+|---|---|
+| 1 | *Generate an exposure graph and blast-radius report* |
+| 2 | *If one account or device is compromised, how far can an attacker reach?* |
+| 3 | *Which privileged identities are most exposed via risky users and devices?* |
+| 4 | *Show me the most-exposed machines and the exploitable weaknesses on them* |
+| 5 | *Count the potential attack paths from entry points to crown jewels* |
 
 ### identity-posture
 
@@ -127,6 +151,18 @@ Generates a comprehensive MITRE ATT&CK coverage analysis. Maps analytic rules an
 | 3 | *What are the top coverage gaps and how can we improve them?* |
 | 4 | *Show me untagged detection rules and suggest MITRE mappings* |
 | 5 | *Analyze our coverage against ransomware threat scenarios* |
+
+### org-posture
+
+Consolidates a one-page executive security-posture index for board / CISO. Rolls up four weighted pillars — identity & configuration (Secure Score), endpoint (MDE exposure), threat pressure (active incidents), and identity risk (high-risk users) — into a single Org Posture Index (0–100) with an A–F grade and a per-pillar breakdown with drivers. Annotates pillars whose data source returned empty (empty ≠ healthy).
+
+| # | Example prompt |
+|---|---|
+| 1 | *Generate an org security posture scorecard* |
+| 2 | *Give me one number and one grade for our overall security posture* |
+| 3 | *Which pillar is dragging our posture down the most?* |
+| 4 | *What single action would most improve our posture index?* |
+| 5 | *Show the posture breakdown by pillar with weights and drivers* |
 
 ### sentinel-ingestion-report
 
