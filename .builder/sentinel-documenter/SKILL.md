@@ -182,6 +182,21 @@ Always shown next to the findings table — never a black box. Checks whose data
 
 ~30 of 43 rules are evaluated by the renderer; the rest live in the catalog and surface as **não avaliados** until their data is collected (mirrors the original's incremental design).
 
+## Report sections beyond gap analysis (SOA-derived)
+
+Inspired by Microsoft's **Solution Optimization Assessment (SOA)** review process (re-implemented from the public model — no internal artifacts copied), the report renders the following extra sections, all from the **same read-only inventory**:
+
+| Section | What it adds |
+|---|---|
+| **📊 Maturidade dimensional** | 6-dimension CMMI-style scorecard (Coleta de Dados · Cobertura de Detecção · Excelência Operacional · Otimização de Custo · Identidade & Acesso · Resiliência & Fundação). Per-dimension score = `100×(1 − penalty_of_findings / penalty_evaluated)`; a dimension with no evaluable check shows **n/a** (never 100). Overall index = mean of scored dimensions → level. |
+| **🗂️ Recomendações por Área · Tópico** | findings regrouped into the SOA taxonomy (Area → Topic, Importance 1=high…4=low), driven by the `taxonomy:` map in queries.yaml. |
+| **🧮 Custo por tabela × cobertura** | rule-cost matrix: per table → plan, US$/30d, and which enabled rules consume it (direct KQL ref or ASIM `im_*` parser). Expensive table with 0 rules → tier/drop candidate. |
+| **🪙 Cost optimizer** | savings playbook ranking levers (orphan tier-down, CEF/Syslog/WinEvent/AzureDiag split, commitment tier) by **estimated** US$/month. Dedupes a table across levers; flags E5/MDFC-benefit tables with low confidence. |
+| **🧾 Table facts registry** | per table: plan, retention, GB/30d, trend (▲▼▬), rule count, license-benefit group (E5 · MDE/MDO/MDCA/MDI · MDFC), status (active/silent/idle). |
+| **📌 Recomendações padrão (famílias SOA)** | always-on best-practice reminders (Architecture · Agents · Defender for Cloud · Content Hub). **Not scored** — a reminder becomes "Ação recomendada" when the inventory shows evidence (MMA present, connector missing). |
+
+Config for these lives in `queries.yaml`: `taxonomy`, `maturity`, `default_recommendations`, `cost_optimizer` (+ `cost.orphan_cost_min`). The Documenter Score is unchanged — these sections are additive views over the same findings/inventory.
+
 ## Common Errors
 
 | Error | Meaning | Fix |
