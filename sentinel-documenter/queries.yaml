@@ -32,6 +32,7 @@ parameters:
 collector:
   rest:
     api_securityinsights: "2024-03-01"
+    api_securityinsights_preview: "2024-01-01-preview"   # settings/Ueba exige preview — a GA 2024-03-01 falha p/ o tipo `settings` (ex.: eastus2 → NoRegisteredProviderFound)
     api_oi: "2023-09-01"
     api_insights: "2023-03-11"
     base: "https://management.azure.com/subscriptions/{sub}/resourceGroups/{rg}/providers"
@@ -43,7 +44,7 @@ collector:
       alert_templates:  "/Microsoft.OperationalInsights/workspaces/{ws}/providers/Microsoft.SecurityInsights/alertRuleTemplates?api-version={api_securityinsights}"
       data_connectors:  "/Microsoft.OperationalInsights/workspaces/{ws}/providers/Microsoft.SecurityInsights/dataConnectors?api-version={api_securityinsights}"
       automation_rules: "/Microsoft.OperationalInsights/workspaces/{ws}/providers/Microsoft.SecurityInsights/automationRules?api-version={api_securityinsights}"
-      ueba_settings:    "/Microsoft.OperationalInsights/workspaces/{ws}/providers/Microsoft.SecurityInsights/settings/Ueba?api-version={api_securityinsights}"
+      ueba_settings:    "/Microsoft.OperationalInsights/workspaces/{ws}/providers/Microsoft.SecurityInsights/settings/Ueba?api-version={api_securityinsights_preview}"
       content_packages: "/Microsoft.OperationalInsights/workspaces/{ws}/providers/Microsoft.SecurityInsights/contentPackages?api-version={api_securityinsights}"
       dcrs:             "/Microsoft.Insights/dataCollectionRules?api-version={api_insights}"
       dces:             "/Microsoft.Insights/dataCollectionEndpoints?api-version={api_insights}"
