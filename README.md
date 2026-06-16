@@ -128,6 +128,18 @@ Generates a comprehensive MITRE ATT&CK coverage analysis. Maps analytic rules an
 | 4 | *Show me untagged detection rules and suggest MITRE mappings* |
 | 5 | *Analyze our coverage against ransomware threat scenarios* |
 
+### sentinel-documenter
+
+Produces living, gap-scored documentation of a Sentinel workspace. Inventories analytic rules, data connectors, DCRs/DCEs, tables, RBAC, and workspace settings, then runs a scored best-practice gap analysis against the **SENT-NNN catalog** (43 rules across Cost, Coverage, Operational, Identity, Network, Resilience, Hygiene, Foundation, and Strategic — ported faithfully from the open-source Sentinel-As-Code Wave 4 `best-practices.json`). Estimates cost from Usage × Azure Retail Prices (with the 5 GB/day Sentinel free benefit and a commitment-tier what-if), and emits a **Documenter Score** (0–100) with verdict SAUDÁVEL / ATENÇÃO / EM RISCO / CRÍTICO. Renders the final HTML (email) + Markdown (repo) deterministically. 100% read-only — never mutates the workspace.
+
+| # | Example prompt |
+|---|---|
+| 1 | *Document the Sentinel workspace and score it against best practices* |
+| 2 | *Run a SENT-NNN gap analysis and show me the critical findings* |
+| 3 | *How much is my Sentinel workspace costing and where can I save?* |
+| 4 | *Which best-practice rules is this workspace failing, with remediation?* |
+| 5 | *Generate a living-docs report for LA-HERBEST-SENTINEL and email it* |
+
 ### sentinel-ingestion-report
 
 Analyzes Sentinel workspace data ingestion: table-level volume breakdown, tier classification (Analytics / Basic / Data Lake), deep dives into high-volume tables, ingestion anomaly detection with 24-hour and week-over-week trending, analytic rule health monitoring, tier migration candidates, and license benefit analysis for Defender for Servers P2 and Microsoft 365 E5.
