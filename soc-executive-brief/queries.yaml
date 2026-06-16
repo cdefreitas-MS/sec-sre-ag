@@ -1,0 +1,112 @@
+# =============================================================================
+# soc-executive-brief — collector + scoring (single source of truth)
+# Pattern: collector↔renderer. This file = CAPTURE + SCORING. generate_html_report.py = RENDER.
+# Consolida 3 análises num ÚNICO email executivo: Threat Pulse · Identity Posture · MITRE Coverage.
+# Read-only (GET/query). NÃO muta nada. Placeholders: {sub} {rg} {ws} {ws_guid} {window_days} {stale_days}
+# =============================================================================
+metadata:
+  skill: soc-executive-brief
+  title: SOC Executive Brief — Daily 3-Panel Pulse
+  description: >
+    Um único brief executivo (1 email) consolidando três sinais de SOC num veredito só:
+    (1) Threat Pulse — incidentes recentes, abertos high-sev e MTTR; (2) Identity Posture —
+    sign-ins, usuários de risco, cobertura de MFA e contas privilegiadas; (3) MITRE Coverage —
+    % de táticas cobertas por regras habilitadas + regras sem tag. Score SOC 0-100 ponderado
+    (FORTE/MODERADA/FRACA) + a próxima ação recomendada. Collector↔renderer determinístico.
+    Saída HTML (dark, email) + Markdown (repo). Substitui 3 emails separados por 1 executivo.
+
+parameters:
+  window_days: 7          # janela do threat pulse + sign-ins + firing MITRE
+  stale_days: 90          # conta "parada" sem sign-in
+  mttr_threshold_min: 1440  # 24h — acima disso penaliza o painel Threat
+
+# -----------------------------------------------------------------------------
+# COLLECTOR — capture read-only. No SRE Agent: REST via RunAzCliReadCommands (`az rest`),
+# KQL via QueryLogAnalyticsByWorkspaceId. Modo B (prefetch JSON + --from-json) é o primário.
+# -----------------------------------------------------------------------------
+collector:
+  rest:
+    api_securityinsights: "2024-03-01"
+    base: "https://management.azure.com/subscriptions/{sub}/resourceGroups/{rg}/providers"
+    endpoints:
+      # regras habilitadas → cobertura de táticas MITRE + regras sem tag (untagged)
+      alert_rules: "/Microsoft.OperationalInsights/workspaces/{ws}/providers/Microsoft.SecurityInsights/alertRules?api-version={api_securityinsights}"
+
+  # KQL via az monitor log-analytics query --workspace {ws_guid}. Tabelas já validadas no LA-HERBEST.
+  kql:
+    # Painel 1 — Threat Pulse: agregados de incidentes na janela
+    threat_pulse: |
+      SecurityIncident
+      | where TimeGenerated > ago({window_days}d)
+      | summarize arg_max(TimeGenerated, *) by IncidentNumber
+      | summarize Total = count(),
+                  HighSev = countif(Severity == "High"),
+                  Open = countif(Status != "Closed"),
+                  HighSevOpen = countif(Severity == "High" and Status != "Closed"),
+                  Closed = countif(Status == "Closed"),
+                  AvgMTTRmin = avgif(datetime_diff('minute', ClosedTime, CreatedTime), Status == "Closed")
+    # Painel 1 — top incidentes abertos (por severidade, depois mais antigos)
+    threat_top: |
+      SecurityIncident
+      | where TimeGenerated > ago({window_days}d)
+      | summarize arg_max(TimeGenerated, *) by IncidentNumber
+      | where Status != "Closed"
+      | extend SevRank = case(Severity == "High", 0, Severity == "Medium", 1, Severity == "Low", 2, 3)
+      | sort by SevRank asc, CreatedTime asc
+      | take 5
+      | project IncidentNumber, Title, Severity, Status, CreatedTime
+    # Painel 2 — Identity: sign-ins, risco e MFA (SigninLogs é confiável neste workspace)
+    identity_signins: |
+      SigninLogs
+      | where TimeGenerated > ago({window_days}d)
+      | summarize Users = dcount(UserPrincipalName),
+                  RiskyUsers = dcountif(UserPrincipalName, tostring(RiskLevelDuringSignIn) in ("high", "medium")),
+                  MfaSatisfied = countif(AuthenticationRequirement == "multiFactorAuthentication"),
+                  Total = count()
+    # Painel 2 — contas privilegiadas (IdentityInfo; degrada p/ n/a se vazio)
+    identity_privileged: |
+      IdentityInfo
+      | summarize arg_max(TimeGenerated, *) by AccountUPN
+      | summarize Privileged = countif(array_length(AssignedRoles) > 0), Known = dcount(AccountUPN)
+    # Painel 3 — MITRE operacional: táticas que efetivamente dispararam alertas na janela
+    mitre_firing: |
+      SecurityAlert
+      | where TimeGenerated > ago({window_days}d)
+      | where isnotempty(Tactics)
+      | mv-expand Tactic = todynamic(Tactics) to typeof(string)
+      | extend Tactic = trim(" ", tostring(Tactic))
+      | where isnotempty(Tactic)
+      | summarize Alerts = count() by Tactic
+      | sort by Alerts desc
+
+# -----------------------------------------------------------------------------
+# SCORING — pesos dos 3 painéis + limiares do veredito (reproduzido no relatório).
+# Sub-score por painel 0-100 (renderer). Overall = Σ peso·sub-score. Painel sem dado = n/a
+# (não entra na média; nunca conta como 100). Veredito final: FORTE/MODERADA/FRACA.
+# -----------------------------------------------------------------------------
+scoring:
+  weights:
+    threat: 0.40          # pulse operacional = maior peso no brief diário
+    identity: 0.30
+    mitre: 0.30
+  verdict:                # piso de score → (rótulo, emoji)
+    - {min: 75, label: "FORTE",    emoji: "🟢"}
+    - {min: 50, label: "MODERADA", emoji: "🟡"}
+    - {min: 0,  label: "FRACA",    emoji: "🔴"}
+  # penalidades do painel Threat (sobre base 100)
+  threat:
+    per_highsev_open: 12   # cada incidente HIGH aberto
+    per_open: 2            # cada incidente aberto (qualquer sev)
+    mttr_penalty: 15       # MTTR acima de mttr_threshold_min
+    open_cap: 40           # teto da penalidade por incidentes abertos
+  # penalidades do painel Identity (sobre base 100)
+  identity:
+    per_risky_user: 15     # cada usuário de risco (high/medium) na janela
+    mfa_floor_pct: 70      # abaixo disso, penaliza proporcionalmente
+    mfa_weight: 0.5        # peso da lacuna de MFA
+    risky_cap: 60          # teto da penalidade por usuários de risco
+  # painel MITRE: cobertura de táticas é o score; untagged penaliza
+  mitre:
+    total_tactics: 14
+    per_untagged_rule: 2   # cada regra habilitada sem tag MITRE
+    untagged_cap: 20

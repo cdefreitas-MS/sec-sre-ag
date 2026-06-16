@@ -152,6 +152,18 @@ Analyzes Sentinel workspace data ingestion: table-level volume breakdown, tier c
 | 4 | *What cost savings could we achieve with Data Lake migration?* |
 | 5 | *Analyze our Defender for Servers P2 license ingestion benefits* |
 
+### soc-executive-brief
+
+Consolidates three daily SOC signals into a single executive email with one weighted verdict: a Threat Pulse (recent incidents, open High-severity, MTTR), an Identity Posture snapshot (sign-ins, risky users, MFA coverage, privileged accounts), and MITRE ATT&CK coverage (tactics covered by enabled rules, untagged rules). Produces a SOC Score (0-100, FORTE / MODERADA / FRACA) and the single most urgent next action. Read-only; replaces three separate reports with one brief.
+
+| # | Example prompt |
+|---|---|
+| 1 | *Generate today's SOC executive brief* |
+| 2 | *Give me one consolidated security posture email for leadership* |
+| 3 | *What's our SOC score and the single most urgent action right now?* |
+| 4 | *Summarize threat pulse, identity posture, and MITRE coverage in one brief* |
+| 5 | *Send the daily executive SOC brief to the security leads* |
+
 ### threat-pulse
 
 Performs a rapid, broad-spectrum security scan across seven domains — incidents, identity, nonhuman identities, endpoint, email, admin/cloud, and exposure — in roughly 15 minutes. Presents findings as a prioritized dashboard with drill-down recommendations to specialized investigation skills. Ideal as a daily SOC starting point.
