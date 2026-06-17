@@ -225,31 +225,61 @@ def collect_live(q, sub, rg):
 # =============================================================================
 ARG_URL = "https://management.azure.com/providers/Microsoft.ResourceGraph/resources?api-version=2022-10-01"
 
+# Projeções SLIM: reconstroem `properties` SÓ com os campos que os parsers usam (via pack()),
+# preservando a forma aninhada (parsers inalterados) e dropando o bloat (ex.: additionalData
+# gigante dos assessments de CVE de container). Mantém o payload bem abaixo do limite de 2 MB.
 ARG_QUERIES = {
     "subscriptions":
         'resourcecontainers | where type == "microsoft.resources/subscriptions" '
         '| project subscriptionId, name = tostring(properties.displayName)',
     "advisor_recommendations":
         'advisorresources | where type == "microsoft.advisor/recommendations" '
-        '| project id, subscriptionId, properties',
+        '| project id, subscriptionId, properties = pack('
+        '"category", properties.category, '
+        '"impact", properties.impact, '
+        '"shortDescription", pack("problem", properties.shortDescription.problem, "solution", properties.shortDescription.solution), '
+        '"extendedProperties", pack("savingsAmount", properties.extendedProperties.savingsAmount, "annualSavingsAmount", properties.extendedProperties.annualSavingsAmount), '
+        '"resourceMetadata", pack("resourceId", properties.resourceMetadata.resourceId))',
     "mdc_assessments":
         'securityresources | where type == "microsoft.security/assessments" '
-        '| project id, name, subscriptionId, properties',
+        '| project id, name, subscriptionId, properties = pack('
+        '"displayName", properties.displayName, '
+        '"owner", properties.owner, '
+        '"status", pack("code", properties.status.code, "cause", properties.status.cause), '
+        '"resourceDetails", pack("Id", properties.resourceDetails.Id, "ResourceId", properties.resourceDetails.ResourceId), '
+        '"links", pack("azurePortal", properties.links.azurePortal), '
+        '"metadata", pack("severity", properties.metadata.severity, "categories", properties.metadata.categories, '
+        '"remediationDescription", properties.metadata.remediationDescription, '
+        '"tactics", properties.metadata.tactics, "techniques", properties.metadata.techniques))',
     "mdc_secure_score_controls":
         'securityresources | where type == "microsoft.security/securescores/securescorecontrols" '
         '| where id matches regex "/secureScores/ascScore/" '
-        '| project id, name, subscriptionId, properties',
+        '| project id, name, subscriptionId, properties = pack('
+        '"displayName", properties.displayName, '
+        '"score", pack("current", properties.score.current, "max", properties.score.max), '
+        '"healthyResourceCount", properties.healthyResourceCount, '
+        '"unhealthyResourceCount", properties.unhealthyResourceCount, '
+        '"notApplicableResourceCount", properties.notApplicableResourceCount, '
+        '"definition", pack("properties", pack("assessmentDefinitions", properties.definition.properties.assessmentDefinitions)))',
     "mdc_secure_score":
         'securityresources | where type == "microsoft.security/securescores" '
-        '| where name == "ascScore" | project id, name, subscriptionId, properties',
+        '| where name == "ascScore" | project id, name, subscriptionId, '
+        'properties = pack("score", pack("current", properties.score.current, "max", properties.score.max, "percentage", properties.score.percentage))',
     "mcsb_compliance_standards":
         'securityresources | where type == "microsoft.security/regulatorycompliancestandards" '
-        '| project id, name, subscriptionId, properties',
+        '| project id, name, subscriptionId, properties = pack('
+        '"state", properties.state, "passedControls", properties.passedControls, '
+        '"failedControls", properties.failedControls, "skippedControls", properties.skippedControls, '
+        '"unsupportedControls", properties.unsupportedControls)',
     "mcsb_compliance_controls":
         'securityresources '
         '| where type == "microsoft.security/regulatorycompliancestandards/regulatorycompliancecontrols" '
         '| where id has "Microsoft-cloud-security-benchmark" or id has "Azure-Security-Benchmark" '
-        '| project id, name, subscriptionId, properties',
+        '| project id, name, subscriptionId, properties = pack('
+        '"state", properties.state, "description", properties.description, '
+        '"passedAssessments", properties.passedAssessments, "failedAssessments", properties.failedAssessments, '
+        '"skippedAssessments", properties.skippedAssessments, '
+        '"links", pack("azurePortal", properties.links.azurePortal))',
 }
 
 def run_arg(query, subscriptions=None):

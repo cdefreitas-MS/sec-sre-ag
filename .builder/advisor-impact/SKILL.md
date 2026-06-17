@@ -131,12 +131,9 @@ python3 <SKILL_DIR>/generate_html_report.py --subs <sub1>,<sub2> --output tmp/ad
 ```
 Runs one ARG query per dataset over `advisorresources` / `securityresources` / `resourcecontainers`. Needs **Reader** on the subscriptions. If the sandbox `az` is blocked, prefetch the ARG results (Mode B) instead.
 
-> **Large tenants (>~800 MDC assessments in any subscription) — paginated ARG prefetch.**
-> Some subscriptions return huge `securityresources` result sets (e.g. **1,000+** unhealthy assessments from bulk container-image CVEs). In **Mode B**, the agent's intermediate scratchpad has a **~2 MB cap**, so a single `securityresources | project ..., properties` page can overflow it. When that happens:
-> 1. Page the ARG query in **batches of ~300 records** (use `--first 300` / `$top: 300` + `$skipToken`), writing each batch to a temp fragment.
-> 2. Keep a **flat projection** during transfer (project the sub-fields you need as top-level columns), then **reconstruct the nested `properties`** shape when assembling `inventory.json` (the renderer's parsers read `properties.*`).
-> 3. Merge all fragments per dataset into the final `{"value":[...]}` array before running the renderer.
-> This is a Mode-B prefetch concern only; `run_arg()` (Mode C direct) already paginates by `$skipToken`. **De-risked live (2026-06): 1,173 recommendations across 2 subscriptions, one with 1,028 unhealthy assessments.**
+> **Large tenants — slim projections (built-in).** The `ARG_QUERIES` use `pack()` to rebuild `properties` with **only the fields the parsers read** (drops the bloat, e.g. the large `additionalData` on container-CVE assessments). This keeps each dataset well under the agent's **~2 MB** Mode-B scratchpad cap, so the renderer's parsers (which read `properties.*`) work unchanged. **De-risked live (2026-06): 1,173 recommendations across 2 subscriptions, one with 1,028 unhealthy assessments.**
+>
+> If a single subscription is still enormous, page the ARG query in **batches of ~300 records** (`$top: 300` + `$skipToken`), write each batch to a temp fragment, and merge per dataset into the final `{"value":[...]}`. `run_arg()` (Mode C direct) already paginates by `$skipToken`.
 
 **Mode A (single RG, try first):**
 ```bash
@@ -219,17 +216,23 @@ The script applies a **43-pattern risk baseline** from `queries.yaml`:
 - **Savings:** extracts `savingsAmount`/`annualSavingsAmount` from Advisor (Cost) and totals USD/year.
 - **Implementation cost:** for recommendations matching a cost-increase pattern (geo-replication, private endpoint, NAT gateway, firewall, DDoS, WAF, Log Analytics…), queries the **Azure Retail Prices API** (public) and estimates USD/month, with fixed fallbacks if the meter isn't returned.
 
-### Step 6 — Delivery (Optional)
+### Step 6 — Delivery (triple delivery: dual email + Teams)
 
-This skill produces **HTML + MD artifacts**. To integrate with email/Teams delivery:
-- Use the existing `send-email-report` skill pattern
-- Subject: `"🧭 Plano de Remediação — Advisor + Defender for Cloud (<date>)"`
-- Attachment: HTML file
-- Body: 4 KPI cards (recommendations | quick wins | window | approval | secure score)
+This skill produces **HTML + MD artifacts**. To deliver them, reuse the existing delivery skills (do **not** re-implement transport):
 
-**Teams Adaptive Card:**
-- Badge: `🟢 N quick wins | 🔴 M high-risk`
-- CTA: Link to Azure Portal → Resource Group → Recommendations
+**Email (dual recipients) — via `send-email-report`:**
+- Recipients: send to **both** `default_recipients` from `config.json` (e.g. `admin@<tenant>.onmicrosoft.com` **and** `caiofreitas@microsoft.com`) in a single `toRecipients` list. ⚠️ Known regression: don't drop to a single recipient.
+- Subject: `"🧭 Plano de Remediação — Advisor + Defender for Cloud — <scope> (<date>)"` where `<scope>` = `tenant` / `N subscriptions` / `RG <name>`.
+- Attachment: the generated **HTML** file (`advisor-impact-<ts>.html`).
+- Body (tenant-wide): KPI line — `recommendations | 🟢 quick wins | 🟡🟠 window | 🔴 approval | 🛡️ SS current→potential | 🛡️ MCSB % | 💰 impl. cost`. Use the same numbers printed by the script.
+
+**Teams Adaptive Card — via `send-teams-notification`:**
+- Badge: `🟢 N quick wins · 🔴 M high-risk · 🛡️ SS X%→Y% · MCSB Z%` across `<scope>`.
+- CTA: link to Azure Portal → Defender for Cloud → Recommendations.
+- The Power Automate webhook URL comes from `config.json` (hardening pending: move to Key Vault).
+
+**Agent prompt pattern (tenant-wide + triple delivery):**
+> *"Run advisor-impact tenant-wide (Mode B prefetch ARG if `az` is sandboxed), then deliver: email the HTML to BOTH default recipients and post the Teams card. Use the script's own KPI numbers."*
 
 ---
 
