@@ -1,0 +1,126 @@
+# =============================================================================
+# advisor-impact — collector + scoring (single source of truth)
+# Pattern: collector↔renderer. This file = CAPTURE + RISK BASELINE. generate_html_report.py = RENDER.
+# Planejador de remediação que une Azure Advisor + Microsoft Defender for Cloud:
+#   recomendações → risk-rate (disrupção) + cascata em workloads dependentes
+#   → plano de execução FASEADO (safe → high/approval). 100% READ-ONLY (GET ARM).
+# Placeholders: {sub} {rg}
+# =============================================================================
+metadata:
+  skill: advisor-impact
+  title: Advisor + Defender for Cloud — Remediation Impact Planner
+  description: >
+    Une as recomendações do Azure Advisor (Cost/Reliability/Performance/OperationalExcellence)
+    com as recomendações de segurança do Microsoft Defender for Cloud (Microsoft.Security
+    assessments + secure score) e, cruzando com o inventário de recursos do resource group,
+    classifica o RISCO DE APLICAR cada uma (safe/low/medium/high por padrão de disrupção),
+    monta a CADEIA DE CASCATA (recurso muda → workloads dependentes podem reiniciar) e entrega
+    um PLANO DE EXECUÇÃO FASEADO (quick wins → janela de manutenção → aprovação+rollback).
+    Collector↔renderer; HTML (dark, email) + Markdown + entrega tripla. 100% read-only — RECOMENDA,
+    nunca aplica. Processo re-implementado de um helper interno de Azure mgmt (não verbatim).
+
+parameters:
+  category: all          # Advisor: Cost|Security|Reliability|OperationalExcellence|Performance|all
+  include_healthy: false # Defender for Cloud: por padrão só assessments Unhealthy (recomendações abertas)
+  top: 200
+
+# -----------------------------------------------------------------------------
+# COLLECTOR — ARM REST (GET). No SRE Agent: `az rest --method get --url <mgmt-url>` (RunAzCliReadCommands)
+# OU monitor/azure MCP. Modo B (prefetch JSON + --from-json) é o primário/determinístico.
+# A UAMI/identidade precisa de READER no escopo (subscription/RG) — diferente das perms Sentinel/Graph.
+# -----------------------------------------------------------------------------
+collector:
+  arm:
+    base: "https://management.azure.com"
+    endpoints:
+      # Azure Advisor — recomendações do RG
+      advisor_recommendations:
+        path: "/subscriptions/{sub}/resourceGroups/{rg}/providers/Microsoft.Advisor/recommendations"
+        api: "2023-01-01"
+      # Inventário de recursos do RG — base p/ cruzar resourceId e detectar cascata
+      resource_inventory:
+        path: "/subscriptions/{sub}/resourceGroups/{rg}/resources"
+        api: "2021-04-01"
+      # Defender for Cloud — security assessments (recomendações). Escopo: subscription;
+      # o renderer filtra p/ o RG pelo resourceId. status Unhealthy = recomendação aberta.
+      mdc_assessments:
+        path: "/subscriptions/{sub}/providers/Microsoft.Security/assessments"
+        api: "2021-06-01"
+      # Defender for Cloud — secure score (headline opcional; degrada p/ n/a se vazio)
+      mdc_secure_score:
+        path: "/subscriptions/{sub}/providers/Microsoft.Security/secureScores"
+        api: "2020-01-01"
+
+# -----------------------------------------------------------------------------
+# RISK BASELINE — risco de APLICAR (disrupção) por padrão no título/displayName.
+# Match por substring (case-insensitive), primeiro padrão que casar vence.
+# Cobre tanto títulos do Advisor quanto displayNames do Defender for Cloud.
+# Sem match → default "low" (a maioria das mudanças de config é baixo-disrupção).
+# -----------------------------------------------------------------------------
+risk_baseline:
+  safe:
+    - "enable diagnostic"
+    - "enable soft delete"
+    - "enable backup"
+    - "enable purge protection"
+    - "sku upgrade"
+    - "upgrade your sku"
+    - "enable logging"
+    - "configure log"
+    - "enable mfa"
+    - "auditing should be enabled"
+  low:
+    - "add nodes"
+    - "scale up"
+    - "spot"
+    - "security hardening"
+    - "trusted registries"
+    - "install endpoint protection"
+    - "apply system updates"
+    - "encryption at rest"
+    - "should be encrypted"
+    - "vulnerabilities should be remediated"
+  medium:
+    - "nat gateway"
+    - "restrict api server"
+    - "private link"
+    - "private endpoint"
+    - "vm series"
+    - "node pool"
+    - "geo-replication"
+    - "network security group"
+    - "should restrict network access"
+    - "firewall"
+    - "public network access should be disabled"
+    - "disable public"
+  high:
+    - "ephemeral os disk"
+    - "just-in-time"
+    - "restrict access to"
+    - "ip forwarding"
+    - "management ports should be closed"
+
+risk_emoji: { safe: "🟢", low: "🟡", medium: "🟠", high: "🔴" }
+
+# -----------------------------------------------------------------------------
+# PHASES — plano de execução faseado (reproduzido no relatório).
+# -----------------------------------------------------------------------------
+phases:
+  safe:   { label: "Fase 1 — Quick wins", emoji: "🟢", action: "Executar a qualquer hora" }
+  low:    { label: "Fase 2 — Baixo risco", emoji: "🟡", action: "Executar em janela de baixo tráfego" }
+  medium: { label: "Fase 3 — Risco médio", emoji: "🟠", action: "Agendar janela de manutenção" }
+  high:   { label: "Fase 4 — Alto risco",  emoji: "🔴", action: "Aprovação + rollback testado obrigatórios" }
+
+# Frases reutilizáveis (cascata / validação) — preenchidas com o nome do recurso no renderer.
+cascade_template: "{resource} muda → workloads dependentes podem reiniciar → validar conectividade pós-mudança"
+validation_steps:
+  - "Confirmar que {resource} está em estado de provisionamento 'Succeeded'"
+  - "Rodar health checks nos serviços dependentes"
+  - "Validar conectividade ponta a ponta a partir do cliente"
+
+# -----------------------------------------------------------------------------
+# DELIVERY — entrega tripla (consistente com a suíte).
+# -----------------------------------------------------------------------------
+delivery:
+  subject_prefix: "[Azure Remediation]"
+  recipients_key: default_recipients
