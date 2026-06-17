@@ -1,0 +1,116 @@
+# =============================================================================
+# incident-triage — collector + scoring (single source of truth)
+# Pattern: collector↔renderer. This file = CAPTURE + SCORING. generate_html_report.py = RENDER.
+# One-shot, autonomous, deterministic triage report for a SINGLE incident:
+#   header → alerts → entities → MITRE tagging (shared/mitre_map.py) →
+#   gated response plan (shared/action_safety.py) → verdict + next action.
+# Complements (does NOT replace) the interactive, multi-phase `incident-investigation`.
+# Read-only (GET/query). NÃO muta nada. Placeholders: {sub} {rg} {ws_guid} {window_days} {lookback_days} {incident_number}
+# =============================================================================
+metadata:
+  skill: incident-triage
+  title: Incident Triage — One-Shot Autonomous Brief
+  description: >
+    Relatório determinístico de triagem de UM incidente do Sentinel/Defender XDR, pensado
+    para o loop autônomo (sem analista no meio). Coleta o cabeçalho do incidente + alertas
+    relacionados, extrai entidades (usuários/hosts/IPs), TAGUEIA as técnicas MITRE
+    (táticas nativas dos alertas + inferência por texto via shared/mitre_map.py), monta um
+    PLANO DE RESPOSTA recomendado por tipo de entidade com o GATE de risco de cada ação
+    (shared/action_safety.py), e fecha com um veredito (TRUE POSITIVE PROVÁVEL / REQUER
+    ANÁLISE / PROVÁVEL BENIGNO) + a próxima ação. Collector↔renderer; HTML (dark, email) +
+    Markdown (repo) + entrega tripla. Distinto do incident-investigation interativo.
+
+parameters:
+  window_days: 7        # janela usada para escolher o incidente padrão (mais recente high-sev aberto)
+  lookback_days: 90     # janela para buscar um incidente específico + seus alertas (mais generosa)
+
+# -----------------------------------------------------------------------------
+# COLLECTOR — capture read-only. No SRE Agent: KQL via QueryLogAnalyticsByWorkspaceId
+# (monitor MCP) ou `az monitor log-analytics query`. Modo B (prefetch JSON + --from-json)
+# é o primário/determinístico. Tabelas já validadas ao vivo no LA-HERBEST.
+# -----------------------------------------------------------------------------
+collector:
+  kql:
+    # Sem incident_number: escolhe o incidente mais recente HIGH e aberto (degrada p/ aberto, depois recente).
+    pick_incident: |
+      SecurityIncident
+      | where TimeGenerated > ago({window_days}d)
+      | summarize arg_max(TimeGenerated, *) by IncidentNumber
+      | where Status != "Closed"
+      | extend SevRank = case(Severity == "High", 0, Severity == "Medium", 1, Severity == "Low", 2, 3)
+      | sort by SevRank asc, CreatedTime desc
+      | take 1
+      | project IncidentNumber
+
+    # Cabeçalho do incidente específico (último estado).
+    incident_header: |
+      SecurityIncident
+      | where TimeGenerated > ago({lookback_days}d)
+      | where IncidentNumber == {incident_number}
+      | summarize arg_max(TimeGenerated, *) by IncidentNumber
+      | project IncidentNumber, Title, Severity, Status,
+                Classification = tostring(Classification),
+                ClassificationReason = tostring(ClassificationReason),
+                Owner = tostring(parse_json(Owner).assignedTo),
+                CreatedTime, ClosedTime,
+                AlertIds, IncidentUrl,
+                Description = tostring(Description),
+                ProviderName,
+                AlertsCount = array_length(AlertIds)
+
+    # Alertas relacionados ao incidente (via AlertIds → SystemAlertId).
+    incident_alerts: |
+      SecurityIncident
+      | where TimeGenerated > ago({lookback_days}d)
+      | where IncidentNumber == {incident_number}
+      | summarize arg_max(TimeGenerated, *) by IncidentNumber
+      | mv-expand AlertId = todynamic(AlertIds) to typeof(string)
+      | project AlertId
+      | join kind=inner (
+          SecurityAlert
+          | where TimeGenerated > ago({lookback_days}d)
+          | summarize arg_max(TimeGenerated, *) by SystemAlertId
+        ) on $left.AlertId == $right.SystemAlertId
+      | extend Tactics = tostring(Tactics)
+      | project AlertName, AlertSeverity, Status, Tactics, ProductName, TimeGenerated, Entities
+      | order by AlertSeverity asc, TimeGenerated desc
+
+# -----------------------------------------------------------------------------
+# MITRE — o renderer combina as TÁTICAS NATIVAS dos alertas (campo Tactics) com a
+# INFERÊNCIA por texto (título do incidente + nomes dos alertas) feita pelo utilitário
+# compartilhado shared/mitre_map.py (subprocesso). Degrada p/ só-nativo se o util sumir.
+# -----------------------------------------------------------------------------
+mitre:
+  shared_util: mitre_map.py        # invocado como subprocesso: `python <shared>/mitre_map.py map "<texto>"`
+
+# -----------------------------------------------------------------------------
+# RESPONSE PLAYBOOK — ações recomendadas por tipo de entidade afetada. Cada ação é
+# passada pelo GATE de risco do utilitário compartilhado shared/action_safety.py
+# (risco/aprovação/rollback/guardrails). NADA é executado — o relatório só RECOMENDA.
+# -----------------------------------------------------------------------------
+response_playbook:
+  shared_util: action_safety.py    # invocado como subprocesso: `python <shared>/action_safety.py list`
+  by_entity:
+    user: [revoke_user_sessions, disable_ad_account, force_password_reset]
+    host: [isolate_device, run_antivirus_scan, collect_investigation_package]
+    ip:   [update_incident_status]
+  always: [add_incident_comment, update_incident_status]
+
+# -----------------------------------------------------------------------------
+# VERDICT — heurística determinística (reproduzida no relatório).
+#   TRUE POSITIVE PROVÁVEL: classificação já = TruePositive, OU (Severity High e ≥1 alerta high e não fechado).
+#   PROVÁVEL BENIGNO/FP:    classificação = BenignPositive/FalsePositive, OU (Severity Low e 0 alerta high).
+#   REQUER ANÁLISE:         o resto.
+# -----------------------------------------------------------------------------
+verdict:
+  true_positive: { label: "TRUE POSITIVE PROVÁVEL", emoji: "🔴" }
+  needs_review:  { label: "REQUER ANÁLISE",         emoji: "🟡" }
+  benign:        { label: "PROVÁVEL BENIGNO / FP",  emoji: "🟢" }
+
+# -----------------------------------------------------------------------------
+# DELIVERY — entrega tripla (consistente com a suíte). O renderer só monta o HTML/MD;
+# o envio (email × 2 + Teams) é feito pelas skills send-email-report / send-teams-notification.
+# -----------------------------------------------------------------------------
+delivery:
+  subject_prefix: "[SOC Triage]"
+  recipients_key: default_recipients   # lido do config.json (2 destinatários)
