@@ -196,8 +196,9 @@ Inspired by Microsoft's **Solution Optimization Assessment (SOA)** review proces
 | **🪙 Cost optimizer** | savings playbook ranking levers (orphan tier-down, CEF/Syslog/WinEvent/AzureDiag split, commitment tier) by **estimated** US$/month. Dedupes a table across levers; flags E5/MDFC-benefit tables with low confidence. |
 | **🧾 Table facts registry** | per table: plan, retention, GB/30d, trend (▲▼▬), rule count, license-benefit group (E5 · MDE/MDO/MDCA/MDI · MDFC), status (active/silent/idle). |
 | **📌 Recomendações padrão (famílias SOA)** | always-on best-practice reminders (Architecture · Agents · Defender for Cloud · Content Hub). **Not scored** — a reminder becomes "Ação recomendada" when the inventory shows evidence (MMA present, connector missing). |
+| **🛡️ Prontidão p/ portal do Defender** | onboarding-readiness scorecard for the **Sentinel → unified Defender XDR portal** move. Re-implements Microsoft's open-source **Defender Adoption Helper** (Azure-Sentinel/Tools, MIT) read-only logic: passed/total per section (Defender Data retention · Analytics rules incident/grouping behavior · Automation rule triggers) → overall % + readiness label, plus Data-Lake region check. Deepens **SENT-014**. **Not scored** — additive view that does **not** change the Documenter Score. |
 
-Config for these lives in `queries.yaml`: `taxonomy`, `maturity`, `default_recommendations`, `cost_optimizer` (+ `cost.orphan_cost_min`). The Documenter Score is unchanged — these sections are additive views over the same findings/inventory.
+Config for these lives in `queries.yaml`: `taxonomy`, `maturity`, `default_recommendations`, `cost_optimizer` (+ `cost.orphan_cost_min`), `defender_readiness` (XDR tables · Data-Lake regions · verdict tiers). The Documenter Score is unchanged — these sections are additive views over the same findings/inventory.
 
 ## Common Errors
 
