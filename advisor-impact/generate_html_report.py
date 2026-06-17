@@ -280,6 +280,17 @@ ARG_QUERIES = {
         '"passedAssessments", properties.passedAssessments, "failedAssessments", properties.failedAssessments, '
         '"skippedAssessments", properties.skippedAssessments, '
         '"links", pack("azurePortal", properties.links.azurePortal))',
+    "devops_findings":
+        'securityresources '
+        '| where type =~ "microsoft.security/assessments/subassessments" '
+        '| where id has "githubowners" or id has "/devops/" or id has "/securityconnectors/" '
+        '| project id, name, subscriptionId, properties = pack('
+        '"displayName", properties.displayName, '
+        '"category", properties.category, '
+        '"severity", properties.status.severity, '
+        '"code", properties.status.code, '
+        '"remediation", properties.remediation, '
+        '"links", pack("azurePortal", properties.links.azurePortal))',
 }
 
 def run_arg(query, subscriptions=None):
@@ -668,6 +679,70 @@ def parse_mcsb_compliance(standards_data, controls_data, std_name, preferred_nam
         "failing_controls": failing,
     }
 
+def analyze_devops_findings(data, sub_names=None):
+    """
+    Pilar DevOps Remediation: ingere os FINDINGS granulares (subassessments) do Defender
+    DevOps (GitHub/ADO/GitLab) — CVE de dependência, code scanning, IaC, secrets — agregados
+    por repositório × severidade × categoria. Distinto das recs de POSTURA ("should have X").
+    Retorna None se não houver findings (degrada).
+    """
+    rows = as_list(data)
+    if not rows:
+        return None
+    _SEV = {"critical": 4, "high": 3, "medium": 2, "low": 1, "informational": 0}
+    findings = []
+    for r in rows:
+        p = r.get("properties", {}) or {}
+        # severity/code podem vir flat (query ARG slim) OU aninhados em status.* (prefetch cru)
+        code = p.get("code") or prop(p, "status.code", "")
+        if str(code).lower() == "healthy":
+            continue  # só os não-resolvidos
+        rid = str(r.get("id", "") or "")
+        provider, repo = _devops_info(rid)
+        if not provider:
+            continue
+        sev_raw = p.get("severity") or prop(p, "status.severity", "") or "—"
+        sev = str(sev_raw).capitalize()
+        cat = str(p.get("category", "") or "—")
+        findings.append({
+            "repo": repo or "(org)",
+            "provider": provider,
+            "severity": sev,
+            "category": cat,
+            "finding": p.get("displayName", "—"),
+            "remediation": p.get("remediation", "") or "",
+            "link": prop(p, "links.azurePortal", "") or "",
+            "subscription_id": str(r.get("subscriptionId") or _sub_of(rid) or "").lower(),
+        })
+    if not findings:
+        return None
+    by_sev, by_cat, by_repo = {}, {}, {}
+    for f in findings:
+        by_sev[f["severity"]] = by_sev.get(f["severity"], 0) + 1
+        by_cat[f["category"]] = by_cat.get(f["category"], 0) + 1
+        by_repo[f["repo"]] = by_repo.get(f["repo"], 0) + 1
+    # ordena severidades canônico e repos por volume
+    sev_order = sorted(by_sev.items(), key=lambda kv: _SEV.get(kv[0].lower(), -1), reverse=True)
+    repo_top = sorted(by_repo.items(), key=lambda kv: kv[1], reverse=True)
+    # matriz repo × severidade (top 20 repos)
+    sevs = [s for s, _ in sev_order]
+    matrix = []
+    for repo, _tot in repo_top[:20]:
+        rowsev = {s: 0 for s in sevs}
+        for f in findings:
+            if f["repo"] == repo:
+                rowsev[f["severity"]] = rowsev.get(f["severity"], 0) + 1
+        matrix.append({"repo": repo, "total": _tot, "by_sev": rowsev})
+    return {
+        "total": len(findings),
+        "by_severity": dict(sev_order),
+        "by_category": by_cat,
+        "by_repo": dict(repo_top),
+        "sev_order": sevs,
+        "matrix": matrix,
+        "findings": findings,
+    }
+
 # =============================================================================
 # Build context
 # =============================================================================
@@ -740,6 +815,9 @@ def build_context(q, raw, params):
         q.get("mcsb_standard_names", []),
     )
 
+    # Pilar DevOps Remediation — findings granulares (subassessments) do Defender DevOps
+    devops = analyze_devops_findings(raw.get("devops_findings"), sub_names)
+
     # Mapa POR SUBSCRIPTION (p/ recalcular SS + MCSB sob filtro de subscription no JS)
     subs = {}
     sub_ids = set(it.get("subscription_id") for it in items if it.get("subscription_id"))
@@ -767,6 +845,7 @@ def build_context(q, raw, params):
         "secure_score_delta": secure_score_delta,
         "mcsb": mcsb,
         "subs": subs,
+        "devops": devops,
         "scope_label": params.get("_scope_label", ""),
         "resources_in_scope": len(rmap) or len({it.get("resource_id") for it in items if it.get("resource_id")}),
         "savings_total": savings_total,
@@ -789,6 +868,47 @@ def _savings_raw(cd):
         return float(digits)
     except ValueError:
         return 0.0
+
+_SEV_COLOR = {"Critical": "#ff4d4d", "High": "#ff6b6b", "Medium": "#ffd96b", "Low": "#7cd0ff", "Informational": "#9fb0c8"}
+
+def _render_devops_section(devops):
+    """Seção estática 🐙 DevOps Remediation: severidade + matriz repo×severidade + categorias."""
+    if not devops:
+        return ""
+    sevs = devops["sev_order"]
+    # KPIs de severidade
+    kpis = ""
+    for s in sevs:
+        c = _SEV_COLOR.get(s, "#9fb0c8")
+        kpis += (f"<div class='kpi'><div class='n' style='color:{c}'>{devops['by_severity'].get(s,0)}</div>"
+                 f"<div class='l'>{esc(s)}</div></div>")
+    kpis = (f"<div class='kpi'><div class='n' style='color:#7ee2a8'>{devops['total']}</div>"
+            f"<div class='l'>🐙 findings</div></div>") + kpis
+    # categorias
+    cats = " · ".join(f"{esc(k)}: <b>{v}</b>" for k, v in sorted(devops["by_category"].items(), key=lambda kv: kv[1], reverse=True))
+    # matriz repo × severidade
+    head_cells = "".join(f"<th>{esc(s)}</th>" for s in sevs)
+    rows_html = ""
+    for m in devops["matrix"]:
+        cells = ""
+        for s in sevs:
+            v = m["by_sev"].get(s, 0)
+            col = _SEV_COLOR.get(s, "#9fb0c8") if v else "#3a4a63"
+            cells += f"<td style='color:{col};font-weight:{700 if v else 400}'>{v or '·'}</td>"
+        rows_html += (f"<tr><td class='mono'>🐙 {esc(m['repo'])}</td>"
+                      f"<td style='font-weight:700'>{m['total']}</td>{cells}</tr>")
+    table = (f"<table style='margin-top:10px'><tr><th>Repositório</th><th>Total</th>{head_cells}</tr>"
+             f"{rows_html}</table>")
+    return (
+        "<div class='phase'><h3>🐙 DevOps Remediation — findings do GitHub/Defender DevOps "
+        "<span class='meta'>· vulnerabilidades a corrigir (CVE/code/IaC/secret), não postura</span></h3>"
+        "<div class='card'>"
+        f"<div class='kpis' style='margin-bottom:10px'>{kpis}</div>"
+        f"<div class='meta'>Por categoria: {cats}</div>"
+        f"{table}"
+        "<div class='meta' style='margin-top:8px'>Prioridade: Critical→High primeiro · "
+        "dependency CVEs normalmente têm PR do Dependabot pronto p/ merge.</div>"
+        "</div></div>")
 
 # CSS + JS do relatório interativo (string normal, SEM f-string → não precisa escapar {}).
 _REPORT_CSS = """
@@ -920,7 +1040,8 @@ def render_html(ctx, q):
         'vazio = tudo. Secure Score e MCSB recalculam pelo filtro de Subscription.</div>'
         '<button class="btn" onclick="clearAll()">Limpar filtros</button></div>'
         '<div class="frow" id="frow"></div></div>')
-    body = ('<div id="plan"></div><div id="mcsb"></div>'
+    devops_html = _render_devops_section(ctx.get("devops"))
+    body = ('<div id="plan"></div><div id="mcsb"></div>' + devops_html +
             '<div class="meta" style="margin-top:20px;border-top:1px solid #1e2a3f;padding-top:12px">'
             'advisor-impact · Azure Advisor + Microsoft Defender for Cloud · risco = disrupção de aplicar '
             '(não criticidade). Custos via Azure Retail Prices API · Compliance via MCSB '
@@ -993,6 +1114,23 @@ def render_md(ctx, q):
                 if fc.get("link"):
                     name = f"[{name}]({fc['link']})"
                 lines.append(f"| {fc['id']} | {name} | {fc['failed']} | {fc['passed']} |")
+        lines.append("")
+    # Pilar DevOps Remediation — findings granulares
+    devops = ctx.get("devops")
+    if devops:
+        lines.append("## 🐙 DevOps Remediation — findings do GitHub/Defender DevOps")
+        sev_txt = " · ".join(f"{s}: {devops['by_severity'].get(s,0)}" for s in devops["sev_order"])
+        cat_txt = " · ".join(f"{k}: {v}" for k, v in sorted(devops["by_category"].items(), key=lambda kv: kv[1], reverse=True))
+        lines.append(f"**Total:** {devops['total']} · **Severidade:** {sev_txt} · **Categoria:** {cat_txt}")
+        lines.append("")
+        sevs = devops["sev_order"]
+        lines.append("| Repositório | Total | " + " | ".join(sevs) + " |")
+        lines.append("|---|---|" + "|".join(["---"] * len(sevs)) + "|")
+        for m in devops["matrix"]:
+            cells = " | ".join(str(m["by_sev"].get(s, 0)) for s in sevs)
+            lines.append(f"| 🐙 {m['repo']} | {m['total']} | {cells} |")
+        lines.append("")
+        lines.append("_Prioridade: Critical→High primeiro · dependency CVEs normalmente têm PR do Dependabot pronto p/ merge._")
         lines.append("")
     lines.append(f"_advisor-impact · gerado {ctx['generated']} · read-only · MCSB inspirado no microsoft/ESA (MIT)._")
     return "\n".join(lines)
