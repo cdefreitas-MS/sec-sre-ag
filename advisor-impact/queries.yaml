@@ -50,6 +50,27 @@ collector:
       mdc_secure_score:
         path: "/subscriptions/{sub}/providers/Microsoft.Security/secureScores"
         api: "2020-01-01"
+      # Defender for Cloud — secure score POR CONTROLE (com $expand=definition p/ mapear
+      # assessments→controle). Base p/ calcular elevação potencial e impacto por recomendação.
+      mdc_secure_score_controls:
+        path: "/subscriptions/{sub}/providers/Microsoft.Security/secureScoreControls"
+        api: "2020-01-01"
+        query: "$expand=definition"
+      # Defender for Cloud — compliance regulatório (pilar MCSB do ESA). Lista os standards
+      # (passed/failed/skipped/unsupported controls). O renderer escolhe o MCSB.
+      mcsb_compliance_standards:
+        path: "/subscriptions/{sub}/providers/Microsoft.Security/regulatoryComplianceStandards"
+        api: "2019-01-01-preview"
+      # Controles do standard MCSB (passed/failed assessments por controle). O coletor
+      # injeta o nome do standard descoberto (Microsoft-cloud-security-benchmark ou legado).
+      mcsb_compliance_controls:
+        path: "/subscriptions/{sub}/providers/Microsoft.Security/regulatoryComplianceStandards/{standard}/regulatoryComplianceControls"
+        api: "2019-01-01-preview"
+
+# Nomes possíveis do standard MCSB no Defender for Cloud (atual + legado).
+mcsb_standard_names:
+  - "Microsoft-cloud-security-benchmark"
+  - "Azure-Security-Benchmark"
 
 # -----------------------------------------------------------------------------
 # RISK BASELINE — risco de APLICAR (disrupção) por padrão no título/displayName.
