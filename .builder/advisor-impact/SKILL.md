@@ -22,6 +22,7 @@ description: 'Remediation impact planner uniting Azure Advisor (Cost/Reliability
 - 🔗 **Official portal link** — deep link to each recommendation (`links.azurePortal`), not a guessed URL.
 - 👤 **Owner** — remediation owner when present.
 - 📋 **MCSB compliance** — Microsoft Cloud Security Benchmark posture (passed/failed/skipped controls + top failing controls). *Inspired by the public [microsoft/ESA](https://github.com/microsoft/ESA) toolkit (MIT), re-implemented in Python.*
+- 🐙 **DevOps security** — recognizes Defender for Cloud **DevOps** recommendations (GitHub / Azure DevOps / GitLab connectors) by resource ID, tags them with **provider + repository**, adds a **"Repositório DevOps"** filter and a **DevOps findings** KPI. These don't affect Secure Score (shown as Impacto SS "—"), so they're triaged by **severity**; cascade/validation hints are suppressed for repos.
 
 **Disruption Risk Classification** (how risky to *apply*):
 - 🟢 **Safe** → Quick wins (enable logging, MFA, backup) — execute anytime
