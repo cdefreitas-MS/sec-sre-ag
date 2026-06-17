@@ -307,6 +307,28 @@ self-contained, read-only (it only *advises* — it never performs the action).
 
 Skills affected: response/containment skills (e.g. `contain-compromised-user`).
 
+### MITRE mapping — technique inference (no secrets)
+
+The `shared/mitre_map.py` script infers **MITRE ATT&CK techniques/tactics from free
+text** — the inverse of `mitre-coverage-report` (which scores deployed analytic-rule
+coverage). Use it to label an alert title, audit activity, or hunt finding that has no
+MITRE tag (e.g. `"mimikatz on lsass"` → `T1003.001`). No secrets needed; subprocess:
+
+```bash
+python shared/mitre_map.py map "AiTM phishing led to a stolen session token"  # JSON: inferred techniques + tactics
+python shared/mitre_map.py technique T1003.001                                 # look up one technique
+python shared/mitre_map.py tactic "Credential Access"                          # techniques under a tactic
+python shared/mitre_map.py tactics                                            # list tactics with counts
+```
+
+`map` returns deduped techniques + the distinct tactics, and exits `3` when nothing is
+inferred (so the caller can branch). The keyword map is ~45 techniques across 10 tactics,
+with cloud-identity coverage (AiTM `T1557`, stolen token `T1550.001`, illicit consent
+`T1528`, MFA fatigue `T1621`, inbox rule `T1114.003`) aligned to this suite's
+`aitm-dashboard`, `spn-scope-drift`, and `forensic-user-investigation` skills.
+
+Skills affected: `aitm-dashboard`, `forensic-user-investigation`, `incident-investigation`.
+
 ### 4. Data Connector Prerequisites
 
 The skills query tables that are populated by **Microsoft Sentinel data connectors**. Enable the relevant connectors in your Sentinel workspace:
