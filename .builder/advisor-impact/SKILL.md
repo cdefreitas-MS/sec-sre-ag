@@ -131,6 +131,13 @@ python3 <SKILL_DIR>/generate_html_report.py --subs <sub1>,<sub2> --output tmp/ad
 ```
 Runs one ARG query per dataset over `advisorresources` / `securityresources` / `resourcecontainers`. Needs **Reader** on the subscriptions. If the sandbox `az` is blocked, prefetch the ARG results (Mode B) instead.
 
+> **Large tenants (>~800 MDC assessments in any subscription) — paginated ARG prefetch.**
+> Some subscriptions return huge `securityresources` result sets (e.g. **1,000+** unhealthy assessments from bulk container-image CVEs). In **Mode B**, the agent's intermediate scratchpad has a **~2 MB cap**, so a single `securityresources | project ..., properties` page can overflow it. When that happens:
+> 1. Page the ARG query in **batches of ~300 records** (use `--first 300` / `$top: 300` + `$skipToken`), writing each batch to a temp fragment.
+> 2. Keep a **flat projection** during transfer (project the sub-fields you need as top-level columns), then **reconstruct the nested `properties`** shape when assembling `inventory.json` (the renderer's parsers read `properties.*`).
+> 3. Merge all fragments per dataset into the final `{"value":[...]}` array before running the renderer.
+> This is a Mode-B prefetch concern only; `run_arg()` (Mode C direct) already paginates by `$skipToken`. **De-risked live (2026-06): 1,173 recommendations across 2 subscriptions, one with 1,028 unhealthy assessments.**
+
 **Mode A (single RG, try first):**
 ```bash
 python3 <SKILL_DIR>/generate_html_report.py --sub <subscription_id> --rg <rg_name> \
@@ -332,9 +339,9 @@ No overall verdict badge (unlike other skills). This skill produces a **phased p
 
 ## Status
 
-- ✅ Code complete (collector + risk engine + cost + Secure Score elevation + MITRE/owner/links + MCSB compliance; HTML/MD renderers)
-- ✅ Smoke-tested with synthetic fixtures (cost, Secure Score elevation, per-recommendation impact, MITRE, owner, official links, MCSB compliance, graceful degrade)
-- ⏳ Pending: Live validation against real RG
+- ✅ Code complete (collector + risk engine + cost + Secure Score elevation + MITRE/owner/links + MCSB compliance; tenant-wide ARG; interactive HTML filters; HTML/MD renderers)
+- ✅ Smoke-tested with synthetic fixtures (cost, Secure Score elevation, per-recommendation impact, MITRE, owner, official links, MCSB compliance, multi-subscription aggregation, graceful degrade)
+- ✅ Live-validated tenant-wide (2026-06): 1,173 recommendations across 2 subscriptions, Secure Score 47.4% → 100%, MCSB 84% — multi-subscription aggregation confirmed with production data
 - ⏳ Pending: Integration with send-email-report
 
 ---
