@@ -8,6 +8,18 @@ Each skill is a self-contained capability that the agent can invoke in response 
 
 ## Skills
 
+### advisor-impact
+
+Remediation impact planner that unites **Azure Advisor** (Cost, Reliability, Performance, OperationalExcellence) with **Microsoft Defender for Cloud** (security assessments + Secure Score) into a single phased execution plan. Risk-rates each recommendation by *operational disruption* (safe/low/medium/high — not just severity), identifies cascade impact on dependent workloads, and generates a staged remediation roadmap: quick wins → maintenance window → approval+rollback. 100% read-only (ARM GET only). Quantifies annual cost savings and secure score improvement potential.
+
+| # | Example prompt |
+|---|---|
+| 1 | *Generate the advisor-impact plan for RG-PROD* |
+| 2 | *Show me quick wins from Advisor and Defender for Cloud* |
+| 3 | *Which high-risk remediation items need approval before applying?* |
+| 4 | *Consolidate Azure governance recommendations for resource group RG-SEC-HERBEST* |
+| 5 | *What's the cost savings potential from Azure Advisor in this subscription?* |
+
 ### computer-investigation
 
 Performs comprehensive security investigations on Windows, macOS, and Linux devices registered in Microsoft Entra ID and onboarded to Microsoft Defender for Endpoint. Collects device context, process execution history, network connections, registry persistence, file activity, vulnerability assessment, and risk scoring.
@@ -262,6 +274,9 @@ The UAMI also needs Azure RBAC roles for Sentinel workspace access and (optional
 | **Microsoft Sentinel Reader** | Log Analytics workspace | Yes | All skills querying Sentinel tables via Azure Monitor MCP (includes Log Analytics Reader) |
 | **Microsoft Sentinel Responder** | Log Analytics workspace | Yes (incident-comment) | Post comments on incidents via ARM/Sentinel API |
 | **Key Vault Secrets User** | Key Vault resource | Optional | Only needed for IP enrichment API tokens |
+| **Reader** | Subscription or Resource Group | Yes (advisor-impact) | Azure governance skill — reads Advisor recommendations, Defender for Cloud assessments, and resource inventory via ARM API |
+
+> **Note on advisor-impact:** This skill operates on Azure Resource Manager (ARM) resources, not Sentinel/Log Analytics. It requires the **Reader** role at subscription or resource group level to enumerate recommendations and resources. This is a different scope from the Sentinel-focused skills above.
 
 > **Why is Sentinel Responder required?** The Graph API `SecurityIncident.ReadWrite.All` permission is assigned to the UAMI as an Application permission, but the agent's sandbox uses a **delegated user token** for Graph API calls — which does not carry Application-level scopes. The ARM/Sentinel REST API uses the UAMI's own token (where RBAC roles apply), making it the reliable path for posting incident comments.
 
