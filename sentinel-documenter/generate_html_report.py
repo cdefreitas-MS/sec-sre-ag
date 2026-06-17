@@ -966,6 +966,137 @@ def cost_optimizer(inv, matrix, cost, cost_cfg, opt_cfg, retail=None):
             "benefit_note": opt_cfg.get("benefit_note", "")}
 
 # =============================================================================
+# (#7) DEFENDER PORTAL ONBOARDING READINESS — aprofunda o SENT-014. Port fiel do
+# "Defender Adoption Helper" (Mario Cuomo, Azure-Sentinel/Tools, OSS MIT) — re-implementado
+# da lógica pública, nada verbatim. Score/seção = passed/total (OK+INFO=passed, WARNING não);
+# 1 controle por entidade. Tudo do inventário já coletado. NÃO altera o Documenter Score.
+# =============================================================================
+def defender_readiness(inv, cfg):
+    cfg = cfg or {}
+    secs = {}
+    def sec(name):
+        return secs.setdefault(name, {"passed": 0, "total": 0, "findings": []})
+    def finding(name, status, item, msg):
+        sec(name)["findings"].append({"status": status, "item": item, "msg": msg})
+    def control(name, passed):
+        s = sec(name); s["total"] += 1
+        if passed:
+            s["passed"] += 1
+
+    # --- Defender Data: tabelas XDR (retenção <31d = redundante ingerir no Sentinel) ---
+    tbl = {str(prop(t, "name", "")).lower(): t for t in inv["Tables"]}
+    for name in cfg.get("xdr_tables", []):
+        t = tbl.get(str(name).lower())
+        if not t:
+            finding("Defender Data", "INFO", name, "tabela não ativa (solução não habilitada)")
+        else:
+            tot = num(prop(t, "properties.totalRetentionInDays", 0))
+            if tot < 31:
+                finding("Defender Data", "INFO", name, f"retenção {int(tot)}d — não precisa ingerir no Sentinel pós-onboarding")
+            else:
+                finding("Defender Data", "OK", name, f"retenção {int(tot)}d — mantida p/ retenção estendida")
+        control("Defender Data", True)
+
+    # --- Analytics: Fusion engine ---
+    fusion_on = any(prop(r, "properties.enabled", False) for r in inv["AlertRules"]
+                    if str(prop(r, "kind", "")) == "Fusion")
+    finding("Analytics", "WARNING" if fusion_on else "OK", "Fusion",
+            "Fusion será desabilitado automaticamente após onboarding no Defender" if fusion_on
+            else "Fusion não habilitado")
+    control("Analytics", not fusion_on)
+    # --- Analytics: por regra (exclui Fusion) ---
+    for r in inv["AlertRules"]:
+        kind = str(prop(r, "kind", ""))
+        if kind == "Fusion":
+            continue
+        nm = prop(r, "properties.displayName", "?")
+        if not prop(r, "properties.enabled", False):
+            finding("Analytics", "INFO", nm, "regra desabilitada (permanece desabilitada após onboarding)")
+            control("Analytics", True)
+            continue
+        issue = False
+        ic = prop(r, "properties.incidentConfiguration") or {}
+        gc = (ic.get("groupingConfiguration") if isinstance(ic, dict) else {}) or {}
+        if not (isinstance(ic, dict) and ic.get("createIncident")):
+            finding("Analytics", "WARNING", nm, "não gera incidentes — alertas ficam invisíveis no portal do Defender (só na tabela SecurityAlert)"); issue = True
+        if isinstance(gc, dict) and gc.get("reopenClosedIncident"):
+            finding("Analytics", "WARNING", nm, "reabertura de incidente ligada — não suportada no portal do Defender (cria incidente novo)"); issue = True
+        if isinstance(gc, dict) and gc.get("enabled"):
+            finding("Analytics", "WARNING", nm, "agrupamento de alertas customizado — o Defender XDR controla grouping/merge pós-onboarding"); issue = True
+        if kind == "MicrosoftSecurityIncidentCreation":
+            finding("Analytics", "WARNING", nm, "Microsoft incident creation rule — será desativada após onboarding (o Defender já cria os incidentes)"); issue = True
+        if not issue:
+            finding("Analytics", "OK", nm, "configuração ok p/ Defender")
+        control("Analytics", not issue)
+
+    # --- Automation: condições que quebram pós-onboarding ---
+    for r in inv["AutomationRules"]:
+        nm = prop(r, "properties.displayName", "?")
+        tl = prop(r, "properties.triggeringLogic") or {}
+        is_enabled = bool(tl.get("isEnabled")) if isinstance(tl, dict) else False
+        triggers_on = str(tl.get("triggersOn", "")) if isinstance(tl, dict) else ""
+        conds = (tl.get("conditions") if isinstance(tl, dict) else []) or []
+        fl = {"title": False, "provider": False, "fusion": False, "desc": False, "by365": False}
+        if is_enabled:
+            for c in conds:
+                if str(prop(c, "conditionType", "")) != "Property":
+                    continue
+                pn = str(prop(c, "conditionProperties.propertyName", ""))
+                pv = prop(c, "conditionProperties.propertyValues", []) or []
+                pv = [str(x) for x in (pv if isinstance(pv, list) else [pv])]
+                if pn == "IncidentTitle":
+                    fl["title"] = True
+                elif pn == "IncidentProviderName":
+                    fl["provider"] = True
+                elif pn == "IncidentRelatedAnalyticRuleIds" and any(x.endswith("BuiltInFusion") for x in pv):
+                    fl["fusion"] = True
+                elif pn == "IncidentDescription":
+                    fl["desc"] = True
+                elif pn == "IncidentUpdatedBySource" and any(("365" in x or "Defender" in x) for x in pv):
+                    fl["by365"] = True
+        issue = False
+        if fl["title"]:
+            finding("Automation", "WARNING", nm, "troque o gatilho de Incident Title p/ Analytics Rule Name"); issue = True
+        if fl["provider"]:
+            finding("Automation", "WARNING", nm, "troque Incident Provider p/ Alert Product Name (o provider vira 'Microsoft Defender XDR')"); issue = True
+        if fl["fusion"]:
+            finding("Automation", "WARNING", nm, "disparada por incidentes Fusion — Fusion será desabilitado pós-onboarding"); issue = True
+        if fl["desc"]:
+            finding("Automation", "WARNING", nm, "usa o campo Description como condição — removido do SecurityIncident pós-onboarding"); issue = True
+        if fl["by365"]:
+            finding("Automation", "WARNING", nm, "usa Updated By = Microsoft 365 Defender — o valor vira 'Other' pós-onboarding"); issue = True
+        if is_enabled and triggers_on == "Alerts":
+            finding("Automation", "WARNING", nm, "gatilho de Alert — pós-onboarding age só em alertas do Sentinel"); issue = True
+        if not issue:
+            finding("Automation", "OK", nm, "configuração ok")
+        control("Automation", not issue)
+
+    order = ["Defender Data", "Analytics", "Automation"]
+    rows, tot_p, tot_t = [], 0, 0
+    for name in order:
+        s = secs.get(name, {"passed": 0, "total": 0, "findings": []})
+        pct = round(100.0 * s["passed"] / s["total"], 1) if s["total"] else 100.0
+        rows.append({"name": name, "passed": s["passed"], "total": s["total"],
+                     "pct": pct, "findings": s["findings"]})
+        tot_p += s["passed"]; tot_t += s["total"]
+    overall = round(100.0 * tot_p / tot_t) if tot_t else 100
+    vcfg = cfg.get("verdict", [])
+    label, emoji = (vcfg[-1]["label"], vcfg[-1]["emoji"]) if vcfg else ("—", "")
+    for v in vcfg:
+        if overall >= num(v["min"]):
+            label, emoji = v["label"], v["emoji"]; break
+
+    region = str(prop(inv["Workspace"], "location", "") or prop(inv["Workspace"], "properties.location", ""))
+    dl_regions = [str(x).lower() for x in cfg.get("datalake_regions", [])]
+    region_ok = (region.lower() in dl_regions) if region else None
+    basic_tables = [prop(t, "name") for t in inv["Tables"] if str(prop(t, "properties.plan", "Analytics")) == "Basic"]
+    warnings = [{"section": r["name"], "item": f["item"], "msg": f["msg"]}
+                for r in rows for f in r["findings"] if f["status"] == "WARNING"]
+    return {"overall": overall, "label": label, "emoji": emoji, "rows": rows, "warnings": warnings,
+            "region": region, "region_ok": region_ok, "basic_tables": basic_tables,
+            "learn": cfg.get("learn", "")}
+
+# =============================================================================
 # RENDER — HTML (dark) + Markdown
 # =============================================================================
 SEV_BADGE = {"Critical": "#ff4d6d", "Warning": "#ffb454", "Info": "#7aa2f7"}
@@ -1088,6 +1219,26 @@ def render_html(ctx) -> str:
                     f"<td><b>{esc(r['title'])}</b>{note}<div class='rem'>{esc(r['remediation'])} "
                     f"<a href='{esc(r.get('learn',''))}'>learn ↗</a></div></td><td>{st}</td></tr>")
 
+    # ---- (#7) Defender portal onboarding readiness ----
+    dfr = ctx["defender"]
+    dfr_col = "#36d399" if dfr["overall"] >= 90 else "#ffb454" if dfr["overall"] >= 70 else "#ff4d6d"
+    dfr_secrows = ""
+    for r in dfr["rows"]:
+        pc = "#36d399" if r["pct"] >= 90 else "#ffb454" if r["pct"] >= 70 else "#ff4d6d"
+        dfr_secrows += (f"<tr><td><b>{esc(r['name'])}</b></td><td class='r'>{r['passed']}/{r['total']}</td>"
+                        f"<td class='r' style='color:{pc}'>{r['pct']:.0f}%</td></tr>")
+    dfr_warn = ""
+    for w in dfr["warnings"][:40]:
+        dfr_warn += (f"<tr><td>{esc(w['section'])}</td><td><b>{esc(w['item'])}</b></td>"
+                     f"<td class='rem'>{esc(w['msg'])}</td></tr>")
+    dfr_dl = ""
+    if dfr["region"]:
+        rc = "#36d399" if dfr["region_ok"] else "#ffb454"
+        rt = "suporta Data Lake" if dfr["region_ok"] else "NÃO suporta Data Lake (considere migrar)"
+        dfr_dl = f"<span style='color:{rc}'>região <b>{esc(dfr['region'])}</b>: {rt}</span>"
+    if dfr["basic_tables"]:
+        dfr_dl += f" · ⚠ {len(dfr['basic_tables'])} tabela(s) Basic-tier precisam virar Analytics/Auxiliary p/ a transição"
+
     return f"""<!DOCTYPE html><html lang="pt-BR"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Sentinel Documenter — {esc(ws_name)}</title>
@@ -1202,6 +1353,19 @@ ul{{margin:6px 0;padding-left:18px}} li{{margin:3px 0;font-size:12.5px;color:#8b
 <table><thead><tr><th>ID</th><th>Área / Tópico</th><th>Recomendação</th><th>Status</th></tr></thead>
 <tbody>{dr_rows}</tbody></table>
 
+<h2>🛡️ Prontidão p/ portal do Defender (onboarding)</h2>
+<div class="sub">Quão pronto o workspace está p/ ser onboarded no portal do Defender (Sentinel → Defender XDR unificado). Score/seção = passed/total (OK e informativo contam; <b>WARNING</b> = ação antes do onboarding). <b>Não altera o Documenter Score.</b> <i>Processo portado do Defender Adoption Helper (Azure-Sentinel/Tools).</i></div>
+<div class="matover">Readiness <b style="color:{dfr_col}">{dfr['overall']}%</b><span class="sub"> · {dfr['emoji']} {esc(dfr['label'])} · <a href="{esc(dfr['learn'])}" style="color:#58a6ff">move-to-defender ↗</a></span></div>
+<div class="grid2">
+  <div class="card"><div class="sub">Score por seção</div>
+    <table><thead><tr><th>Seção</th><th class="r">Passed</th><th class="r">%</th></tr></thead><tbody>{dfr_secrows}</tbody></table>
+    {f'<div class="disc">{dfr_dl}</div>' if dfr_dl else ''}
+  </div>
+  <div class="card"><div class="sub">⚠ Ações antes do onboarding ({len(dfr['warnings'])})</div>
+    <table><tbody>{dfr_warn or '<tr><td>Nenhuma ação pendente — pronto p/ onboarding. 🎉</td></tr>'}</tbody></table>
+  </div>
+</div>
+
 <details><summary>Checks não avaliados ({len(skipped)}) — exigem dado fora do inventário deste run</summary>
 <ul>{skip_li}</ul></details>
 
@@ -1294,6 +1458,23 @@ def render_md(ctx) -> str:
         st = "Ação recomendada" if r["action"] else "Lembrete"
         note = f" ({r['note']})" if r.get("note") else ""
         out.append(f"| `{r['id']}` | {r['area']} / {r['topic']} | {r['title']}{note} | {st} |")
+    # (#7) Defender portal readiness
+    dfr = ctx["defender"]
+    out.append("\n## Prontidão p/ portal do Defender (onboarding)\n")
+    out.append(f"Readiness: **{dfr['overall']}%** ({dfr['emoji']} {dfr['label']}) — não altera o Documenter Score\n")
+    out.append("| Seção | Passed | % |")
+    out.append("|-------|-------:|---:|")
+    for r in dfr["rows"]:
+        out.append(f"| {r['name']} | {r['passed']}/{r['total']} | {r['pct']:.0f}% |")
+    if dfr["warnings"]:
+        out.append(f"\n**⚠ Ações antes do onboarding ({len(dfr['warnings'])}):**")
+        for w in dfr["warnings"][:40]:
+            out.append(f"- [{w['section']}] {w['item']} — {w['msg']}")
+    else:
+        out.append("\n_Nenhuma ação pendente — pronto p/ onboarding._")
+    if dfr["region"]:
+        out.append(f"\n_Data Lake: região {dfr['region']} {'suporta' if dfr['region_ok'] else 'NÃO suporta'} Data Lake."
+                   + (f" · {len(dfr['basic_tables'])} tabela(s) Basic-tier a converter._" if dfr["basic_tables"] else "_"))
     out.append("\n<details><summary>Checks não avaliados</summary>\n")
     for s in skipped:
         out.append(f"- `{s['id']}` {s['title']} — _{s['reason']}_")
@@ -1394,6 +1575,7 @@ def main():
     maturity_cfg = q.get("maturity", {}) or {}
     default_recs_cfg = q.get("default_recommendations", []) or []
     opt_cfg = q.get("cost_optimizer", {}) or {}
+    defender_cfg = q.get("defender_readiness", {}) or {}
 
     if args.from_json:
         with open(args.from_json, encoding="utf-8") as f:
@@ -1428,11 +1610,13 @@ def main():
     tablefacts = build_table_facts(inv, matrix)                             # (#4)
     optimizer = cost_optimizer(inv, matrix, cost, cost_cfg, opt_cfg, retail=data.get("retail"))  # (#6)
     default_recs = eval_default_recs(inv, default_recs_cfg)                  # (#5)
+    defender = defender_readiness(inv, defender_cfg)                         # (#7)
 
     ctx = {"inv": inv, "findings": findings, "passed": passed, "skipped": skipped,
            "score": score, "verdict": verdict, "klass": klass, "cost": cost,
            "matrix": matrix, "maturity": maturity, "recs_by_area": rba,
            "tablefacts": tablefacts, "optimizer": optimizer, "default_recs": default_recs,
+           "defender": defender,
            "cost_cfg": cost_cfg, "ws": args.ws or args.workspace or "workspace"}
 
     os.makedirs(args.output, exist_ok=True)

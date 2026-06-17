@@ -295,3 +295,29 @@ cost_optimizer:
   tierdown_min_gb30: 50          # tabela ≥X GB/30d sem regra → candidata a Basic/Auxiliary (poupa Analytics−Basic)
   min_action_usd: 10             # não lista ações com economia estimada < US$X/mês (reduz ruído)
   benefit_note: "Tabelas elegíveis a benefício (M365 E5 / Defender for Servers P2) podem já estar cobertas por allowance — confirme no faturamento antes de agir."
+
+# -----------------------------------------------------------------------------
+# (#7) DEFENDER PORTAL ONBOARDING READINESS — aprofunda o SENT-014. Processo portado
+# do "Defender Adoption Helper" (Mario Cuomo, Azure-Sentinel/Tools, OSS MIT) —
+# re-implementado a partir da lógica pública, nada verbatim. Avalia o quão pronto o
+# workspace está p/ onboarding no portal do Defender (Sentinel→Defender XDR unificado).
+# Score por seção = passed/total; OK e INFO contam como passed, WARNING não. Tudo do
+# inventário já coletado (Tables/AlertRules/AutomationRules/Workspace). NÃO altera o
+# Documenter Score — é uma seção/sub-score à parte.
+# -----------------------------------------------------------------------------
+defender_readiness:
+  # tabelas Defender XDR avaliadas (retenção <31d = redundante ingerir no Sentinel pós-onboarding)
+  xdr_tables: [DeviceInfo, DeviceNetworkInfo, DeviceProcessEvents, DeviceNetworkEvents,
+               DeviceFileEvents, DeviceRegistryEvents, DeviceLogonEvents, DeviceImageLoadEvents,
+               DeviceEvents, DeviceFileCertificateInfo, EmailEvents, EmailUrlInfo,
+               EmailAttachmentInfo, EmailPostDeliveryEvents, UrlClickEvents, CloudAppEvents,
+               IdentityLogonEvents, IdentityQueryEvents, IdentityDirectoryEvents, AlertInfo, AlertEvidence]
+  # regiões que suportam Sentinel Data Lake (Data Lake readiness — NÃO entra no score, igual ao tool)
+  datalake_regions: [canadacentral, centralus, eastus, eastus2, southcentralus, westus2,
+                     southeastasia, centralindia, israelcentral, japaneast, northeurope,
+                     westeurope, francecentral, italynorth, switzerlandnorth, uksouth, australiaeast]
+  verdict:                # piso de % de readiness → (rótulo, emoji)
+    - {min: 90, label: "PRONTO",          emoji: "🟢"}
+    - {min: 70, label: "QUASE PRONTO",    emoji: "🟡"}
+    - {min: 0,  label: "REQUER ATENÇÃO",  emoji: "🔴"}
+  learn: "https://learn.microsoft.com/azure/sentinel/move-to-defender"
