@@ -284,6 +284,29 @@ The `shared/enrich_ips.py` script enriches IP addresses with third-party threat 
 
 Skills affected: `user-investigation`, `ioc-investigation`.
 
+### Action Safety — response gating (no secrets)
+
+The `shared/action_safety.py` script is the governance layer for the autonomous
+*analyse → **act** → notify → audit* loop. It classifies any **response action**
+(containment, device isolation, credential reset) by **risk** (LOW/MEDIUM/HIGH/CRITICAL),
+**reversibility**, **rollback path**, **pre-checks**, and project **guardrails** —
+*before* the agent executes it. No secrets or Key Vault needed; invoke it as a subprocess:
+
+```bash
+python shared/action_safety.py list                       # catalog of actions + risk/approval
+python shared/action_safety.py evaluate isolate_device    # full JSON verdict (risk, rollback, guardrails)
+python shared/action_safety.py gate force_password_reset  # exit 0 = proceed · exit 2 = needs approval
+```
+
+HIGH and CRITICAL actions return `approval_required: true` (gate exit code `2`) so the
+agent pauses for human confirmation; LOW/MEDIUM pass (exit `0`). **Unknown actions fail
+safe** (treated as HIGH). Identity/endpoint actions surface the hard guardrails —
+never touch Global Admins / break-glass accounts, and every action is logged by the
+3 UAMI audit rules in Sentinel. Re-implemented from an internal Defender MCP helper;
+self-contained, read-only (it only *advises* — it never performs the action).
+
+Skills affected: response/containment skills (e.g. `contain-compromised-user`).
+
 ### 4. Data Connector Prerequisites
 
 The skills query tables that are populated by **Microsoft Sentinel data connectors**. Enable the relevant connectors in your Sentinel workspace:
