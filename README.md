@@ -80,6 +80,18 @@ Generates comprehensive incident statistics and SOC metrics from Microsoft Senti
 | 4 | *How many incidents affected users vs. devices in the last 30 days?* |
 | 5 | *Create a SOC metrics report with severity distribution and true-positive rate* |
 
+### incident-triage
+
+One-shot, autonomous triage report for a **single** incident (the unattended counterpart to `incident-investigation`). Collects the header + related alerts, extracts entities (users/hosts/IPs), tags MITRE techniques (native alert tactics + free-text inference via `shared/mitre_map.py`), and builds a recommended response plan where **every action is risk-gated** via `shared/action_safety.py` — then closes with a verdict (TRUE POSITIVE PROVÁVEL / REQUER ANÁLISE / PROVÁVEL BENIGNO) and the single next action. Deterministic HTML + Markdown; 100% read-only (recommends, never executes).
+
+| # | Example prompt |
+|---|---|
+| 1 | *Triage incident 492 and send me the brief* |
+| 2 | *Run an incident triage on the most recent high-severity incident* |
+| 3 | *What's the verdict and next action for incident 1043?* |
+| 4 | *Build the gated response plan for this incident* |
+| 5 | *Give me a one-shot triage report with MITRE tagging for incident 308* |
+
 ### ioc-investigation
 
 Investigates Indicators of Compromise — IP addresses, domains, URLs, and file hashes. Correlates IoCs with threat intelligence, identifies associated CVEs, enumerates affected organizational assets, and provides third-party enrichment via ipinfo.io, vpnapi.io, AbuseIPDB, and Shodan.
