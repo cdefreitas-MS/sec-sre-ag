@@ -374,6 +374,34 @@ def _sub_of(resource_id):
         return tail.split("/", 1)[0]
     return ""
 
+def _devops_info(resource_id):
+    """
+    Detecta recurso de DevOps security (GitHub/Azure DevOps/GitLab) a partir do resourceId
+    do connector e devolve (provider, repo). Caso contrário (None, "").
+    Ex.: .../securityConnectors/<c>/devops/default/gitHubOwners/<org>/repos/<repo>
+    """
+    rid = (resource_id or "")
+    low = rid.lower()
+    if "/securityconnectors/" not in low and "/devops/" not in low:
+        return (None, "")
+    if "githubowners" in low:
+        provider = "GitHub"
+    elif "azuredevopsorgs" in low or "azuredevops" in low:
+        provider = "Azure DevOps"
+    elif "gitlab" in low:
+        provider = "GitLab"
+    else:
+        provider = "DevOps"
+    repo = ""
+    parts = rid.split("/")
+    for marker in ("repos", "repositories", "projects"):
+        if marker in [p.lower() for p in parts]:
+            idx = [p.lower() for p in parts].index(marker)
+            if idx + 1 < len(parts):
+                repo = parts[idx + 1]
+                break
+    return (provider, repo)
+
 # =============================================================================
 # Parsers — Advisor + Defender for Cloud → itens unificados
 # =============================================================================
@@ -402,6 +430,11 @@ def _enrich(item, resource_id, risk, rmap, q, region="eastus2", sub_names=None):
     item["subscription_id"] = sub_id
     item["subscription_name"] = (sub_names or {}).get(sub_id, sub_id[:8] if sub_id else "—")
     item["resource_group"] = _rg_of(resource_id) or "—"
+    # DevOps security (GitHub/ADO/GitLab) — recomendações que NÃO afetam o secure score
+    dp_provider, dp_repo = _devops_info(resource_id)
+    if dp_provider:
+        item["devops_provider"] = dp_provider
+        item["devops_repo"] = dp_repo or "(org)"
     # Link oficial da recomendação (MDC fornece em links.azurePortal) tem prioridade;
     # senão cai p/ deep link determinístico do recurso.
     item["portal_link"] = item.get("rec_link") or _portal_resource_link(resource_id)
@@ -410,9 +443,10 @@ def _enrich(item, resource_id, risk, rmap, q, region="eastus2", sub_names=None):
     if resource_id and not res:
         amps.append("Recurso não encontrado no inventário — verificar manualmente")
     item["amplifiers"] = amps
-    if resource_id and risk in ("low", "medium", "high"):
+    # Cascata/validação só fazem sentido p/ recursos de infra (não p/ repos DevOps).
+    if not dp_provider and resource_id and risk in ("low", "medium", "high"):
         item["cascade"] = q.get("cascade_template", "").replace("{resource}", item["resource_name"])
-    if resource_id and risk in ("medium", "high"):
+    if not dp_provider and resource_id and risk in ("medium", "high"):
         item["validation"] = [s.replace("{resource}", item["resource_name"]) for s in (q.get("validation_steps") or [])]
     
     # Estimar custo de implementação (se aplicável)
@@ -775,6 +809,7 @@ _REPORT_CSS = """
   .mtags{margin-top:5px;font-size:11px;color:#9fb0c8}
   .mitre{display:inline-block;background:#2a1a3a;border:1px solid #4a2d6b;color:#c9a7ff;border-radius:5px;padding:1px 6px;margin:0 4px 2px 0;font-family:ui-monospace,Consolas,monospace;font-size:11px}
   .owner{color:#7cd0ff;font-size:11px;margin-top:4px}
+  .devops{display:inline-block;background:#10261b;border:1px solid #1f5135;color:#7ee2a8;border-radius:5px;padding:1px 7px;margin-top:4px;font-size:11px}
   .phase{margin-bottom:14px} .meta{color:#9fb0c8;font-size:12px}
   .card{background:#0d1422;border:1px solid #1e2a3f;border-radius:12px;padding:14px}
   .filters{background:#0d1422;border:1px solid #1e2a3f;border-radius:12px;padding:12px 14px;margin-bottom:16px}
@@ -793,9 +828,9 @@ _REPORT_CSS = """
 _REPORT_JS = """
 const PHASES=["safe","low","medium","high"];
 const PHMETA=DATA.phases_meta;
-const DIMS=[["sub","Subscription"],["rg","Resource Group"],["source","Fonte"],["category","Categoria"],["risk","Risco / Fase"],["severity","Severidade"]];
+const DIMS=[["sub","Subscription"],["rg","Resource Group"],["source","Fonte"],["category","Categoria"],["risk","Risco / Fase"],["severity","Severidade"],["repo","Repositório DevOps"]];
 function esc(s){return String(s==null?"":s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));}
-function val(it,dim){if(dim==="sub")return it.subscription_id;if(dim==="rg")return it.resource_group;if(dim==="source")return it.source;if(dim==="category")return it.category;if(dim==="risk")return it.risk;if(dim==="severity")return it.priority;return "";}
+function val(it,dim){if(dim==="sub")return it.subscription_id;if(dim==="rg")return it.resource_group;if(dim==="source")return it.source;if(dim==="category")return it.category;if(dim==="risk")return it.risk;if(dim==="severity")return it.priority;if(dim==="repo")return it.devops_repo||"";return "";}
 function label(dim,v){if(dim==="sub"){const s=DATA.subs[v];return (s&&s.name)?s.name:(v?v.slice(0,8):"—");}if(dim==="risk"){return (PHMETA[v]?PHMETA[v].emoji+" "+PHMETA[v].label:v);}return v;}
 function uniq(dim){const set=new Set();DATA.items.forEach(it=>{const v=val(it,dim);if(v&&v!=="—")set.add(v);});if(dim==="sub"){Object.keys(DATA.subs||{}).forEach(s=>set.add(s));}return [...set].sort((a,b)=>label(dim,a).localeCompare(label(dim,b)));}
 function buildFilters(){const root=document.getElementById("frow");DIMS.forEach(([dim,name])=>{const vals=uniq(dim);if(!vals.length)return;const box=document.createElement("div");box.className="fbox";let opts="";vals.forEach(v=>{opts+=`<label title="${esc(label(dim,v))}"><input type="checkbox" data-dim="${dim}" value="${esc(v)}">${esc(label(dim,v))}</label>`;});box.innerHTML=`<div class="flabel"><span>${esc(name)}</span><span class="meta">${vals.length}</span></div><div class="fopts">${opts}</div>`;root.appendChild(box);});root.querySelectorAll("input[type=checkbox]").forEach(cb=>cb.addEventListener("change",apply));}
@@ -804,9 +839,9 @@ function fmtUSD(n,suf){if(!n)return "—";return "US$ "+Math.round(n).toLocaleSt
 function selectedSubs(){const s=sel("sub");if(s.size)return s;return new Set(Object.keys(DATA.subs||{}));}
 function aggSecure(subs){let cur=0,max=0,pot=0,has=false;subs.forEach(sid=>{const s=DATA.subs[sid];if(s&&s.ss_max_points){has=true;cur+=s.ss_current_points;max+=s.ss_max_points;pot+=s.ss_potential_points;}});if(!has||max<=0)return null;return {cur:Math.round(1000*cur/max)/10,pot:Math.round(1000*pot/max)/10};}
 function aggMcsb(subs){let p=0,f=0,sk=0,un=0,has=false;subs.forEach(sid=>{const s=DATA.subs[sid];if(s&&s.mcsb){has=true;p+=s.mcsb.passed;f+=s.mcsb.failed;sk+=s.mcsb.skipped;un+=s.mcsb.unsupported;}});if(!has)return null;const a=p+f;return {passed:p,failed:f,skipped:sk,unsupported:un,pct:a>0?Math.round(1000*p/a)/10:null};}
-function rowHtml(it){let cs=it.cost_delta?`<span style="color:#5ed16a">${esc(it.cost_delta)}</span>`:"";let ci=it.cost_increase?`<span style="color:#ff6b6b">${esc(it.cost_increase)}</span>`:"";let cost=(cs&&ci)?cs+"<br/>"+ci:(cs||ci||"—");let ss=it.score_impact_label?`<span style="color:#9ae6b4;font-weight:700">${esc(it.score_impact_label)}</span><div class="meta" style="font-size:11px">${esc(it.score_control)}</div>`:"—";let title=esc(it.title);if(it.portal_link){title=`<a href="${esc(it.portal_link)}" style="color:#e7edf5;text-decoration:none;border-bottom:1px dotted #4a5a72">${title}</a> <a href="${esc(it.portal_link)}" title="Abrir no portal" style="color:#7cd0ff;text-decoration:none">🔗</a>`;}const tags=(it.tactics||[]).concat(it.techniques||[]);let mitre=tags.length?`<div class="mtags">🎯 ${tags.slice(0,4).map(m=>`<span class="mitre">${esc(m)}</span>`).join("")}</div>`:"";let owner=it.owner?`<div class="owner">👤 ${esc(it.owner)}</div>`:"";let casc=it.cascade?`<div class="casc">↳ ${esc(it.cascade)}</div>`:"";let src=`<span style="color:${it.source==="Advisor"?"#7cd0ff":"#c9a7ff"};font-weight:700">${esc(it.source)}</span>`;let subn=it.subscription_name&&it.subscription_name!=="—"?`<div class="meta" style="font-size:11px">${esc(it.subscription_name)} / ${esc(it.resource_group)}</div>`:"";return `<tr><td>${src}</td><td>${title}${mitre}${owner}${casc}</td><td>${esc(it.category)}</td><td>${esc(it.priority)}</td><td>${ss}</td><td class="mono">${esc(it.resource_name)}${subn}</td><td>${cost}</td></tr>`;}
+function rowHtml(it){let cs=it.cost_delta?`<span style="color:#5ed16a">${esc(it.cost_delta)}</span>`:"";let ci=it.cost_increase?`<span style="color:#ff6b6b">${esc(it.cost_increase)}</span>`:"";let cost=(cs&&ci)?cs+"<br/>"+ci:(cs||ci||"—");let ss=it.score_impact_label?`<span style="color:#9ae6b4;font-weight:700">${esc(it.score_impact_label)}</span><div class="meta" style="font-size:11px">${esc(it.score_control)}</div>`:"—";let title=esc(it.title);if(it.portal_link){title=`<a href="${esc(it.portal_link)}" style="color:#e7edf5;text-decoration:none;border-bottom:1px dotted #4a5a72">${title}</a> <a href="${esc(it.portal_link)}" title="Abrir no portal" style="color:#7cd0ff;text-decoration:none">🔗</a>`;}const tags=(it.tactics||[]).concat(it.techniques||[]);let mitre=tags.length?`<div class="mtags">🎯 ${tags.slice(0,4).map(m=>`<span class="mitre">${esc(m)}</span>`).join("")}</div>`:"";let owner=it.owner?`<div class="owner">👤 ${esc(it.owner)}</div>`:"";let casc=it.cascade?`<div class="casc">↳ ${esc(it.cascade)}</div>`:"";let dvo=it.devops_repo?`<div class="devops">🐙 ${esc(it.devops_provider||"DevOps")} · ${esc(it.devops_repo)}</div>`:"";let src=`<span style="color:${it.source==="Advisor"?"#7cd0ff":"#c9a7ff"};font-weight:700">${esc(it.source)}</span>`;let subn=it.subscription_name&&it.subscription_name!=="—"?`<div class="meta" style="font-size:11px">${esc(it.subscription_name)} / ${esc(it.resource_group)}</div>`:"";return `<tr><td>${src}</td><td>${title}${dvo}${mitre}${owner}${casc}</td><td>${esc(it.category)}</td><td>${esc(it.priority)}</td><td>${ss}</td><td class="mono">${esc(it.resource_name)}${subn}</td><td>${cost}</td></tr>`;}
 function renderPlan(items){const by={safe:[],low:[],medium:[],high:[]};items.forEach(it=>{(by[it.risk]||by.low).push(it);});let html="";PHASES.forEach(lvl=>{const rows=by[lvl];if(!rows.length)return;const m=PHMETA[lvl]||{};html+=`<div class="phase"><h3>${esc(m.emoji||"")} ${esc(m.label||lvl)} <span class="meta">· ${esc(m.action||"")} · ${rows.length} item(ns)</span></h3><table><tr><th>Fonte</th><th>Recomendação</th><th>Categoria</th><th>Prioridade</th><th>Impacto SS</th><th>Recurso</th><th>Custo</th></tr>${rows.map(rowHtml).join("")}</table></div>`;});document.getElementById("plan").innerHTML=html||`<div class="card meta">Nenhuma recomendação para os filtros selecionados.</div>`;}
-function renderKpis(items,subs){const c={safe:0,low:0,medium:0,high:0};let sav=0,impl=0;items.forEach(it=>{c[it.risk]=(c[it.risk]||0)+1;sav+=it.savings_raw||0;impl+=it.cost_increase_raw||0;});const ssA=aggSecure(subs);const mc=aggMcsb(subs);const k=document.getElementById("kpis");let cards=[["#7cd0ff",items.length,"recomendações"],["#5ed16a",c.safe,"🟢 quick wins"],["#ffd96b",c.low+c.medium,"🟡🟠 janela"],["#ff6b6b",c.high,"🔴 aprovação"],["#9fb0c8",ssA?ssA.cur+"%":"n/a","🛡️ SS atual"],["#9ae6b4",ssA?ssA.pot+"%":"n/a","🎯 SS potencial"],["#ff6b6b",impl?"+"+fmtUSD(impl,"/mês"):"—","💰 custo impl."]];if(mc&&mc.pct!=null){const cc=mc.pct>=80?"#5ed16a":(mc.pct>=50?"#ffd96b":"#ff6b6b");cards.push([cc,mc.pct+"%","🛡️ MCSB compliance"]);}k.innerHTML=cards.map(([col,n,l])=>`<div class="kpi"><div class="n" style="color:${col};font-size:${String(n).length>7?"14px":"20px"}">${esc(n)}</div><div class="l">${esc(l)}</div></div>`).join("");document.getElementById("subline").innerHTML=`economia potencial: <b style="color:#5ed16a">${sav?"−"+fmtUSD(sav,"/ano"):"—"}</b> · custo de implementação: <b style="color:#ff6b6b">${impl?"+"+fmtUSD(impl,"/mês"):"—"}</b> · 100% read-only`;const bar=document.getElementById("ssbar");if(ssA){bar.style.display="block";bar.innerHTML=`<div class="meta" style="margin-bottom:4px">🛡️ Secure Score: <b style="color:#9fb0c8">${ssA.cur}%</b> agora → <b style="color:#9ae6b4">${ssA.pot}%</b> se remediar tudo (<b style="color:#9ae6b4">+${Math.round(10*(ssA.pot-ssA.cur))/10} pp</b>)</div><div style="background:#0b0f17;border:1px solid #1e2a3f;border-radius:8px;height:14px;overflow:hidden;position:relative"><div style="position:absolute;left:0;top:0;height:100%;width:${ssA.pot}%;background:linear-gradient(90deg,#2d6a4f,#52b788);opacity:.45"></div><div style="position:absolute;left:0;top:0;height:100%;width:${ssA.cur}%;background:linear-gradient(90deg,#7cd0ff,#5ed16a)"></div></div>`;}else{bar.style.display="none";}}
+function renderKpis(items,subs){const c={safe:0,low:0,medium:0,high:0};let sav=0,impl=0,devops=0;items.forEach(it=>{c[it.risk]=(c[it.risk]||0)+1;sav+=it.savings_raw||0;impl+=it.cost_increase_raw||0;if(it.devops_repo)devops++;});const ssA=aggSecure(subs);const mc=aggMcsb(subs);const k=document.getElementById("kpis");let cards=[["#7cd0ff",items.length,"recomendações"],["#5ed16a",c.safe,"🟢 quick wins"],["#ffd96b",c.low+c.medium,"🟡🟠 janela"],["#ff6b6b",c.high,"🔴 aprovação"],["#9fb0c8",ssA?ssA.cur+"%":"n/a","🛡️ SS atual"],["#9ae6b4",ssA?ssA.pot+"%":"n/a","🎯 SS potencial"],["#ff6b6b",impl?"+"+fmtUSD(impl,"/mês"):"—","💰 custo impl."]];if(mc&&mc.pct!=null){const cc=mc.pct>=80?"#5ed16a":(mc.pct>=50?"#ffd96b":"#ff6b6b");cards.push([cc,mc.pct+"%","🛡️ MCSB compliance"]);}if(devops)cards.push(["#7ee2a8",devops,"🐙 DevOps findings"]);k.innerHTML=cards.map(([col,n,l])=>`<div class="kpi"><div class="n" style="color:${col};font-size:${String(n).length>7?"14px":"20px"}">${esc(n)}</div><div class="l">${esc(l)}</div></div>`).join("");document.getElementById("subline").innerHTML=`economia potencial: <b style="color:#5ed16a">${sav?"−"+fmtUSD(sav,"/ano"):"—"}</b> · custo de implementação: <b style="color:#ff6b6b">${impl?"+"+fmtUSD(impl,"/mês"):"—"}</b> · 100% read-only`;const bar=document.getElementById("ssbar");if(ssA){bar.style.display="block";bar.innerHTML=`<div class="meta" style="margin-bottom:4px">🛡️ Secure Score: <b style="color:#9fb0c8">${ssA.cur}%</b> agora → <b style="color:#9ae6b4">${ssA.pot}%</b> se remediar tudo (<b style="color:#9ae6b4">+${Math.round(10*(ssA.pot-ssA.cur))/10} pp</b>)</div><div style="background:#0b0f17;border:1px solid #1e2a3f;border-radius:8px;height:14px;overflow:hidden;position:relative"><div style="position:absolute;left:0;top:0;height:100%;width:${ssA.pot}%;background:linear-gradient(90deg,#2d6a4f,#52b788);opacity:.45"></div><div style="position:absolute;left:0;top:0;height:100%;width:${ssA.cur}%;background:linear-gradient(90deg,#7cd0ff,#5ed16a)"></div></div>`;}else{bar.style.display="none";}}
 function renderMcsb(subs){const el=document.getElementById("mcsb");const mc=aggMcsb(subs);if(!mc){el.innerHTML="";return;}const cc=(mc.pct||0)>=80?"#5ed16a":((mc.pct||0)>=50?"#ffd96b":"#ff6b6b");const fc=(DATA.mcsb&&DATA.mcsb.failing_controls||[]).filter(x=>!sel("sub").size||subs.has(x.subscription_id)).slice(0,15);let ft="";if(fc.length){ft=`<table style="margin-top:10px"><tr><th>Controle</th><th>Nome</th><th>Falhando</th><th>OK</th></tr>${fc.map(x=>{let nm=esc(x.name);if(x.link)nm=`<a href="${esc(x.link)}" style="color:#e7edf5;text-decoration:none;border-bottom:1px dotted #4a5a72">${nm}</a>`;return `<tr><td class="mono">${esc(x.id)}</td><td>${nm}</td><td style="color:#ff6b6b;font-weight:700">${x.failed}</td><td style="color:#5ed16a">${x.passed}</td></tr>`;}).join("")}</table>`;}el.innerHTML=`<div class="phase"><h3>🛡️ Postura de Compliance — Microsoft Cloud Security Benchmark <span class="meta">· standard: ${esc(DATA.mcsb?DATA.mcsb.standard_name:"")}</span></h3><div class="card"><div style="display:flex;gap:18px;flex-wrap:wrap;align-items:center"><div><span style="font-size:28px;font-weight:800;color:${cc}">${mc.pct!=null?mc.pct+"%":"n/a"}</span><div class="meta">controles em conformidade</div></div><div class="meta">✅ ${mc.passed} passed · ❌ ${mc.failed} failed · ⏭️ ${mc.skipped} skipped · ⚪ ${mc.unsupported} unsupported</div></div><div style="background:#0b0f17;border:1px solid #1e2a3f;border-radius:8px;height:12px;overflow:hidden;margin-top:10px"><div style="height:100%;width:${mc.pct||0}%;background:linear-gradient(90deg,${cc},#52b788)"></div></div>${ft}</div></div>`;}
 function apply(){let items=DATA.items;DIMS.forEach(([dim])=>{const s=sel(dim);if(s.size)items=items.filter(it=>s.has(val(it,dim)));});const subs=selectedSubs();renderKpis(items,subs);renderPlan(items);renderMcsb(subs);}
 function clearAll(){document.querySelectorAll("#frow input[type=checkbox]").forEach(c=>c.checked=false);apply();}
@@ -838,6 +873,8 @@ def render_html(ctx, q):
             "tactics": it.get("tactics") or [], "techniques": it.get("techniques") or [],
             "owner": it.get("owner") or "", "portal_link": it.get("portal_link") or "",
             "cascade": it.get("cascade") or "",
+            "devops_repo": it.get("devops_repo") or "",
+            "devops_provider": it.get("devops_provider") or "",
         }
 
     mcsb = ctx.get("mcsb")
@@ -924,6 +961,8 @@ def render_md(ctx, q):
             mtags = (it.get("tactics") or []) + (it.get("techniques") or [])
             mitre = ", ".join(str(m) for m in mtags[:3]) if mtags else "—"
             title = it['title']
+            if it.get("devops_repo"):
+                title = f"{title} · 🐙 {it.get('devops_provider','DevOps')}/{it['devops_repo']}"
             if it.get("owner"):
                 title = f"{title} · 👤 {it['owner']}"
             link = it.get('portal_link')
