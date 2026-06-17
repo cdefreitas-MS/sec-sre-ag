@@ -71,34 +71,45 @@ description: 'Remediation impact planner uniting Azure Advisor (Cost/Reliability
 
 ---
 
-## Architecture (two modes)
+## Architecture (three modes)
 
 ```
- MODE A — Direct (terminal az works)
+ MODE A — Direct, single RG (terminal az works)
    generate_html_report.py --sub <id> --rg <name> --save-raw
-     → script runs `az rest --method get --url <mgmt-url>` itself
-     → collects 4 ARM endpoints → inventory → risk classification → HTML + MD
+     → script runs `az rest --method get --url <mgmt-url>` itself (7 ARM endpoints)
+     → inventory → risk classification → interactive HTML + MD
      → GUARD: if all sources come back empty (no Reader / auth failure) it exits and points to Mode B.
 
- MODE B — Prefetch (terminal az blocked / recommended) [PRIMARY]
+ MODE B — Prefetch (terminal az blocked / recommended) [PRIMARY, deterministic]
    LLM collects each ARM endpoint via RunAzCliReadCommands (az rest)
      → assembles inventory.json → generate_html_report.py --from-json inventory.json
-     → risk-rate + render (no Azure calls) → HTML + MD
+     → risk-rate + render (no Azure calls). Auto-detects tenant-wide if data spans >1 subscription.
 
- Both emit: tmp/advisor-impact/advisor-impact-<ts>.{html,md}. Rendering is DETERMINISTIC.
+ MODE C — Tenant-wide via Azure Resource Graph (ARG) [scans the whole tenant]
+   generate_html_report.py --tenant            → all subscriptions the identity can read
+   generate_html_report.py --subs id1,id2      → a specific set of subscriptions
+     → ONE ARG query per dataset (advisorresources / securityresources / resourcecontainers)
+       via `az rest --method post` to /providers/Microsoft.ResourceGraph/resources, paginated by $skipToken
+     → same parsers; secure score + MCSB aggregated PER SUBSCRIPTION. Same base ARG tables the ESA uses.
+
+ All emit: tmp/advisor-impact/advisor-impact-<ts>.{html,md}. HTML is an interactive single-file app
+ (embedded JSON + client-side filters); MD is the static full dataset. Rendering is DETERMINISTIC.
 ```
+
+### Interactive HTML filters (client-side, offline)
+The HTML embeds the full dataset as JSON and ships a small self-contained `<script>` (no external libs / CDNs) that re-computes **everything** on filter change: KPIs, phase tables, cost totals, Secure Score bar, and the MCSB section. Filter dimensions: **Subscription · Resource Group · Source (Advisor/Defender) · Category · Risk/Phase · Severity** (checkbox groups; empty = all). Secure Score and MCSB are per-subscription metrics, so they recompute on the **Subscription** filter (summing points across selected subs); Resource-Group/Category/Source/Risk/Severity filters affect only the recommendations table + counts + cost. "Limpar filtros" resets.
 
 ---
 
 ## Workflow
 
 ### Step 1 — Resolve coordinates
-- `subscription` (ID, not name)
-- `resourceGroup` (exact name, case-sensitive)
+- **Tenant-wide** (recommended for posture review): no coordinates needed — `--tenant` scans every subscription the identity can read via Azure Resource Graph. Optionally `--subs id1,id2` to limit.
+- **Single RG** (targeted): `subscription` (ID, not name) + `resourceGroup` (exact, case-sensitive).
 
 The user may specify:
-- A specific RG to scope recommendations (targeted)
-- Or provide subscription-level scope (broader)
+- The whole tenant / a set of subscriptions (broad posture) — Mode C
+- A specific RG to scope recommendations (targeted) — Mode A/B
 
 ### Step 2 — Verify Permissions
 **RBAC Required:** **Reader** role at the subscription or resource group level.
@@ -112,7 +123,15 @@ az role assignment list --assignee <UAMI_OBJECT_ID> --scope /subscriptions/<SUB>
 
 ### Step 3 — Collect (choose a mode)
 
-**Mode A (try first):**
+**Mode C (tenant-wide via Azure Resource Graph — for posture review across the tenant):**
+```bash
+python3 <SKILL_DIR>/generate_html_report.py --tenant --output tmp/advisor-impact --format both
+# or a specific set of subscriptions:
+python3 <SKILL_DIR>/generate_html_report.py --subs <sub1>,<sub2> --output tmp/advisor-impact --format both
+```
+Runs one ARG query per dataset over `advisorresources` / `securityresources` / `resourcecontainers`. Needs **Reader** on the subscriptions. If the sandbox `az` is blocked, prefetch the ARG results (Mode B) instead.
+
+**Mode A (single RG, try first):**
 ```bash
 python3 <SKILL_DIR>/generate_html_report.py --sub <subscription_id> --rg <rg_name> \
   --category all --save-raw --output tmp/advisor-impact --format both
