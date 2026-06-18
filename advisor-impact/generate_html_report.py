@@ -876,6 +876,9 @@ def build_context(q, raw, params):
     # Pilar DevOps Remediation — findings granulares (subassessments) do Defender DevOps
     devops = analyze_devops_findings(raw.get("devops_findings"), sub_names)
 
+    # Pilar XDR — recomendações do Defender XDR/TVM (dataset opcional, prefetch)
+    xdr = analyze_xdr_recommendations(raw.get("xdr_recommendations"), sub_names)
+
     # Mapa POR SUBSCRIPTION (p/ recalcular SS + MCSB sob filtro de subscription no JS)
     subs = {}
     sub_ids = set(it.get("subscription_id") for it in items if it.get("subscription_id"))
@@ -904,6 +907,7 @@ def build_context(q, raw, params):
         "mcsb": mcsb,
         "subs": subs,
         "devops": devops,
+        "xdr": xdr,
         "scope_label": params.get("_scope_label", ""),
         "resources_in_scope": len(rmap) or len({it.get("resource_id") for it in items if it.get("resource_id")}),
         "savings_total": savings_total,
@@ -1032,6 +1036,131 @@ def _render_devops_section(devops):
         f"{det_table}"
         "</div></div>")
 
+# =============================================================================
+# Pilar XDR — recomendações do Microsoft Defender XDR (Vulnerability Management / Exposure)
+# Dataset OPCIONAL (prefetch Mode B): chave "xdr_recommendations". Coletado pelo agente via
+# MDE API (api.securitycenter.microsoft.com/api/recommendations) ou Graph exposure mgmt.
+# =============================================================================
+_SEV_ORDER = {"critical": 4, "high": 3, "medium": 2, "low": 1, "informational": 0}
+
+def analyze_xdr_recommendations(data, sub_names=None):
+    """Sumariza recomendações do Defender XDR/TVM. Aceita shape flat (MDE API) ou nested (properties)."""
+    rows = as_list(data)
+    if not rows:
+        return None
+
+    def field(r, *keys):
+        p = r.get("properties") if isinstance(r.get("properties"), dict) else {}
+        for k in keys:
+            if r.get(k) not in (None, ""):
+                return r.get(k)
+            if p.get(k) not in (None, ""):
+                return p.get(k)
+        return None
+
+    def sev_of(r):
+        s = field(r, "severity", "severityLevel")
+        if s:
+            return str(s).capitalize()
+        try:
+            sc = float(field(r, "severityScore", "cvssScore") or 0)
+        except (TypeError, ValueError):
+            sc = 0.0
+        return "Critical" if sc >= 9 else "High" if sc >= 7 else "Medium" if sc >= 4 else "Low" if sc > 0 else "—"
+
+    recs = []
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        name = str(field(r, "recommendationName", "displayName", "title", "name") or "—")
+        if len(name) > 130:
+            name = _short_finding(name, 130)
+        recs.append({
+            "name": name,
+            "category": str(field(r, "recommendationCategory", "category", "subCategory") or "—"),
+            "severity": sev_of(r),
+            "exposed": int(field(r, "exposedMachinesCount", "exposedDevicesCount", "exposedAssetsCount") or 0),
+            "exploit": bool(field(r, "publicExploit", "hasExploit")),
+            "weaknesses": int(field(r, "weaknesses", "cveCount") or 0),
+            "remediation": str(field(r, "remediationType", "remediation") or ""),
+            "link": str(field(r, "recommendationLink", "portalLink", "link") or ""),
+        })
+    if not recs:
+        return None
+    by_sev, by_cat = {}, {}
+    for r in recs:
+        by_sev[r["severity"]] = by_sev.get(r["severity"], 0) + 1
+        by_cat[r["category"]] = by_cat.get(r["category"], 0) + 1
+    sev_order = sorted(by_sev.items(), key=lambda kv: _SEV_ORDER.get(kv[0].lower(), -1), reverse=True)
+    top = sorted(recs, key=lambda r: (_SEV_ORDER.get(r["severity"].lower(), -1), r["exposed"], r["weaknesses"]), reverse=True)
+    return {
+        "total": len(recs),
+        "by_severity": dict(sev_order),
+        "by_category": by_cat,
+        "sev_order": [s for s, _ in sev_order],
+        "exposed_total": sum(r["exposed"] for r in recs),
+        "exploit_total": sum(1 for r in recs if r["exploit"]),
+        "top": top,
+    }
+
+def _count_bars(pairs, color="var(--accent)"):
+    """Barras horizontais simples (1 cor) escaladas pelo maior valor. pairs = [(label, count)]."""
+    maxv = max((v for _, v in pairs), default=1) or 1
+    rows = ""
+    for label, v in pairs:
+        w = 100.0 * v / maxv
+        rows += (f"<div class='barrow'><div class='barlbl' title='{esc(str(label))}'>{esc(str(label))}</div>"
+                 f"<div class='bartrack'><span class='seg' style='width:{w:.2f}%;background:{color}'></span></div>"
+                 f"<div class='barval'>{v}</div></div>")
+    return f"<div class='bars'>{rows}</div>"
+
+def _render_xdr_section(xdr):
+    """Página 🛡️ Defender XDR estilo Power BI: donut de severidade + KPIs + barras por categoria + tabela."""
+    if not xdr:
+        return ""
+    sevs = xdr["sev_order"]
+    kcards = (f"<div class='kpi'><div class='n' style='color:#1fab89'>{xdr['total']}</div>"
+              f"<div class='l'>🛡️ recomendações</div></div>")
+    for s in sevs:
+        cls = _SEV_CLASS.get(s, "sv-informational")
+        kcards += (f"<div class='kpi'><div class='n {cls}'>{xdr['by_severity'].get(s,0)}</div>"
+                   f"<div class='l'>{esc(s)}</div></div>")
+    kcards += (f"<div class='kpi'><div class='n' style='color:#ff6b6b'>{xdr['exploit_total']}</div>"
+               f"<div class='l'>💥 exploit público</div></div>"
+               f"<div class='kpi'><div class='n' style='color:#ffd96b'>{xdr['exposed_total']}</div>"
+               f"<div class='l'>🖥️ máquinas expostas</div></div>")
+    donut = _svg_donut([(s, xdr['by_severity'].get(s, 0), _SEV_COLOR.get(s, '#9fb0c8')) for s in sevs])
+    donut_legend = "<div class='legend'>" + "".join(
+        f"<span><i class='dot' style='background:{_SEV_COLOR.get(s,'#9fb0c8')}'></i>{esc(s)} · {xdr['by_severity'].get(s,0)}</span>"
+        for s in sevs) + "</div>"
+    bars = _count_bars(sorted(xdr["by_category"].items(), key=lambda kv: kv[1], reverse=True))
+    det = ""
+    for r in xdr["top"][:25]:
+        cls = _SEV_CLASS.get(r["severity"], "sv-informational")
+        ex = "💥 sim" if r["exploit"] else "<span class='meta'>—</span>"
+        link = r.get("link", "") or ""
+        link_html = (f"<a href='{esc(link)}' target='_blank' style='color:var(--accent);white-space:nowrap'>Defender ↗</a>"
+                     if link else "<span class='meta'>—</span>")
+        det += (f"<tr><td class='{cls}' style='font-weight:700;white-space:nowrap'>{esc(r['severity'])}</td>"
+                f"<td>{esc(r['name'])}</td>"
+                f"<td class='meta' style='white-space:nowrap'>{esc(r['category'])}</td>"
+                f"<td style='text-align:right;font-weight:700'>{r['exposed']}</td>"
+                f"<td style='white-space:nowrap'>{ex}</td><td>{link_html}</td></tr>")
+    return (
+        "<div class='phase'><h3>🛡️ Recomendações do Defender XDR "
+        "<span class='meta'>· Vulnerability Management / Exposure — priorize por exposição e exploit</span></h3>"
+        "<div class='card'>"
+        "<div class='dvgrid'>"
+        f"<div style='text-align:center'>{donut}{donut_legend}</div>"
+        f"<div><div class='kpis'>{kcards}</div></div>"
+        "</div>"
+        "<h3 style='margin-top:16px'>📊 Por categoria</h3>"
+        f"{bars}"
+        "<h3 style='margin-top:16px'>🔧 Recomendações <span class='meta'>· por severidade e máquinas expostas</span></h3>"
+        "<table><tr><th>Sev</th><th>Recomendação</th><th>Categoria</th><th>Máquinas</th><th>Exploit</th><th>Referência</th></tr>"
+        f"{det}</table>"
+        "</div></div>")
+
 # CSS + JS do relatório interativo (string normal, SEM f-string → não precisa escapar {}).
 _REPORT_CSS = """
   :root{
@@ -1133,6 +1262,7 @@ function setTheme(t){document.documentElement.setAttribute("data-theme",t);try{l
 function toggleTheme(){var c=document.documentElement.getAttribute("data-theme")||"dark";setTheme(c==="light"?"dark":"light");}
 function showPage(id){document.querySelectorAll(".page").forEach(function(p){p.style.display="none";});var el=document.getElementById(id);if(el)el.style.display="block";document.querySelectorAll(".navbtn").forEach(function(b){b.classList.toggle("active",b.getAttribute("data-page")===id);});try{location.hash=id;}catch(e){}window.scrollTo(0,0);}
 function goHome(){showPage("home");}
+function gotoSource(src){document.querySelectorAll("#frow input[type=checkbox]").forEach(function(c){c.checked=false;});if(src){var box=document.querySelector('#frow input[data-dim="source"][value="'+src.replace(/"/g,'\\\\"')+'"]');if(box)box.checked=true;}apply();showPage("page-plan");}
 (function(){var t="dark";try{t=localStorage.getItem("ai_theme")||"dark";}catch(e){}setTheme(t);})();
 buildFilters();apply();
 (function(){var h=(location.hash||"").replace("#","");showPage(h&&document.getElementById(h)?h:"home");})();
@@ -1201,6 +1331,9 @@ def render_html(ctx, q):
     generated = esc(ctx.get("generated", ""))
     mcsb_pct = ctx["mcsb"].get("compliance_pct") if ctx.get("mcsb") else None
     devops_total = ctx["devops"]["total"] if ctx.get("devops") else 0
+    xdr_total = ctx["xdr"]["total"] if ctx.get("xdr") else 0
+    n_adv = len(ctx.get("advisor", []))
+    n_mdc = len(ctx.get("mdc", []))
 
     logo_svg = (
         "<svg viewBox='0 0 48 48' width='100%' height='100%' fill='none' xmlns='http://www.w3.org/2000/svg'>"
@@ -1211,6 +1344,12 @@ def render_html(ctx, q):
 
     # ---- barra superior (sempre visível) ----
     nav_extra = ""
+    if n_adv:
+        nav_extra += "<button class=\"navbtn\" data-page=\"page-plan\" onclick=\"gotoSource('Advisor')\">📘 Advisor</button>"
+    if n_mdc:
+        nav_extra += "<button class=\"navbtn\" data-page=\"page-plan\" onclick=\"gotoSource('Defender for Cloud')\">🛡️ Defender for Cloud</button>"
+    if xdr_total:
+        nav_extra += "<button class=\"navbtn\" data-page=\"page-xdr\" onclick=\"showPage('page-xdr')\">🛡️ Defender XDR</button>"
     if mcsb_pct is not None:
         nav_extra += "<button class=\"navbtn\" data-page=\"page-mcsb\" onclick=\"showPage('page-mcsb')\">📋 MCSB</button>"
     if devops_total:
@@ -1219,14 +1358,27 @@ def render_html(ctx, q):
         '<div class="topbar"><div class="brand" onclick="goHome()"><span class="mk">' + logo_svg + '</span>'
         '<span>advisor-impact</span></div><div class="navlinks">'
         '<button class="navbtn" data-page="home" onclick="showPage(\'home\')">🏠 Início</button>'
-        '<button class="navbtn" data-page="page-plan" onclick="showPage(\'page-plan\')">🧭 Plano</button>'
         + nav_extra +
         '<button id="themebtn" class="btn" onclick="toggleTheme()">☀️ Tema claro</button></div></div>')
 
-    # ---- cards de avaliação na home ----
-    cards = ("<div class=\"navcard\" onclick=\"showPage('page-plan')\"><div class=\"ic\">🧭</div>"
-             "<b>Plano de Remediação</b><div class=\"big\">" + str(n) + "</div>"
-             "<span>recomendações priorizadas por risco de aplicar</span></div>")
+    # ---- cards de avaliação na home (Advisor e Defender for Cloud separados) ----
+    cards = ""
+    if n_adv:
+        cards += ("<div class=\"navcard\" onclick=\"gotoSource('Advisor')\"><div class=\"ic\">📘</div>"
+                  "<b>Azure Advisor</b><div class=\"big\">" + str(n_adv) + "</div>"
+                  "<span>recomendações Cost / Reliability / Performance / OpEx</span></div>")
+    if n_mdc:
+        cards += ("<div class=\"navcard\" onclick=\"gotoSource('Defender for Cloud')\"><div class=\"ic\">🛡️</div>"
+                  "<b>Defender for Cloud</b><div class=\"big\">" + str(n_mdc) + "</div>"
+                  "<span>security assessments (postura de nuvem)</span></div>")
+    if not cards:
+        cards += ("<div class=\"navcard\" onclick=\"showPage('page-plan')\"><div class=\"ic\">🧭</div>"
+                  "<b>Plano de Remediação</b><div class=\"big\">" + str(n) + "</div>"
+                  "<span>recomendações priorizadas por risco</span></div>")
+    if xdr_total:
+        cards += ("<div class=\"navcard\" onclick=\"showPage('page-xdr')\"><div class=\"ic\">🛡️</div>"
+                  "<b>Defender XDR</b><div class=\"big\">" + str(xdr_total) + "</div>"
+                  "<span>recomendações Vulnerability Management / Exposure</span></div>")
     if mcsb_pct is not None:
         cards += ("<div class=\"navcard\" onclick=\"showPage('page-mcsb')\"><div class=\"ic\">📋</div>"
                   "<b>MCSB Compliance</b><div class=\"big\">" + str(mcsb_pct) + "%</div>"
@@ -1253,12 +1405,17 @@ def render_html(ctx, q):
         '<button class="btn" onclick="clearAll()">Limpar filtros</button></div>'
         '<div class="frow" id="frow"></div></div>')
     devops_html = _render_devops_section(ctx.get("devops"))
+    xdr_html = _render_xdr_section(ctx.get("xdr"))
 
     page_plan = (
         '<div id="page-plan" class="page" style="display:none">'
         '<button class="btn back" onclick="goHome()">← Início</button>'
-        '<h2>🧭 Plano de Remediação <span class="meta">· por fase de risco de aplicar</span></h2>'
+        '<h2>🧭 Plano de Remediação <span class="meta">· Advisor + Defender for Cloud · por fase de risco de aplicar</span></h2>'
         + filters + '<div id="plan"></div></div>')
+    page_xdr = (
+        '<div id="page-xdr" class="page" style="display:none">'
+        '<button class="btn back" onclick="goHome()">← Início</button>'
+        + xdr_html + '</div>') if xdr_html else ''
     page_mcsb = (
         '<div id="page-mcsb" class="page" style="display:none">'
         '<button class="btn back" onclick="goHome()">← Início</button>'
@@ -1273,7 +1430,7 @@ def render_html(ctx, q):
               '(não criticidade). Custos via Azure Retail Prices API · Compliance via MCSB '
               '(inspirado no <a href="https://github.com/microsoft/ESA" style="color:var(--accent)">microsoft/ESA</a>).</div>')
 
-    body = topbar + home + page_plan + page_mcsb + page_devops + footer + '</div>'
+    body = topbar + home + page_plan + page_xdr + page_mcsb + page_devops + footer + '</div>'
     script = '<script>const DATA=' + data_json + ';\n' + _REPORT_JS + '</script>'
     return head + body + script + '</body></html>'
 
