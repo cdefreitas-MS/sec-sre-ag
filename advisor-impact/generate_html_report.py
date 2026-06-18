@@ -19,7 +19,7 @@ Dois modos:
 Saída: --format both (default) → HTML (dark, email) + Markdown (repo).
 """
 from __future__ import annotations
-import argparse, datetime as dt, html, json, os, shutil, subprocess, sys, tempfile
+import argparse, datetime as dt, html, json, os, re, shutil, subprocess, sys, tempfile
 import urllib.request, urllib.parse
 
 if sys.platform == "win32":
@@ -413,6 +413,55 @@ def _devops_info(resource_id):
                 break
     return (provider, repo)
 
+def _devops_owner(resource_id):
+    """Extrai o owner/org do connector DevOps a partir do resourceId."""
+    parts = (resource_id or "").split("/")
+    low = [p.lower() for p in parts]
+    for marker in ("githubowners", "azuredevopsorgs", "gitlabgroups", "owners", "orgs"):
+        if marker in low:
+            i = low.index(marker)
+            if i + 1 < len(parts):
+                return parts[i + 1]
+    return ""
+
+_GH_SEC_TAB = {
+    "dependency": "dependabot", "dependencies": "dependabot",
+    "code": "code-scanning", "infrastructure as code": "code-scanning", "iac": "code-scanning",
+    "secret": "secret-scanning", "secrets": "secret-scanning",
+}
+
+def _devops_ref_link(provider, owner, repo, category, portal_link=""):
+    """Referência acionável: link oficial do portal se houver, senão a aba Security do repo (GitHub)."""
+    if portal_link:
+        return portal_link
+    if provider == "GitHub" and owner and repo:
+        tab = _GH_SEC_TAB.get((category or "").strip().lower(), "")
+        base = "https://github.com/%s/%s/security" % (owner, repo)
+        return "%s/%s" % (base, tab) if tab else base
+    return ""
+
+def _short_finding(name, limit=140):
+    """Resumo curto do finding: 'pacote/ecossistema — 1a frase'. Corta o corpo gigante do advisory GHAS."""
+    raw = (name or "").strip()
+    if not raw:
+        return "\u2014"
+    head = raw.split(":", 1)[0].strip() if ":" in raw else ""
+    body = raw.split(":", 1)[1].strip() if ":" in raw else raw
+    first = re.split(r"(?:\.\s|[\n\r])", body, 1)[0]    # 1a frase: para em ". " ou quebra (não em 3.16.0)
+    first = re.sub(r"[#>*`\[\]]+", " ", first)          # remove marcas markdown
+    first = re.sub(r"\s+", " ", first).strip()
+    title = head if (head and len(head) <= 60 and "\n" not in head) else ""
+    if title and first:
+        out = "%s \u2014 %s" % (title, first)
+    elif title:
+        out = title
+    else:
+        out = first or re.sub(r"\s+", " ", raw)
+    out = out.strip()
+    if len(out) > limit:
+        out = out[:limit].rstrip() + "\u2026"
+    return out
+
 # =============================================================================
 # Parsers — Advisor + Defender for Cloud → itens unificados
 # =============================================================================
@@ -704,14 +753,16 @@ def analyze_devops_findings(data, sub_names=None):
         sev_raw = p.get("severity") or prop(p, "status.severity", "") or "—"
         sev = str(sev_raw).capitalize()
         cat = str(p.get("category", "") or "—")
+        portal = prop(p, "links.azurePortal", "") or ""
+        owner = _devops_owner(rid)
         findings.append({
             "repo": repo or "(org)",
             "provider": provider,
             "severity": sev,
             "category": cat,
-            "finding": p.get("displayName", "—"),
+            "finding": _short_finding(p.get("displayName", "—")),
             "remediation": p.get("remediation", "") or "",
-            "link": prop(p, "links.azurePortal", "") or "",
+            "link": _devops_ref_link(provider, owner, repo, cat, portal),
             "subscription_id": str(r.get("subscriptionId") or _sub_of(rid) or "").lower(),
         })
     if not findings:
@@ -906,30 +957,31 @@ def _render_devops_section(devops):
                       f"<td style='font-weight:700'>{m['total']}</td>{cells}</tr>")
     table = (f"<table style='margin-top:10px'><tr><th>Repositório</th><th>Total</th>{head_cells}</tr>"
              f"{rows_html}</table>")
-    # tabela de findings com remediação + link oficial por finding (top por severidade)
+    # tabela de findings com referência clicável por finding (top por severidade)
     det = ""
     tf = devops.get("top_findings") or []
     LIMIT = 25
     for f in tf[:LIMIT]:
         s = f.get("severity", "—")
         c = _SEV_COLOR.get(s, "#9fb0c8")
-        rem = esc(f.get("remediation", "") or "—")
         link = f.get("link", "") or ""
-        link_html = (f"<a href='{esc(link)}' target='_blank' style='color:#7cd0ff'>Portal ↗</a>"
-                     if link else "<span class='meta'>—</span>")
+        if link:
+            label = "GitHub ↗" if "github.com" in link else "Portal ↗"
+            link_html = f"<a href='{esc(link)}' target='_blank' style='color:#7cd0ff;white-space:nowrap'>{label}</a>"
+        else:
+            link_html = "<span class='meta'>—</span>"
         det += (f"<tr><td style='color:{c};font-weight:700;white-space:nowrap'>{esc(s)}</td>"
                 f"<td class='mono'>🐙 {esc(f.get('repo','—'))}</td>"
                 f"<td>{esc(f.get('finding','—'))}</td>"
-                f"<td class='meta'>{esc(f.get('category','—'))}</td>"
-                f"<td class='meta'>{rem}</td>"
-                f"<td style='white-space:nowrap'>{link_html}</td></tr>")
+                f"<td class='meta' style='white-space:nowrap'>{esc(f.get('category','—'))}</td>"
+                f"<td>{link_html}</td></tr>")
     more = ""
     if len(tf) > LIMIT:
-        more = f"<div class='meta' style='margin-top:6px'>… +{len(tf) - LIMIT} findings (priorize Critical→High; veja o relatório completo).</div>"
+        more = f"<div class='meta' style='margin-top:6px'>… +{len(tf) - LIMIT} findings (priorize Critical→High; abra a referência p/ a lista completa).</div>"
     det_table = (
-        "<h3 style='margin-top:16px'>🔧 Findings a corrigir <span class='meta'>· por severidade · remediação + link oficial</span></h3>"
+        "<h3 style='margin-top:16px'>🔧 Findings a corrigir <span class='meta'>· por severidade · clique na referência p/ a recomendação</span></h3>"
         "<table><tr><th>Sev</th><th>Repositório</th><th>Finding</th><th>Categoria</th>"
-        f"<th>Remediação</th><th>Link</th></tr>{det}</table>{more}") if det else ""
+        f"<th>Referência</th></tr>{det}</table>{more}") if det else ""
     return (
         "<div class='phase'><h3>🐙 DevOps Remediation — findings do GitHub/Defender DevOps "
         "<span class='meta'>· vulnerabilidades a corrigir (CVE/code/IaC/secret), não postura</span></h3>"
@@ -1164,22 +1216,25 @@ def render_md(ctx, q):
         lines.append("")
         lines.append("_Matriz ordenada por Critical+High (maior risco no topo) · dependency CVEs normalmente têm PR do Dependabot pronto p/ merge._")
         lines.append("")
-        # tabela de findings com remediação + link oficial por finding
+        # tabela de findings com referência clicável por finding
         tf = devops.get("top_findings") or []
         if tf:
             LIMIT = 25
-            lines.append("### 🔧 Findings a corrigir (por severidade · remediação + link oficial)")
-            lines.append("| Sev | Repositório | Finding | Categoria | Remediação | Link |")
-            lines.append("|---|---|---|---|---|---|")
+            lines.append("### 🔧 Findings a corrigir (por severidade · clique na referência p/ a recomendação)")
+            lines.append("| Sev | Repositório | Finding | Categoria | Referência |")
+            lines.append("|---|---|---|---|---|")
             for f in tf[:LIMIT]:
-                rem = (f.get("remediation", "") or "—").replace("|", "\\|").replace("\n", " ")
                 fnd = (f.get("finding", "—") or "—").replace("|", "\\|").replace("\n", " ")
                 link = f.get("link", "") or ""
-                link_md = f"[Portal]({link})" if link else "—"
-                lines.append(f"| {f.get('severity','—')} | 🐙 {f.get('repo','—')} | {fnd} | {f.get('category','—')} | {rem} | {link_md} |")
+                if link:
+                    label = "GitHub" if "github.com" in link else "Portal"
+                    link_md = f"[{label}]({link})"
+                else:
+                    link_md = "—"
+                lines.append(f"| {f.get('severity','—')} | 🐙 {f.get('repo','—')} | {fnd} | {f.get('category','—')} | {link_md} |")
             if len(tf) > LIMIT:
                 lines.append("")
-                lines.append(f"_… +{len(tf) - LIMIT} findings (priorize Critical→High; veja o relatório completo)._")
+                lines.append(f"_… +{len(tf) - LIMIT} findings (priorize Critical→High; abra a referência p/ a lista completa)._")
             lines.append("")
     lines.append(f"_advisor-impact · gerado {ctx['generated']} · read-only · MCSB inspirado no microsoft/ESA (MIT)._")
     return "\n".join(lines)
