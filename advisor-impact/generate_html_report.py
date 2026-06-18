@@ -876,10 +876,12 @@ def build_context(q, raw, params):
     # Pilar DevOps Remediation — findings granulares (subassessments) do Defender DevOps
     devops = analyze_devops_findings(raw.get("devops_findings"), sub_names)
 
-    # Pilar XDR — recomendações do Defender XDR/TVM (dataset opcional, prefetch)
-    xdr = analyze_xdr_recommendations(raw.get("xdr_recommendations"), sub_names)
+    # Pilar XDR — UNIFICADO na aba Microsoft Secure Score (mesma fonte: secureScoreControlProfiles).
+    # Mantido None para não duplicar card/aba; o dashboard m365 abaixo consome o mesmo dataset.
+    xdr = None
 
-    # Microsoft Secure Score (M365/Entra) — dataset opcional (prefetch via Graph)
+    # Microsoft Secure Score (M365/Entra) — dataset opcional (prefetch via Graph). Inclui os
+    # Recommended Actions que antes ficavam na aba "Defender XDR" (mesma origem secureScoreControlProfiles).
     m365 = analyze_m365_dashboard(raw.get("m365_secure_score") or raw.get("secure_score_m365"), raw.get("xdr_recommendations"))
 
     # Mapa POR SUBSCRIPTION (p/ recalcular SS + MCSB sob filtro de subscription no JS)
@@ -1314,10 +1316,9 @@ _M365_BUCKET_COLOR = {"Alcançado": "#5ed16a", "Parcial": "#ffd96b", "Oportunida
 
 def analyze_m365_dashboard(m365_raw, profiles_raw):
     """Dashboard Microsoft Secure Score (estilo ESA): por-recomendação com status/categoria/
-    produto/pontuação/impacto/licença. Requer secureScores; enriquece com secureScoreControlProfiles."""
+    produto/pontuação/impacto/licença. Usa secureScores p/ o score atual; também renderiza
+    só com secureScoreControlProfiles (degrada: score atual = 0 onde não houver join)."""
     base = analyze_m365_secure_score(m365_raw)
-    if not base:
-        return None
     rows = as_list(m365_raw)
     head = rows[0] if rows and isinstance(rows[0], dict) else {}
     hp = head.get("properties") if isinstance(head.get("properties"), dict) else head
@@ -1406,7 +1407,13 @@ def analyze_m365_dashboard(m365_raw, profiles_raw):
         key=lambda r: (r["to_address"], r["gain"]), reverse=True)
     no_license = sum(1 for x in recs if not x["licensed"])
     completed = sum(1 for x in recs if x["status"] == "Concluído")
-    out = dict(base)
+    if base:
+        out = dict(base)
+    else:
+        cur = round(sum(x["score"] for x in recs), 1)
+        mx = round(sum(x["max"] for x in recs), 1)
+        out = {"pct": round(100.0 * cur / mx, 1) if mx else 0.0,
+               "current": cur, "max": mx, "controls": len(cscores)}
     out.update({
         "dashboard": True, "total": len(recs), "completed": completed,
         "to_address": len(recs) - completed, "no_license": no_license,
@@ -1855,8 +1862,6 @@ def render_html(ctx, q):
         nav_extra += "<button class=\"navbtn\" data-page=\"page-plan\" onclick=\"gotoSource('Advisor')\">📘 Advisor</button>"
     if n_mdc:
         nav_extra += "<button class=\"navbtn\" data-page=\"page-mdc\" onclick=\"showPage('page-mdc')\">🛡️ Defender for Cloud</button>"
-    if xdr_total:
-        nav_extra += "<button class=\"navbtn\" data-page=\"page-xdr\" onclick=\"showPage('page-xdr')\">🛡️ Defender XDR</button>"
     if mcsb_pct is not None:
         nav_extra += "<button class=\"navbtn\" data-page=\"page-mcsb\" onclick=\"showPage('page-mcsb')\">📋 MCSB</button>"
     if devops_total:
@@ -1892,19 +1897,6 @@ def render_html(ctx, q):
              ("Recomendações", n_mdc, "var(--fg)"),
              ("Severidade alta", n_high_mdc, "#ff6b6b")],
             "showPage('page-mdc')", d_pie)
-    if xdr:
-        x_pie = _svg_pie([(g, v, c) for g, v, c in xdr['groups']])
-        if xdr.get('mode') == 'actions':
-            sub = "Recommended Actions · Microsoft Secure Score"
-            x_rows = [(g, v, "var(--fg)") for g, v, c in xdr['groups'][:3]]
-            x_rows.append(("Pontos de melhoria", xdr.get('points_total', 0), "#5ed16a"))
-        else:
-            sub = "recomendações · Vuln Mgmt / Exposure"
-            x_rows = [("Critical", xdr['by_severity'].get('Critical', 0), "#ff4d4d"),
-                      ("High", xdr['by_severity'].get('High', 0), "#ff6b6b"),
-                      ("Exploit público", xdr.get('exploit_total', 0), "#ff6b6b"),
-                      ("Máquinas expostas", xdr.get('exposed_total', 0), "#ffd96b")]
-        score_cards += _score_card("<img class='plogo' src='" + _XDR_LOGO_URI + "' alt=''>", "Defender XDR", xdr['total'], sub, x_rows, "showPage('page-xdr')", x_pie)
     if mcsb:
         c_pie = _svg_pie([("Passed", mcsb.get('passed', 0), "#5ed16a"),
                           ("Failed", mcsb.get('failed', 0), "#ff6b6b"),
@@ -1958,17 +1950,12 @@ def render_html(ctx, q):
         '<button class="btn" onclick="clearAll()">Limpar filtros</button></div>'
         '<div class="frow" id="frow"></div></div>')
     devops_html = _render_devops_section(ctx.get("devops"))
-    xdr_html = _render_xdr_section(ctx.get("xdr"))
 
     page_plan = (
         '<div id="page-plan" class="page" style="display:none">'
         '<button class="btn back" onclick="goHome()">← Início</button>'
         '<h2>🧭 Plano de Remediação <span class="meta">· Advisor + Defender for Cloud · por fase de risco de aplicar</span></h2>'
         + filters + '<div id="plan"></div></div>')
-    page_xdr = (
-        '<div id="page-xdr" class="page" style="display:none">'
-        '<button class="btn back" onclick="goHome()">← Início</button>'
-        + xdr_html + '</div>') if xdr_html else ''
     page_mcsb = (
         '<div id="page-mcsb" class="page" style="display:none">'
         '<button class="btn back" onclick="goHome()">← Início</button>'
@@ -1983,7 +1970,7 @@ def render_html(ctx, q):
               '(não criticidade). Custos via Azure Retail Prices API · Compliance via MCSB '
               '(inspirado no <a href="https://github.com/microsoft/ESA" style="color:var(--accent)">microsoft/ESA</a>).</div>')
 
-    body = topbar + home + page_exec + page_mdc + page_m365 + page_plan + page_xdr + page_mcsb + page_devops + footer + '</div>'
+    body = topbar + home + page_exec + page_mdc + page_m365 + page_plan + page_mcsb + page_devops + footer + '</div>'
     script = '<script>const DATA=' + data_json + ';\n' + _REPORT_JS + '</script>'
     return head + body + script + '</body></html>'
 
