@@ -19,7 +19,7 @@ Dois modos:
 Saída: --format both (default) → HTML (dark, email) + Markdown (repo).
 """
 from __future__ import annotations
-import argparse, datetime as dt, html, json, os, re, shutil, subprocess, sys, tempfile
+import argparse, datetime as dt, html, json, math, os, re, shutil, subprocess, sys, tempfile
 import urllib.request, urllib.parse
 
 if sys.platform == "win32":
@@ -876,6 +876,12 @@ def build_context(q, raw, params):
     # Pilar DevOps Remediation — findings granulares (subassessments) do Defender DevOps
     devops = analyze_devops_findings(raw.get("devops_findings"), sub_names)
 
+    # Pilar XDR — recomendações do Defender XDR/TVM (dataset opcional, prefetch)
+    xdr = analyze_xdr_recommendations(raw.get("xdr_recommendations"), sub_names)
+
+    # Microsoft Secure Score (M365/Entra) — dataset opcional (prefetch via Graph)
+    m365 = analyze_m365_secure_score(raw.get("m365_secure_score") or raw.get("secure_score_m365"))
+
     # Mapa POR SUBSCRIPTION (p/ recalcular SS + MCSB sob filtro de subscription no JS)
     subs = {}
     sub_ids = set(it.get("subscription_id") for it in items if it.get("subscription_id"))
@@ -904,6 +910,8 @@ def build_context(q, raw, params):
         "mcsb": mcsb,
         "subs": subs,
         "devops": devops,
+        "xdr": xdr,
+        "m365": m365,
         "scope_label": params.get("_scope_label", ""),
         "resources_in_scope": len(rmap) or len({it.get("resource_id") for it in items if it.get("resource_id")}),
         "savings_total": savings_total,
@@ -928,49 +936,109 @@ def _savings_raw(cd):
         return 0.0
 
 _SEV_COLOR = {"Critical": "#ff4d4d", "High": "#ff6b6b", "Medium": "#ffd96b", "Low": "#7cd0ff", "Informational": "#9fb0c8"}
+_SEV_CLASS = {"Critical": "sv-critical", "High": "sv-high", "Medium": "sv-medium", "Low": "sv-low", "Informational": "sv-informational"}
+
+def _svg_donut(segments, size=160, stroke=28):
+    """Donut SVG (sem libs) p/ proporção de severidade. segments = [(label, value, color)]."""
+    total = sum(v for _, v, _ in segments) or 1
+    r = (size - stroke) / 2.0
+    cx = cy = size / 2.0
+    circ = 2 * math.pi * r
+    off = 0.0
+    arcs = (f"<circle cx='{cx}' cy='{cy}' r='{r:.1f}' fill='none' stroke='var(--inset)' "
+            f"stroke-width='{stroke}'/>")
+    for _label, v, color in segments:
+        if v <= 0:
+            continue
+        dash = (v / total) * circ
+        arcs += (f"<circle cx='{cx}' cy='{cy}' r='{r:.1f}' fill='none' stroke='{color}' "
+                 f"stroke-width='{stroke}' stroke-dasharray='{dash:.2f} {circ - dash:.2f}' "
+                 f"stroke-dashoffset='{-off:.2f}' transform='rotate(-90 {cx} {cy})'/>")
+        off += dash
+    center = (f"<text x='{cx}' y='{cy - 2}' text-anchor='middle' class='donut-num'>{total}</text>"
+              f"<text x='{cx}' y='{cy + 17}' text-anchor='middle' class='donut-lbl'>findings</text>")
+    return (f"<svg viewBox='0 0 {size} {size}' width='{size}' height='{size}' class='donut' "
+            f"role='img' aria-label='Severidade'>{arcs}{center}</svg>")
+
+def _svg_pie(segments, size=88):
+    """Gráfico de pizza (pie) cheio, sem libs. segments = [(label, value, color)]."""
+    nz = [(l, v, c) for l, v, c in segments if v and v > 0]
+    if not nz:
+        return ""
+    total = sum(v for _, v, _ in nz) or 1
+    cx = cy = size / 2.0
+    r = size / 2.0 - 1
+    if len(nz) == 1:
+        return (f"<svg viewBox='0 0 {size} {size}' width='{size}' height='{size}' class='pie' role='img'>"
+                f"<circle cx='{cx}' cy='{cy}' r='{r:.1f}' fill='{nz[0][2]}'/></svg>")
+    ang = -90.0
+    paths = ""
+    for _l, v, c in nz:
+        frac = v / total
+        a0 = math.radians(ang)
+        ang += frac * 360.0
+        a1 = math.radians(ang)
+        x0 = cx + r * math.cos(a0); y0 = cy + r * math.sin(a0)
+        x1 = cx + r * math.cos(a1); y1 = cy + r * math.sin(a1)
+        large = 1 if frac > 0.5 else 0
+        paths += (f"<path d='M{cx:.2f},{cy:.2f} L{x0:.2f},{y0:.2f} "
+                  f"A{r:.2f},{r:.2f} 0 {large} 1 {x1:.2f},{y1:.2f} Z' fill='{c}'/>")
+    return (f"<svg viewBox='0 0 {size} {size}' width='{size}' height='{size}' class='pie' role='img'>{paths}</svg>")
+
+def _stacked_bars(matrix, sevs):
+    """Barras horizontais empilhadas por repo (escala pelo maior total). Estilo Power BI."""
+    maxt = max((m["total"] for m in matrix), default=1) or 1
+    rows = ""
+    for m in matrix:
+        segs = ""
+        for s in sevs:
+            v = m["by_sev"].get(s, 0)
+            if not v:
+                continue
+            w = 100.0 * v / maxt
+            segs += (f"<span class='seg' style='width:{w:.2f}%;background:{_SEV_COLOR.get(s, '#9fb0c8')}' "
+                     f"title='{esc(s)}: {v}'></span>")
+        rows += (f"<div class='barrow'><div class='barlbl mono' title='{esc(m['repo'])}'>\U0001f419 {esc(m['repo'])}</div>"
+                 f"<div class='bartrack'>{segs}</div>"
+                 f"<div class='barval'>{m['total']}</div></div>")
+    return f"<div class='bars'>{rows}</div>"
 
 def _render_devops_section(devops):
-    """Seção estática 🐙 DevOps Remediation: severidade + matriz repo×severidade + categorias."""
+    """Seção 🐙 DevOps Remediation estilo Power BI: donut de severidade + KPIs + barras por repo + findings."""
     if not devops:
         return ""
     sevs = devops["sev_order"]
-    # KPIs de severidade
-    kpis = ""
+    # KPI cards (total + severidades) com cor por classe (tema-aware)
+    kcards = (f"<div class='kpi'><div class='n' style='color:#1fab89'>{devops['total']}</div>"
+              f"<div class='l'>🐙 findings</div></div>")
     for s in sevs:
-        c = _SEV_COLOR.get(s, "#9fb0c8")
-        kpis += (f"<div class='kpi'><div class='n' style='color:{c}'>{devops['by_severity'].get(s,0)}</div>"
-                 f"<div class='l'>{esc(s)}</div></div>")
-    kpis = (f"<div class='kpi'><div class='n' style='color:#7ee2a8'>{devops['total']}</div>"
-            f"<div class='l'>🐙 findings</div></div>") + kpis
-    # categorias
+        cls = _SEV_CLASS.get(s, "sv-informational")
+        kcards += (f"<div class='kpi'><div class='n {cls}'>{devops['by_severity'].get(s,0)}</div>"
+                   f"<div class='l'>{esc(s)}</div></div>")
+    # donut de severidade + legenda
+    donut = _svg_donut([(s, devops['by_severity'].get(s, 0), _SEV_COLOR.get(s, '#9fb0c8')) for s in sevs])
+    donut_legend = "<div class='legend'>" + "".join(
+        f"<span><i class='dot' style='background:{_SEV_COLOR.get(s,'#9fb0c8')}'></i>{esc(s)} · {devops['by_severity'].get(s,0)}</span>"
+        for s in sevs) + "</div>"
     cats = " · ".join(f"{esc(k)}: <b>{v}</b>" for k, v in sorted(devops["by_category"].items(), key=lambda kv: kv[1], reverse=True))
-    # matriz repo × severidade
-    head_cells = "".join(f"<th>{esc(s)}</th>" for s in sevs)
-    rows_html = ""
-    for m in devops["matrix"]:
-        cells = ""
-        for s in sevs:
-            v = m["by_sev"].get(s, 0)
-            col = _SEV_COLOR.get(s, "#9fb0c8") if v else "#3a4a63"
-            cells += f"<td style='color:{col};font-weight:{700 if v else 400}'>{v or '·'}</td>"
-        rows_html += (f"<tr><td class='mono'>🐙 {esc(m['repo'])}</td>"
-                      f"<td style='font-weight:700'>{m['total']}</td>{cells}</tr>")
-    table = (f"<table style='margin-top:10px'><tr><th>Repositório</th><th>Total</th>{head_cells}</tr>"
-             f"{rows_html}</table>")
+    # barras empilhadas por repositório (ordenado por Critical+High)
+    bars = _stacked_bars(devops["matrix"], sevs)
+    bars_legend = "<div class='legend'>" + "".join(
+        f"<span><i class='dot' style='background:{_SEV_COLOR.get(s,'#9fb0c8')}'></i>{esc(s)}</span>" for s in sevs) + "</div>"
     # tabela de findings com referência clicável por finding (top por severidade)
     det = ""
     tf = devops.get("top_findings") or []
     LIMIT = 25
     for f in tf[:LIMIT]:
         s = f.get("severity", "—")
-        c = _SEV_COLOR.get(s, "#9fb0c8")
+        cls = _SEV_CLASS.get(s, "sv-informational")
         link = f.get("link", "") or ""
         if link:
             label = "GitHub ↗" if "github.com" in link else "Portal ↗"
-            link_html = f"<a href='{esc(link)}' target='_blank' style='color:#7cd0ff;white-space:nowrap'>{label}</a>"
+            link_html = f"<a href='{esc(link)}' target='_blank' style='color:var(--accent);white-space:nowrap'>{label}</a>"
         else:
             link_html = "<span class='meta'>—</span>"
-        det += (f"<tr><td style='color:{c};font-weight:700;white-space:nowrap'>{esc(s)}</td>"
+        det += (f"<tr><td class='{cls}' style='font-weight:700;white-space:nowrap'>{esc(s)}</td>"
                 f"<td class='mono'>🐙 {esc(f.get('repo','—'))}</td>"
                 f"<td>{esc(f.get('finding','—'))}</td>"
                 f"<td class='meta' style='white-space:nowrap'>{esc(f.get('category','—'))}</td>"
@@ -986,47 +1054,482 @@ def _render_devops_section(devops):
         "<div class='phase'><h3>🐙 DevOps Remediation — findings do GitHub/Defender DevOps "
         "<span class='meta'>· vulnerabilidades a corrigir (CVE/code/IaC/secret), não postura</span></h3>"
         "<div class='card'>"
-        f"<div class='kpis' style='margin-bottom:10px'>{kpis}</div>"
-        f"<div class='meta'>Por categoria: {cats}</div>"
-        f"{table}"
-        "<div class='meta' style='margin-top:8px'>Matriz ordenada por <b>Critical+High</b> (maior risco no topo) · "
-        "dependency CVEs normalmente têm PR do Dependabot pronto p/ merge.</div>"
+        "<div class='dvgrid'>"
+        f"<div style='text-align:center'>{donut}{donut_legend}</div>"
+        f"<div><div class='kpis'>{kcards}</div>"
+        f"<div class='meta' style='margin-top:10px'>Por categoria: {cats}</div></div>"
+        "</div>"
+        "<h3 style='margin-top:16px'>📊 Por repositório <span class='meta'>· ordenado por Critical+High (maior risco no topo)</span></h3>"
+        f"{bars}{bars_legend}"
+        "<div class='meta' style='margin-top:8px'>dependency CVEs normalmente têm PR do Dependabot pronto p/ merge.</div>"
         f"{det_table}"
+        "</div></div>")
+
+# =============================================================================
+# Pilar XDR — recomendações do Microsoft Defender XDR / Microsoft Secure Score
+# Dataset OPCIONAL (prefetch Mode B): chave "xdr_recommendations".
+# Aceita DOIS shapes:
+#   (A) Microsoft Graph `GET /security/secureScoreControlProfiles` = Recommended Actions
+#       (security.microsoft.com/securescore): title, controlCategory (Identity/Device/Apps/Data),
+#       service, maxScore, actionUrl, controlStateUpdates(state), threats, remediation…
+#   (B) MDE TVM `api.securitycenter.microsoft.com/api/recommendations`: recommendationName,
+#       recommendationCategory, severityScore, exposedMachinesCount, publicExploit…
+# =============================================================================
+_SEV_ORDER = {"critical": 4, "high": 3, "medium": 2, "low": 1, "informational": 0}
+_CAT_COLOR = {"Identity": "#7cd0ff", "Device": "#7ee2a8", "Apps": "#c9a7ff", "Data": "#ffd96b",
+              "Account": "#7cd0ff", "Infrastructure": "#ff9f6b", "Network": "#5ed16a", "—": "#9fb0c8"}
+
+def analyze_xdr_recommendations(data, sub_names=None):
+    """Sumariza Recommended Actions (Graph secureScoreControlProfiles) OU recs TVM (MDE). Unifica em groups/top."""
+    rows = [r for r in as_list(data) if isinstance(r, dict)]
+    if not rows:
+        return None
+
+    def field(r, *keys):
+        p = r.get("properties") if isinstance(r.get("properties"), dict) else {}
+        for k in keys:
+            if r.get(k) not in (None, ""):
+                return r.get(k)
+            if p.get(k) not in (None, ""):
+                return p.get(k)
+        return None
+
+    # Detecta shape Recommended Actions (Secure Score control profiles)
+    is_actions = any(
+        (r.get("controlCategory") or r.get("actionType") or r.get("controlStateUpdates")
+         or ("maxScore" in r and "severityScore" not in r)) for r in rows)
+
+    if is_actions:
+        recs = []
+        for r in rows:
+            name = str(field(r, "title", "controlName", "displayName", "name", "id") or "—")
+            if len(name) > 130:
+                name = _short_finding(name, 130)
+            status = ""
+            csu = field(r, "controlStateUpdates")
+            if isinstance(csu, list) and csu:
+                last = csu[-1] if isinstance(csu[-1], dict) else {}
+                status = str(last.get("state") or last.get("assignedTo") or "")
+            status = (status or str(field(r, "implementationStatus", "state") or "To address")).strip() or "To address"
+            try:
+                pts = round(float(field(r, "maxScore", "score") or 0), 1)
+            except (TypeError, ValueError):
+                pts = 0.0
+            threats = field(r, "threats") or []
+            recs.append({
+                "name": name,
+                "category": str(field(r, "controlCategory", "category") or "—"),
+                "service": str(field(r, "service", "actionType") or "—"),
+                "status": status,
+                "points": pts,
+                "link": str(field(r, "actionUrl", "remediationUrl", "link") or ""),
+                "threats": ", ".join(str(t) for t in threats) if isinstance(threats, list) else str(threats),
+                "severity": "", "exposed": 0, "exploit": False,
+            })
+        by_cat, by_status = {}, {}
+        for r in recs:
+            by_cat[r["category"]] = by_cat.get(r["category"], 0) + 1
+            by_status[r["status"]] = by_status.get(r["status"], 0) + 1
+        groups = [(c, n, _CAT_COLOR.get(c, "#9fb0c8")) for c, n in sorted(by_cat.items(), key=lambda kv: kv[1], reverse=True)]
+        top = sorted(recs, key=lambda r: r["points"], reverse=True)
+        return {
+            "total": len(recs), "mode": "actions", "groups": groups, "group_label": "Categoria",
+            "by_category": by_cat, "by_status": by_status,
+            "points_total": round(sum(r["points"] for r in recs), 1),
+            "top": top,
+        }
+
+    # ---- Shape TVM (severidade) ----
+    def sev_of(r):
+        s = field(r, "severity", "severityLevel")
+        if s:
+            return str(s).capitalize()
+        try:
+            sc = float(field(r, "severityScore", "cvssScore") or 0)
+        except (TypeError, ValueError):
+            sc = 0.0
+        return "Critical" if sc >= 9 else "High" if sc >= 7 else "Medium" if sc >= 4 else "Low" if sc > 0 else "—"
+
+    recs = []
+    for r in rows:
+        name = str(field(r, "recommendationName", "displayName", "title", "name") or "—")
+        if len(name) > 130:
+            name = _short_finding(name, 130)
+        recs.append({
+            "name": name,
+            "category": str(field(r, "recommendationCategory", "category", "subCategory") or "—"),
+            "severity": sev_of(r),
+            "exposed": int(field(r, "exposedMachinesCount", "exposedDevicesCount", "exposedAssetsCount") or 0),
+            "exploit": bool(field(r, "publicExploit", "hasExploit")),
+            "weaknesses": int(field(r, "weaknesses", "cveCount") or 0),
+            "link": str(field(r, "recommendationLink", "portalLink", "link") or ""),
+            "service": "", "status": "", "points": 0,
+        })
+    if not recs:
+        return None
+    by_sev, by_cat = {}, {}
+    for r in recs:
+        by_sev[r["severity"]] = by_sev.get(r["severity"], 0) + 1
+        by_cat[r["category"]] = by_cat.get(r["category"], 0) + 1
+    sev_order = sorted(by_sev.items(), key=lambda kv: _SEV_ORDER.get(kv[0].lower(), -1), reverse=True)
+    sevs = [s for s, _ in sev_order]
+    groups = [(s, by_sev.get(s, 0), _SEV_COLOR.get(s, "#9fb0c8")) for s in sevs]
+    top = sorted(recs, key=lambda r: (_SEV_ORDER.get(r["severity"].lower(), -1), r["exposed"], r["weaknesses"]), reverse=True)
+    return {
+        "total": len(recs), "mode": "severity", "groups": groups, "group_label": "Severidade",
+        "by_severity": dict(sev_order), "by_category": by_cat, "sev_order": sevs,
+        "exposed_total": sum(r["exposed"] for r in recs),
+        "exploit_total": sum(1 for r in recs if r["exploit"]),
+        "top": top,
+    }
+
+def _count_bars(pairs, color="var(--accent)"):
+    """Barras horizontais simples (1 cor) escaladas pelo maior valor. pairs = [(label, count)]."""
+    maxv = max((v for _, v in pairs), default=1) or 1
+    rows = ""
+    for label, v in pairs:
+        w = 100.0 * v / maxv
+        rows += (f"<div class='barrow'><div class='barlbl' title='{esc(str(label))}'>{esc(str(label))}</div>"
+                 f"<div class='bartrack'><span class='seg' style='width:{w:.2f}%;background:{color}'></span></div>"
+                 f"<div class='barval'>{v}</div></div>")
+    return f"<div class='bars'>{rows}</div>"
+
+def _render_xdr_section(xdr):
+    """Página 🛡️ Defender XDR / Recommended Actions estilo Power BI: pizza/donut + KPIs + barras + tabela."""
+    if not xdr:
+        return ""
+    groups = xdr.get("groups", [])
+    donut = _svg_donut([(g, v, c) for g, v, c in groups])
+    donut_legend = "<div class='legend'>" + "".join(
+        f"<span><i class='dot' style='background:{c}'></i>{esc(g)} · {v}</span>" for g, v, c in groups) + "</div>"
+    bars = _count_bars(sorted(xdr["by_category"].items(), key=lambda kv: kv[1], reverse=True))
+
+    if xdr.get("mode") == "actions":
+        kcards = (f"<div class='kpi'><div class='n' style='color:#1fab89'>{xdr['total']}</div>"
+                  f"<div class='l'>🛡️ recommended actions</div></div>")
+        for g, v, c in groups[:5]:
+            kcards += f"<div class='kpi'><div class='n' style='color:{c}'>{v}</div><div class='l'>{esc(g)}</div></div>"
+        kcards += (f"<div class='kpi'><div class='n' style='color:#9ae6b4'>{xdr.get('points_total',0)}</div>"
+                   f"<div class='l'>🎯 pontos de melhoria</div></div>")
+        det = ""
+        for r in xdr["top"][:25]:
+            link = r.get("link", "") or ""
+            link_html = (f"<a href='{esc(link)}' target='_blank' style='color:var(--accent);white-space:nowrap'>Portal ↗</a>"
+                         if link else "<span class='meta'>—</span>")
+            det += (f"<tr><td>{esc(r['name'])}</td>"
+                    f"<td class='meta' style='white-space:nowrap'>{esc(r.get('service','—'))}</td>"
+                    f"<td class='meta' style='white-space:nowrap'>{esc(r['category'])}</td>"
+                    f"<td class='meta' style='white-space:nowrap'>{esc(r.get('status','—'))}</td>"
+                    f"<td style='text-align:right;font-weight:700'>{r.get('points',0)}</td><td>{link_html}</td></tr>")
+        table = ("<h3 style='margin-top:16px'>🔧 Recommended Actions <span class='meta'>· ordenadas por pontos de melhoria</span></h3>"
+                 "<table><tr><th>Ação recomendada</th><th>Serviço</th><th>Categoria</th><th>Status</th><th>Pontos</th><th>Referência</th></tr>"
+                 f"{det}</table>")
+        subtitle = "· Microsoft Secure Score — Recommended Actions (security.microsoft.com/securescore)"
+        bars_title = "📊 Por categoria (Identity / Device / Apps / Data)"
+    else:
+        kcards = (f"<div class='kpi'><div class='n' style='color:#1fab89'>{xdr['total']}</div>"
+                  f"<div class='l'>🛡️ recomendações</div></div>")
+        for g, v, c in groups:
+            kcards += f"<div class='kpi'><div class='n' style='color:{c}'>{v}</div><div class='l'>{esc(g)}</div></div>"
+        kcards += (f"<div class='kpi'><div class='n' style='color:#ff6b6b'>{xdr.get('exploit_total',0)}</div>"
+                   f"<div class='l'>💥 exploit público</div></div>"
+                   f"<div class='kpi'><div class='n' style='color:#ffd96b'>{xdr.get('exposed_total',0)}</div>"
+                   f"<div class='l'>🖥️ máquinas expostas</div></div>")
+        det = ""
+        for r in xdr["top"][:25]:
+            cls = _SEV_CLASS.get(r["severity"], "sv-informational")
+            ex = "💥 sim" if r["exploit"] else "<span class='meta'>—</span>"
+            link = r.get("link", "") or ""
+            link_html = (f"<a href='{esc(link)}' target='_blank' style='color:var(--accent);white-space:nowrap'>Defender ↗</a>"
+                         if link else "<span class='meta'>—</span>")
+            det += (f"<tr><td class='{cls}' style='font-weight:700;white-space:nowrap'>{esc(r['severity'])}</td>"
+                    f"<td>{esc(r['name'])}</td>"
+                    f"<td class='meta' style='white-space:nowrap'>{esc(r['category'])}</td>"
+                    f"<td style='text-align:right;font-weight:700'>{r['exposed']}</td>"
+                    f"<td style='white-space:nowrap'>{ex}</td><td>{link_html}</td></tr>")
+        table = ("<h3 style='margin-top:16px'>🔧 Recomendações <span class='meta'>· por severidade e máquinas expostas</span></h3>"
+                 "<table><tr><th>Sev</th><th>Recomendação</th><th>Categoria</th><th>Máquinas</th><th>Exploit</th><th>Referência</th></tr>"
+                 f"{det}</table>")
+        subtitle = "· Vulnerability Management / Exposure — priorize por exposição e exploit"
+        bars_title = "📊 Por categoria"
+
+    return (
+        "<div class='phase'><h3>🛡️ Recomendações do Defender XDR "
+        f"<span class='meta'>{subtitle}</span></h3>"
+        "<div class='card'>"
+        "<div class='dvgrid'>"
+        f"<div style='text-align:center'>{donut}{donut_legend}</div>"
+        f"<div><div class='kpis'>{kcards}</div></div>"
+        "</div>"
+        f"<h3 style='margin-top:16px'>{bars_title}</h3>"
+        f"{bars}"
+        f"{table}"
+        "</div></div>")
+
+# =============================================================================
+# Microsoft Secure Score (M365/Entra) — dataset OPCIONAL (Graph /security/secureScores)
+# + cards de score (estilo Power BI) e Resumo Executivo
+# =============================================================================
+def analyze_m365_secure_score(data):
+    """Microsoft Secure Score (Entra ID + Microsoft 365) via Graph /security/secureScores. Opcional."""
+    rows = as_list(data)
+    if not rows:
+        return None
+    r = rows[0] if isinstance(rows[0], dict) else {}
+    p = r.get("properties") if isinstance(r.get("properties"), dict) else r
+    try:
+        cur = float(p.get("currentScore"))
+        mx = float(p.get("maxScore"))
+    except (TypeError, ValueError):
+        return None
+    if mx <= 0:
+        return None
+    return {"pct": round(100.0 * cur / mx, 1), "current": round(cur, 1),
+            "max": round(mx, 1), "controls": len(p.get("controlScores") or [])}
+
+def _score_card(icon, title, big, big_sub, rows, onclick="", pie=""):
+    """Card de score estilo Power BI: ícone + título + número grande + pizza + sub-métricas. rows=[(label,value,color)]."""
+    click = (" onclick=\"" + onclick + "\" style=\"cursor:pointer\"") if onclick else ""
+    rh = "".join(f"<div class='scrow'><span>{esc(l)}</span><b style='color:{c}'>{esc(str(v))}</b></div>"
+                 for l, v, c in rows)
+    big_lbl = (f"<div class='scbiglbl'>{esc(big_sub)}</div>" if big_sub else "")
+    pie_html = (f"<div class='scpie'>{pie}</div>" if pie else "")
+    return (f"<div class='scorecard'{click}><div class='schead'><span class='scic'>{icon}</span>"
+            f"<span class='sctitle'>{esc(title)}</span></div>"
+            f"<div class='sctop'><div class='scnum'><div class='scbig'>{esc(str(big))}</div>{big_lbl}</div>{pie_html}</div>"
+            f"<div class='scrows'>{rh}</div></div>")
+
+def _exec_summary_html(ctx):
+    """Resumo executivo consolidado (narrativa server-side a partir do ctx)."""
+    n = len(ctx["items"])
+    ph = ctx.get("phases", {})
+    safe, low, med, high = (len(ph.get(k, [])) for k in ("safe", "low", "medium", "high"))
+    ss, ss_pot, ss_delta = ctx.get("secure_score"), ctx.get("secure_score_potential"), ctx.get("secure_score_delta")
+    mcsb, xdr, devops, m365 = ctx.get("mcsb"), ctx.get("xdr"), ctx.get("devops"), ctx.get("m365")
+    savings = ctx.get("savings_total") or 0
+    # pizza de VOLUME de recomendações/ações por origem
+    ov = []
+    if len(ctx.get("advisor", [])):
+        ov.append(("Advisor", len(ctx["advisor"]), "#7cd0ff"))
+    if len(ctx.get("mdc", [])):
+        ov.append(("Defender for Cloud", len(ctx["mdc"]), "#c9a7ff"))
+    if xdr:
+        ov.append(("Defender XDR", xdr["total"], "#ffd96b"))
+    if devops:
+        ov.append(("DevOps", devops["total"], "#7ee2a8"))
+    pie_block = ""
+    if ov:
+        pie = _svg_pie(ov, 150)
+        legend = "".join(f"<span><i class='dot' style='background:{c}'></i>{esc(l)} · <b>{v}</b></span>" for l, v, c in ov)
+        total_actions = sum(v for _, v, _ in ov)
+        pie_block = ("<div class='card' style='margin-bottom:14px'><h3 style='margin-top:0'>Volume de recomendações / ações por origem "
+                     f"<span class='meta'>· total {total_actions}</span></h3>"
+                     "<div style='display:flex;gap:20px;align-items:center;flex-wrap:wrap'>"
+                     f"<div>{pie}</div><div class='legend' style='justify-content:flex-start'>{legend}</div></div></div>")
+    b = []
+    sav_txt = (f" Economia potencial <b style='color:#5ed16a'>−US$ {savings:,.0f}/ano</b>." if savings else "")
+    b.append(f"<li><b>Plano de remediação:</b> {n} recomendações — 🟢 {safe} quick wins · 🟡🟠 {low+med} em janela · 🔴 {high} exigem aprovação.{sav_txt}</li>")
+    if m365:
+        b.append(f"<li><b>Microsoft Secure Score:</b> <b>{m365['pct']}%</b> (Entra ID + Microsoft 365).</li>")
+    if ss is not None:
+        ptxt = (f" → potencial <b style='color:#9ae6b4'>{ss_pot}%</b> (+{ss_delta} pp se remediar tudo)" if ss_pot is not None else "")
+        b.append(f"<li><b>Defender for Cloud — Secure Score:</b> atual <b>{ss}%</b>{ptxt}.</li>")
+    if mcsb:
+        b.append(f"<li><b>MCSB Compliance:</b> <b>{mcsb.get('compliance_pct')}%</b> de conformidade — {mcsb.get('passed',0)} passed / <b style='color:#ff6b6b'>{mcsb.get('failed',0)} failed</b>.</li>")
+    if xdr:
+        if xdr.get("mode") == "actions":
+            b.append(f"<li><b>Defender XDR — Recommended Actions:</b> {xdr['total']} ações de melhoria do Microsoft Secure Score (<b style='color:#5ed16a'>{xdr.get('points_total',0)}</b> pontos de oportunidade).</li>")
+        else:
+            b.append(f"<li><b>Defender XDR:</b> {xdr['total']} recomendações — <b style='color:#ff6b6b'>{xdr.get('exploit_total',0)}</b> com exploit público · {xdr.get('exposed_total',0)} máquinas expostas.</li>")
+    if devops:
+        c = devops['by_severity'].get('Critical', 0)
+        h = devops['by_severity'].get('High', 0)
+        b.append(f"<li><b>DevOps Remediation:</b> {devops['total']} findings — <b style='color:#ff4d4d'>{c} Critical</b> / <b style='color:#ff6b6b'>{h} High</b>.</li>")
+    prio = ("Prioridade sugerida: 🔴 aprovações + Critical/High (XDR/DevOps) → 🟢 quick wins do Secure Score → "
+            "controles MCSB em falha.")
+    return (pie_block + "<div class='card'><h3 style='margin-top:0'>Visão consolidada</h3>"
+            "<ul style='margin:6px 0 0;padding-left:18px;line-height:1.9'>" + "".join(b) + "</ul>"
+            f"<div class='meta' style='margin-top:10px'>{prio}</div></div>")
+
+_MDC_ORDER = {"critical": 4, "high": 3, "medium": 2, "low": 1, "informational": 0}
+
+def _exec_critical_tables(ctx):
+    """Tabelas de 'recomendações/controles mais críticos' por pilar (estilo Executive Summary do dashboard)."""
+    blocks = []
+    mdc = ctx.get("mdc", [])
+    if mdc:
+        top = sorted(mdc, key=lambda it: _MDC_ORDER.get(str(it.get("priority", "")).lower(), -1), reverse=True)[:6]
+        rows = "".join(
+            f"<tr><td class='{_SEV_CLASS.get(str(it.get('priority','—')).capitalize(),'sv-informational')}' "
+            f"style='font-weight:700;white-space:nowrap'>{esc(str(it.get('priority','—')).capitalize())}</td>"
+            f"<td>{esc(it.get('title','—'))}</td></tr>" for it in top)
+        blocks.append(("🛡️ Defender for Cloud — críticas", "<table><tr><th>Sev</th><th>Recomendação</th></tr>" + rows + "</table>"))
+    mcsb = ctx.get("mcsb")
+    if mcsb and mcsb.get("failing_controls"):
+        fc = mcsb["failing_controls"][:6]
+        rows = "".join(
+            f"<tr><td class='mono'>{esc(x.get('id',''))}</td><td>{esc(x.get('name',''))}</td>"
+            f"<td style='color:#ff6b6b;font-weight:700;text-align:right'>{x.get('failed',0)}</td></tr>" for x in fc)
+        blocks.append(("📋 MCSB — controles mais falhando", "<table><tr><th>Controle</th><th>Nome</th><th>Falhas</th></tr>" + rows + "</table>"))
+    xdr = ctx.get("xdr")
+    if xdr and xdr.get("top"):
+        if xdr.get("mode") == "actions":
+            rows = "".join(
+                f"<tr><td>{esc(r['name'])}</td><td class='meta' style='white-space:nowrap'>{esc(r.get('category','—'))}</td>"
+                f"<td style='text-align:right;font-weight:700'>{r.get('points',0)}</td></tr>" for r in xdr["top"][:6])
+            blocks.append(("🛡️ Defender XDR — recommended actions", "<table><tr><th>Ação</th><th>Categoria</th><th>Pontos</th></tr>" + rows + "</table>"))
+        else:
+            rows = "".join(
+                f"<tr><td class='{_SEV_CLASS.get(r['severity'],'sv-informational')}' style='font-weight:700;white-space:nowrap'>{esc(r['severity'])}</td>"
+                f"<td>{esc(r['name'])}</td><td style='text-align:right;font-weight:700'>{r['exposed']}</td></tr>" for r in xdr["top"][:6])
+            blocks.append(("🛡️ Defender XDR — críticas", "<table><tr><th>Sev</th><th>Recomendação</th><th>Máq.</th></tr>" + rows + "</table>"))
+    devops = ctx.get("devops")
+    if devops and devops.get("top_findings"):
+        rows = "".join(
+            f"<tr><td class='{_SEV_CLASS.get(f.get('severity','—'),'sv-informational')}' style='font-weight:700;white-space:nowrap'>{esc(f.get('severity','—'))}</td>"
+            f"<td>{esc(f.get('finding','—'))}</td></tr>" for f in devops["top_findings"][:6])
+        blocks.append(("🐙 DevOps — findings críticos", "<table><tr><th>Sev</th><th>Finding</th></tr>" + rows + "</table>"))
+    if not blocks:
+        return ""
+    cards = "".join(f"<div class='card'><h3 style='margin-top:0;font-size:13px'>{t}</h3>{tbl}</div>" for t, tbl in blocks)
+    return ("<h3 style='margin-top:18px'>Recomendações / controles mais críticos</h3>"
+            "<div class='critgrid'>" + cards + "</div>")
+
+def _render_mdc_section(ctx):
+    """Página 🛡️ Defender for Cloud estilo Power BI: pizza de severidade + KPIs + tabela de recomendações."""
+    mdc = ctx.get("mdc", [])
+    if not mdc:
+        return ""
+    ss, ss_pot = ctx.get("secure_score"), ctx.get("secure_score_potential")
+    by_sev = {}
+    for it in mdc:
+        s = str(it.get("priority", "—")).capitalize()
+        by_sev[s] = by_sev.get(s, 0) + 1
+    sevs = [s for s in ["Critical", "High", "Medium", "Low", "Informational"] if by_sev.get(s)]
+    pie = _svg_pie([(s, by_sev.get(s, 0), _SEV_COLOR.get(s, '#9fb0c8')) for s in sevs], 160)
+    legend = "<div class='legend'>" + "".join(
+        f"<span><i class='dot' style='background:{_SEV_COLOR.get(s,'#9fb0c8')}'></i>{esc(s)} · {by_sev.get(s,0)}</span>"
+        for s in sevs) + "</div>"
+    kc = (f"<div class='kpi'><div class='n' style='color:#1fab89'>{len(mdc)}</div><div class='l'>recomendações</div></div>")
+    for s in sevs:
+        kc += f"<div class='kpi'><div class='n {_SEV_CLASS.get(s,'sv-informational')}'>{by_sev.get(s,0)}</div><div class='l'>{esc(s)}</div></div>"
+    if ss is not None:
+        kc += f"<div class='kpi'><div class='n' style='color:#9fb0c8'>{ss}%</div><div class='l'>🛡️ Secure Score</div></div>"
+        if ss_pot is not None:
+            kc += f"<div class='kpi'><div class='n' style='color:#9ae6b4'>{ss_pot}%</div><div class='l'>🎯 potencial</div></div>"
+    top = sorted(mdc, key=lambda it: _MDC_ORDER.get(str(it.get("priority", "")).lower(), -1), reverse=True)[:25]
+    det = ""
+    for it in top:
+        s = str(it.get("priority", "—")).capitalize()
+        link = it.get("portal_link", "") or ""
+        link_html = (f"<a href='{esc(link)}' target='_blank' style='color:var(--accent);white-space:nowrap'>Portal ↗</a>"
+                     if link else "<span class='meta'>—</span>")
+        det += (f"<tr><td class='{_SEV_CLASS.get(s,'sv-informational')}' style='font-weight:700;white-space:nowrap'>{esc(s)}</td>"
+                f"<td>{esc(it.get('title','—'))}</td>"
+                f"<td class='mono'>{esc(it.get('resource_name','—'))}</td>"
+                f"<td>{link_html}</td></tr>")
+    return (
+        "<div class='phase'><h3>🛡️ Defender for Cloud — Secure Score "
+        "<span class='meta'>· security assessments (postura de nuvem)</span></h3>"
+        "<div class='card'>"
+        "<div class='dvgrid'>"
+        f"<div style='text-align:center'>{pie}{legend}</div>"
+        f"<div><div class='kpis'>{kc}</div></div>"
+        "</div>"
+        "<h3 style='margin-top:16px'>🔧 Recomendações <span class='meta'>· por severidade</span></h3>"
+        "<table><tr><th>Sev</th><th>Recomendação</th><th>Recurso</th><th>Referência</th></tr>"
+        f"{det}</table>"
         "</div></div>")
 
 # CSS + JS do relatório interativo (string normal, SEM f-string → não precisa escapar {}).
 _REPORT_CSS = """
-  body{margin:0;background:#0b0f17;color:#e7edf5;font:14px/1.5 -apple-system,Segoe UI,Roboto,sans-serif}
+  :root{
+    --bg:#0b0f17;--fg:#e7edf5;--muted:#9fb0c8;--card:#0d1422;--border:#1e2a3f;
+    --inset:#0b0f17;--th:#111a2b;--hero1:#121a2b;--hero2:#0d1422;--accent:#7cd0ff;
+    --btn:#16223a;--btn-bd:#2a3c5a;--btn-fg:#cfe0f5;--shadow:rgba(0,0,0,.25);
+    --sev-critical:#ff4d4d;--sev-high:#ff6b6b;--sev-medium:#ffd96b;--sev-low:#7cd0ff;--sev-info:#9fb0c8;
+  }
+  :root[data-theme="light"]{
+    --bg:#eef1f6;--fg:#1b2733;--muted:#5b6b80;--card:#ffffff;--border:#dce3ec;
+    --inset:#eef2f7;--th:#f4f7fb;--hero1:#ffffff;--hero2:#e7f0fb;--accent:#0a66c2;
+    --btn:#eef2f7;--btn-bd:#cbd6e4;--btn-fg:#1b2733;--shadow:rgba(20,40,80,.10);
+    --sev-critical:#d62828;--sev-high:#e85d04;--sev-medium:#b8860b;--sev-low:#0a66c2;--sev-info:#5b6b80;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;transition:background .2s,color .2s}
   .wrap{max-width:1180px;margin:0 auto;padding:24px}
-  .hero{background:linear-gradient(135deg,#121a2b,#0d1422);border:1px solid #1e2a3f;border-radius:16px;padding:22px 24px;margin-bottom:14px}
-  .hero h1{margin:0 0 10px;font-size:20px}
+  .hero{background:linear-gradient(135deg,var(--hero1),var(--hero2));border:1px solid var(--border);border-radius:16px;padding:22px 24px;margin-bottom:14px;box-shadow:0 2px 8px var(--shadow)}
+  .hero h1{margin:0;font-size:20px}
+  .herotop{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:10px}
   .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(118px,1fr));gap:10px;margin-top:6px}
-  .kpi{background:#0d1422;border:1px solid #1e2a3f;border-radius:10px;padding:10px;text-align:center}
-  .kpi .n{font-size:20px;font-weight:800} .kpi .l{font-size:11px;color:#9fb0c8;margin-top:2px}
+  .kpi{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:12px 10px;text-align:center;box-shadow:0 1px 3px var(--shadow)}
+  .kpi .n{font-size:22px;font-weight:800;line-height:1.1} .kpi .l{font-size:11px;color:var(--muted);margin-top:3px}
   h3{font-size:14px;margin:18px 0 8px}
-  table{width:100%;border-collapse:collapse;font-size:13px;background:#0d1422;border:1px solid #1e2a3f;border-radius:10px;overflow:hidden}
-  th,td{text-align:left;padding:8px 10px;border-bottom:1px solid #182337;vertical-align:top}
-  th{background:#111a2b;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:#9fb0c8}
+  table{width:100%;border-collapse:collapse;font-size:13px;background:var(--card);border:1px solid var(--border);border-radius:10px;overflow:hidden}
+  th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--border);vertical-align:top}
+  th{background:var(--th);font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
   .mono{font-family:ui-monospace,Consolas,monospace;font-size:12px}
-  .casc{color:#ffd96b;font-size:12px;margin-top:4px}
+  .casc{color:#e0a800;font-size:12px;margin-top:4px}
   .amp{color:#ff9f6b;font-size:12px;margin-top:3px}
-  .mtags{margin-top:5px;font-size:11px;color:#9fb0c8}
+  .mtags{margin-top:5px;font-size:11px;color:var(--muted)}
   .mitre{display:inline-block;background:#2a1a3a;border:1px solid #4a2d6b;color:#c9a7ff;border-radius:5px;padding:1px 6px;margin:0 4px 2px 0;font-family:ui-monospace,Consolas,monospace;font-size:11px}
-  .owner{color:#7cd0ff;font-size:11px;margin-top:4px}
+  .owner{color:var(--accent);font-size:11px;margin-top:4px}
   .devops{display:inline-block;background:#10261b;border:1px solid #1f5135;color:#7ee2a8;border-radius:5px;padding:1px 7px;margin-top:4px;font-size:11px}
-  .phase{margin-bottom:14px} .meta{color:#9fb0c8;font-size:12px}
-  .card{background:#0d1422;border:1px solid #1e2a3f;border-radius:12px;padding:14px}
-  .filters{background:#0d1422;border:1px solid #1e2a3f;border-radius:12px;padding:12px 14px;margin-bottom:16px}
+  .phase{margin-bottom:14px} .meta{color:var(--muted);font-size:12px}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:14px;box-shadow:0 1px 3px var(--shadow)}
+  .filters{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:12px 14px;margin-bottom:16px;box-shadow:0 1px 3px var(--shadow)}
   .filters .frow{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px}
   .fbox{min-width:0}
-  .flabel{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:#9fb0c8;margin-bottom:5px;display:flex;justify-content:space-between}
-  .fopts{max-height:120px;overflow:auto;background:#0b0f17;border:1px solid #1e2a3f;border-radius:8px;padding:6px 8px}
+  .flabel{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);margin-bottom:5px;display:flex;justify-content:space-between}
+  .fopts{max-height:120px;overflow:auto;background:var(--inset);border:1px solid var(--border);border-radius:8px;padding:6px 8px}
   .fopts label{display:flex;align-items:center;gap:6px;font-size:12px;padding:2px 0;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .fopts input{accent-color:#7cd0ff}
+  .fopts input{accent-color:var(--accent)}
   .ftop{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;gap:10px;flex-wrap:wrap}
-  .btn{background:#16223a;border:1px solid #2a3c5a;color:#cfe0f5;border-radius:8px;padding:6px 12px;font-size:12px;cursor:pointer}
-  .btn:hover{background:#1d2c49}
-  @media(max-width:680px){.kpis{grid-template-columns:repeat(3,1fr)}}
+  .btn{background:var(--btn);border:1px solid var(--btn-bd);color:var(--btn-fg);border-radius:8px;padding:6px 12px;font-size:12px;cursor:pointer}
+  .btn:hover{filter:brightness(1.08)}
+  .sv-critical{color:var(--sev-critical)} .sv-high{color:var(--sev-high)} .sv-medium{color:var(--sev-medium)} .sv-low{color:var(--sev-low)} .sv-informational{color:var(--sev-info)}
+  .dvgrid{display:grid;grid-template-columns:190px 1fr;gap:20px;align-items:center}
+  @media(max-width:620px){.dvgrid{grid-template-columns:1fr}}
+  .donut .donut-num{font-size:30px;font-weight:800;fill:var(--fg)} .donut .donut-lbl{font-size:11px;fill:var(--muted)}
+  .legend{display:flex;flex-wrap:wrap;gap:10px;margin-top:8px;justify-content:center}
+  .legend span{font-size:11px;color:var(--muted);display:flex;align-items:center;gap:5px}
+  .dot{width:10px;height:10px;border-radius:3px;display:inline-block}
+  .bars{margin-top:8px} .barrow{display:grid;grid-template-columns:170px 1fr 42px;gap:10px;align-items:center;margin:6px 0}
+  .barlbl{font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .bartrack{display:flex;height:16px;border-radius:6px;overflow:hidden;background:var(--inset);border:1px solid var(--border)}
+  .seg{height:100%} .barval{font-size:12px;font-weight:700;text-align:right}
+  .topbar{position:sticky;top:0;z-index:10;display:flex;justify-content:space-between;align-items:center;gap:12px;background:var(--card);border:1px solid var(--border);border-radius:14px;padding:9px 14px;margin-bottom:16px;box-shadow:0 2px 8px var(--shadow);flex-wrap:wrap}
+  .brand{display:flex;align-items:center;gap:9px;cursor:pointer;font-weight:800;font-size:15px}
+  .brand .mk{width:28px;height:28px;display:inline-flex}
+  .navlinks{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+  .navbtn{background:transparent;border:1px solid transparent;color:var(--muted);border-radius:8px;padding:6px 10px;font-size:12px;cursor:pointer}
+  .navbtn:hover{background:var(--inset);color:var(--fg)}
+  .navbtn.active{background:var(--inset);color:var(--fg);border-color:var(--border);font-weight:700}
+  .page{animation:fade .18s ease}
+  @keyframes fade{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+  .home-hero{text-align:center;padding:24px 16px 4px}
+  .home-hero .logo{width:74px;height:74px;margin:0 auto 12px;display:inline-flex}
+  .home-hero h1{font-size:24px;margin:0 0 6px}
+  .navgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px;margin-top:10px}
+  .navcard{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:18px;cursor:pointer;box-shadow:0 1px 3px var(--shadow);transition:transform .12s,box-shadow .12s,border-color .12s;display:flex;flex-direction:column;gap:3px}
+  .navcard:hover{transform:translateY(-3px);box-shadow:0 8px 20px var(--shadow);border-color:var(--accent)}
+  .navcard .ic{font-size:26px} .navcard b{font-size:15px} .navcard .big{font-size:26px;font-weight:800;margin-top:2px} .navcard span{color:var(--muted);font-size:12px}
+  .back{margin-bottom:12px} h2{font-size:18px;margin:4px 0 12px}
+  .scoregrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:16px;margin-top:8px}
+  .scorecard{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:18px 20px;box-shadow:0 1px 3px var(--shadow);transition:transform .12s,box-shadow .12s,border-color .12s}
+  .scorecard[onclick]:hover{transform:translateY(-3px);box-shadow:0 8px 20px var(--shadow);border-color:var(--accent)}
+  .schead{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:13px;font-weight:600;min-height:38px}
+  .scic{font-size:20px}
+  .sctop{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:4px}
+  .scnum{min-width:0}
+  .scbig{font-size:38px;font-weight:800;text-align:left;margin:0;letter-spacing:-1px;line-height:1.05}
+  .scbiglbl{text-align:left;color:var(--muted);font-size:12px;margin-top:2px}
+  .scpie{flex-shrink:0} .pie{display:block}
+  .scrows{margin-top:10px;border-top:1px solid var(--border);padding-top:8px}
+  .scrow{display:flex;justify-content:space-between;align-items:center;font-size:13px;padding:3px 0}
+  .scrow span{color:var(--muted)}
+  .critgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px;margin-top:8px}
+  @media(max-width:680px){.kpis{grid-template-columns:repeat(3,1fr)}.barrow{grid-template-columns:110px 1fr 34px}}
 """
 
 _REPORT_JS = """
@@ -1045,11 +1548,18 @@ function aggSecure(subs){let cur=0,max=0,pot=0,has=false;subs.forEach(sid=>{cons
 function aggMcsb(subs){let p=0,f=0,sk=0,un=0,has=false;subs.forEach(sid=>{const s=DATA.subs[sid];if(s&&s.mcsb){has=true;p+=s.mcsb.passed;f+=s.mcsb.failed;sk+=s.mcsb.skipped;un+=s.mcsb.unsupported;}});if(!has)return null;const a=p+f;return {passed:p,failed:f,skipped:sk,unsupported:un,pct:a>0?Math.round(1000*p/a)/10:null};}
 function rowHtml(it){let cs=it.cost_delta?`<span style="color:#5ed16a">${esc(it.cost_delta)}</span>`:"";let ci=it.cost_increase?`<span style="color:#ff6b6b">${esc(it.cost_increase)}</span>`:"";let cost=(cs&&ci)?cs+"<br/>"+ci:(cs||ci||"—");let ss=it.score_impact_label?`<span style="color:#9ae6b4;font-weight:700">${esc(it.score_impact_label)}</span><div class="meta" style="font-size:11px">${esc(it.score_control)}</div>`:"—";let title=esc(it.title);if(it.portal_link){title=`<a href="${esc(it.portal_link)}" style="color:#e7edf5;text-decoration:none;border-bottom:1px dotted #4a5a72">${title}</a> <a href="${esc(it.portal_link)}" title="Abrir no portal" style="color:#7cd0ff;text-decoration:none">🔗</a>`;}const tags=(it.tactics||[]).concat(it.techniques||[]);let mitre=tags.length?`<div class="mtags">🎯 ${tags.slice(0,4).map(m=>`<span class="mitre">${esc(m)}</span>`).join("")}</div>`:"";let owner=it.owner?`<div class="owner">👤 ${esc(it.owner)}</div>`:"";let casc=it.cascade?`<div class="casc">↳ ${esc(it.cascade)}</div>`:"";let dvo=it.devops_repo?`<div class="devops">🐙 ${esc(it.devops_provider||"DevOps")} · ${esc(it.devops_repo)}</div>`:"";let src=`<span style="color:${it.source==="Advisor"?"#7cd0ff":"#c9a7ff"};font-weight:700">${esc(it.source)}</span>`;let subn=it.subscription_name&&it.subscription_name!=="—"?`<div class="meta" style="font-size:11px">${esc(it.subscription_name)} / ${esc(it.resource_group)}</div>`:"";return `<tr><td>${src}</td><td>${title}${dvo}${mitre}${owner}${casc}</td><td>${esc(it.category)}</td><td>${esc(it.priority)}</td><td>${ss}</td><td class="mono">${esc(it.resource_name)}${subn}</td><td>${cost}</td></tr>`;}
 function renderPlan(items){const by={safe:[],low:[],medium:[],high:[]};items.forEach(it=>{(by[it.risk]||by.low).push(it);});let html="";PHASES.forEach(lvl=>{const rows=by[lvl];if(!rows.length)return;const m=PHMETA[lvl]||{};html+=`<div class="phase"><h3>${esc(m.emoji||"")} ${esc(m.label||lvl)} <span class="meta">· ${esc(m.action||"")} · ${rows.length} item(ns)</span></h3><table><tr><th>Fonte</th><th>Recomendação</th><th>Categoria</th><th>Prioridade</th><th>Impacto SS</th><th>Recurso</th><th>Custo</th></tr>${rows.map(rowHtml).join("")}</table></div>`;});document.getElementById("plan").innerHTML=html||`<div class="card meta">Nenhuma recomendação para os filtros selecionados.</div>`;}
-function renderKpis(items,subs){const c={safe:0,low:0,medium:0,high:0};let sav=0,impl=0,devops=0;items.forEach(it=>{c[it.risk]=(c[it.risk]||0)+1;sav+=it.savings_raw||0;impl+=it.cost_increase_raw||0;if(it.devops_repo)devops++;});const ssA=aggSecure(subs);const mc=aggMcsb(subs);const k=document.getElementById("kpis");let cards=[["#7cd0ff",items.length,"recomendações"],["#5ed16a",c.safe,"🟢 quick wins"],["#ffd96b",c.low+c.medium,"🟡🟠 janela"],["#ff6b6b",c.high,"🔴 aprovação"],["#9fb0c8",ssA?ssA.cur+"%":"n/a","🛡️ SS atual"],["#9ae6b4",ssA?ssA.pot+"%":"n/a","🎯 SS potencial"],["#ff6b6b",impl?"+"+fmtUSD(impl,"/mês"):"—","💰 custo impl."]];if(mc&&mc.pct!=null){const cc=mc.pct>=80?"#5ed16a":(mc.pct>=50?"#ffd96b":"#ff6b6b");cards.push([cc,mc.pct+"%","🛡️ MCSB compliance"]);}if(devops)cards.push(["#7ee2a8",devops,"🐙 DevOps findings"]);k.innerHTML=cards.map(([col,n,l])=>`<div class="kpi"><div class="n" style="color:${col};font-size:${String(n).length>7?"14px":"20px"}">${esc(n)}</div><div class="l">${esc(l)}</div></div>`).join("");document.getElementById("subline").innerHTML=`economia potencial: <b style="color:#5ed16a">${sav?"−"+fmtUSD(sav,"/ano"):"—"}</b> · custo de implementação: <b style="color:#ff6b6b">${impl?"+"+fmtUSD(impl,"/mês"):"—"}</b> · 100% read-only`;const bar=document.getElementById("ssbar");if(ssA){bar.style.display="block";bar.innerHTML=`<div class="meta" style="margin-bottom:4px">🛡️ Secure Score: <b style="color:#9fb0c8">${ssA.cur}%</b> agora → <b style="color:#9ae6b4">${ssA.pot}%</b> se remediar tudo (<b style="color:#9ae6b4">+${Math.round(10*(ssA.pot-ssA.cur))/10} pp</b>)</div><div style="background:#0b0f17;border:1px solid #1e2a3f;border-radius:8px;height:14px;overflow:hidden;position:relative"><div style="position:absolute;left:0;top:0;height:100%;width:${ssA.pot}%;background:linear-gradient(90deg,#2d6a4f,#52b788);opacity:.45"></div><div style="position:absolute;left:0;top:0;height:100%;width:${ssA.cur}%;background:linear-gradient(90deg,#7cd0ff,#5ed16a)"></div></div>`;}else{bar.style.display="none";}}
-function renderMcsb(subs){const el=document.getElementById("mcsb");const mc=aggMcsb(subs);if(!mc){el.innerHTML="";return;}const cc=(mc.pct||0)>=80?"#5ed16a":((mc.pct||0)>=50?"#ffd96b":"#ff6b6b");const fc=(DATA.mcsb&&DATA.mcsb.failing_controls||[]).filter(x=>!sel("sub").size||subs.has(x.subscription_id)).slice(0,15);let ft="";if(fc.length){ft=`<table style="margin-top:10px"><tr><th>Controle</th><th>Nome</th><th>Falhando</th><th>OK</th></tr>${fc.map(x=>{let nm=esc(x.name);if(x.link)nm=`<a href="${esc(x.link)}" style="color:#e7edf5;text-decoration:none;border-bottom:1px dotted #4a5a72">${nm}</a>`;return `<tr><td class="mono">${esc(x.id)}</td><td>${nm}</td><td style="color:#ff6b6b;font-weight:700">${x.failed}</td><td style="color:#5ed16a">${x.passed}</td></tr>`;}).join("")}</table>`;}el.innerHTML=`<div class="phase"><h3>🛡️ Postura de Compliance — Microsoft Cloud Security Benchmark <span class="meta">· standard: ${esc(DATA.mcsb?DATA.mcsb.standard_name:"")}</span></h3><div class="card"><div style="display:flex;gap:18px;flex-wrap:wrap;align-items:center"><div><span style="font-size:28px;font-weight:800;color:${cc}">${mc.pct!=null?mc.pct+"%":"n/a"}</span><div class="meta">controles em conformidade</div></div><div class="meta">✅ ${mc.passed} passed · ❌ ${mc.failed} failed · ⏭️ ${mc.skipped} skipped · ⚪ ${mc.unsupported} unsupported</div></div><div style="background:#0b0f17;border:1px solid #1e2a3f;border-radius:8px;height:12px;overflow:hidden;margin-top:10px"><div style="height:100%;width:${mc.pct||0}%;background:linear-gradient(90deg,${cc},#52b788)"></div></div>${ft}</div></div>`;}
+function renderKpis(items,subs){const c={safe:0,low:0,medium:0,high:0};let sav=0,impl=0,devops=0;items.forEach(it=>{c[it.risk]=(c[it.risk]||0)+1;sav+=it.savings_raw||0;impl+=it.cost_increase_raw||0;if(it.devops_repo)devops++;});const ssA=aggSecure(subs);const mc=aggMcsb(subs);const k=document.getElementById("kpis");let cards=[["#7cd0ff",items.length,"recomendações"],["#5ed16a",c.safe,"🟢 quick wins"],["#ffd96b",c.low+c.medium,"🟡🟠 janela"],["#ff6b6b",c.high,"🔴 aprovação"],["#9fb0c8",ssA?ssA.cur+"%":"n/a","🛡️ SS atual"],["#9ae6b4",ssA?ssA.pot+"%":"n/a","🎯 SS potencial"],["#ff6b6b",impl?"+"+fmtUSD(impl,"/mês"):"—","💰 custo impl."]];if(mc&&mc.pct!=null){const cc=mc.pct>=80?"#5ed16a":(mc.pct>=50?"#ffd96b":"#ff6b6b");cards.push([cc,mc.pct+"%","🛡️ MCSB compliance"]);}if(devops)cards.push(["#7ee2a8",devops,"🐙 DevOps findings"]);k.innerHTML=cards.map(([col,n,l])=>`<div class="kpi"><div class="n" style="color:${col};font-size:${String(n).length>7?"14px":"20px"}">${esc(n)}</div><div class="l">${esc(l)}</div></div>`).join("");document.getElementById("subline").innerHTML=`economia potencial: <b style="color:#5ed16a">${sav?"−"+fmtUSD(sav,"/ano"):"—"}</b> · custo de implementação: <b style="color:#ff6b6b">${impl?"+"+fmtUSD(impl,"/mês"):"—"}</b> · 100% read-only`;const bar=document.getElementById("ssbar");if(ssA){bar.style.display="block";bar.innerHTML=`<div class="meta" style="margin-bottom:4px">🛡️ Secure Score: <b style="color:#9fb0c8">${ssA.cur}%</b> agora → <b style="color:#9ae6b4">${ssA.pot}%</b> se remediar tudo (<b style="color:#9ae6b4">+${Math.round(10*(ssA.pot-ssA.cur))/10} pp</b>)</div><div style="background:var(--inset);border:1px solid var(--border);border-radius:8px;height:14px;overflow:hidden;position:relative"><div style="position:absolute;left:0;top:0;height:100%;width:${ssA.pot}%;background:linear-gradient(90deg,#2d6a4f,#52b788);opacity:.45"></div><div style="position:absolute;left:0;top:0;height:100%;width:${ssA.cur}%;background:linear-gradient(90deg,#7cd0ff,#5ed16a)"></div></div>`;}else{bar.style.display="none";}}
+function renderMcsb(subs){const el=document.getElementById("mcsb");const mc=aggMcsb(subs);if(!mc){el.innerHTML="";return;}const cc=(mc.pct||0)>=80?"#5ed16a":((mc.pct||0)>=50?"#ffd96b":"#ff6b6b");const fc=(DATA.mcsb&&DATA.mcsb.failing_controls||[]).filter(x=>!sel("sub").size||subs.has(x.subscription_id)).slice(0,15);let ft="";if(fc.length){ft=`<table style="margin-top:10px"><tr><th>Controle</th><th>Nome</th><th>Falhando</th><th>OK</th></tr>${fc.map(x=>{let nm=esc(x.name);if(x.link)nm=`<a href="${esc(x.link)}" style="color:#e7edf5;text-decoration:none;border-bottom:1px dotted #4a5a72">${nm}</a>`;return `<tr><td class="mono">${esc(x.id)}</td><td>${nm}</td><td style="color:#ff6b6b;font-weight:700">${x.failed}</td><td style="color:#5ed16a">${x.passed}</td></tr>`;}).join("")}</table>`;}el.innerHTML=`<div class="phase"><h3>🛡️ Postura de Compliance — Microsoft Cloud Security Benchmark <span class="meta">· standard: ${esc(DATA.mcsb?DATA.mcsb.standard_name:"")}</span></h3><div class="card"><div style="display:flex;gap:18px;flex-wrap:wrap;align-items:center"><div><span style="font-size:28px;font-weight:800;color:${cc}">${mc.pct!=null?mc.pct+"%":"n/a"}</span><div class="meta">controles em conformidade</div></div><div class="meta">✅ ${mc.passed} passed · ❌ ${mc.failed} failed · ⏭️ ${mc.skipped} skipped · ⚪ ${mc.unsupported} unsupported</div></div><div style="background:var(--inset);border:1px solid var(--border);border-radius:8px;height:12px;overflow:hidden;margin-top:10px"><div style="height:100%;width:${mc.pct||0}%;background:linear-gradient(90deg,${cc},#52b788)"></div></div>${ft}</div></div>`;}
 function apply(){let items=DATA.items;DIMS.forEach(([dim])=>{const s=sel(dim);if(s.size)items=items.filter(it=>s.has(val(it,dim)));});const subs=selectedSubs();renderKpis(items,subs);renderPlan(items);renderMcsb(subs);}
 function clearAll(){document.querySelectorAll("#frow input[type=checkbox]").forEach(c=>c.checked=false);apply();}
+function setTheme(t){document.documentElement.setAttribute("data-theme",t);try{localStorage.setItem("ai_theme",t);}catch(e){}var b=document.getElementById("themebtn");if(b)b.textContent=(t==="light"?"🌙 Tema escuro":"☀️ Tema claro");}
+function toggleTheme(){var c=document.documentElement.getAttribute("data-theme")||"dark";setTheme(c==="light"?"dark":"light");}
+function showPage(id){document.querySelectorAll(".page").forEach(function(p){p.style.display="none";});var el=document.getElementById(id);if(el)el.style.display="block";document.querySelectorAll(".navbtn").forEach(function(b){b.classList.toggle("active",b.getAttribute("data-page")===id);});try{location.hash=id;}catch(e){}window.scrollTo(0,0);}
+function goHome(){showPage("home");}
+function gotoSource(src){document.querySelectorAll("#frow input[type=checkbox]").forEach(function(c){c.checked=false;});if(src){var box=document.querySelector('#frow input[data-dim="source"][value="'+src.replace(/"/g,'\\\\"')+'"]');if(box)box.checked=true;}apply();showPage("page-plan");}
+(function(){var t="dark";try{t=localStorage.getItem("ai_theme")||"dark";}catch(e){}setTheme(t);})();
 buildFilters();apply();
+(function(){var h=(location.hash||"").replace("#","");showPage(h&&document.getElementById(h)?h:"home");})();
 """
 
 def render_html(ctx, q):
@@ -1111,27 +1621,157 @@ def render_html(ctx, q):
             '<meta name="viewport" content="width=device-width,initial-scale=1">'
             '<title>Advisor + Defender for Cloud — Remediation Plan</title>'
             '<style>' + _REPORT_CSS + '</style></head><body><div class="wrap">')
-    hero = (
-        '<div class="hero"><h1>🧭 Plano de Remediação — Advisor + Defender for Cloud</h1>'
-        '<div class="meta" style="margin-bottom:8px">escopo: <b>' + scope + '</b> · '
-        + str(n) + ' recomendação(ões) · ' + str(nsubs) + ' subscription(s) · gerado '
-        + esc(ctx.get("generated", "")) + '</div>'
-        '<div class="kpis" id="kpis"></div>'
-        '<div id="ssbar" style="margin-top:12px;display:none"></div>'
-        '<div class="meta" id="subline" style="margin-top:12px"></div></div>')
+
+    generated = esc(ctx.get("generated", ""))
+    mcsb_pct = ctx["mcsb"].get("compliance_pct") if ctx.get("mcsb") else None
+    devops_total = ctx["devops"]["total"] if ctx.get("devops") else 0
+    xdr = ctx.get("xdr")
+    xdr_total = xdr["total"] if xdr else 0
+    mcsb = ctx.get("mcsb")
+    m365 = ctx.get("m365")
+    ss, ss_pot, ss_delta = ctx.get("secure_score"), ctx.get("secure_score_potential"), ctx.get("secure_score_delta")
+    n_adv = len(ctx.get("advisor", []))
+    n_mdc = len(ctx.get("mdc", []))
+    n_high_mdc = sum(1 for it in ctx.get("mdc", []) if str(it.get("priority", "")).lower() in ("high", "critical"))
+
+    logo_svg = (
+        "<svg viewBox='0 0 48 48' width='100%' height='100%' fill='none' xmlns='http://www.w3.org/2000/svg'>"
+        "<defs><linearGradient id='lg' x1='0' y1='0' x2='1' y2='1'>"
+        "<stop offset='0' stop-color='#7cd0ff'/><stop offset='1' stop-color='#5ed16a'/></linearGradient></defs>"
+        "<path d='M24 3l16 6v10c0 11-7 18-16 23C15 37 8 30 8 19V9l16-6z' fill='url(#lg)'/>"
+        "<path d='M16.5 24l5 5 10-11' stroke='#08111d' stroke-width='3.4' stroke-linecap='round' stroke-linejoin='round'/></svg>")
+
+    # ---- barra superior (sempre visível) ----
+    nav_extra = "<button class=\"navbtn\" data-page=\"page-exec\" onclick=\"showPage('page-exec')\">📊 Resumo Executivo</button>"
+    if n_adv:
+        nav_extra += "<button class=\"navbtn\" data-page=\"page-plan\" onclick=\"gotoSource('Advisor')\">📘 Advisor</button>"
+    if n_mdc:
+        nav_extra += "<button class=\"navbtn\" data-page=\"page-mdc\" onclick=\"showPage('page-mdc')\">🛡️ Defender for Cloud</button>"
+    if xdr_total:
+        nav_extra += "<button class=\"navbtn\" data-page=\"page-xdr\" onclick=\"showPage('page-xdr')\">🛡️ Defender XDR</button>"
+    if mcsb_pct is not None:
+        nav_extra += "<button class=\"navbtn\" data-page=\"page-mcsb\" onclick=\"showPage('page-mcsb')\">📋 MCSB</button>"
+    if devops_total:
+        nav_extra += "<button class=\"navbtn\" data-page=\"page-devops\" onclick=\"showPage('page-devops')\">🐙 DevOps</button>"
+    topbar = (
+        '<div class="topbar"><div class="brand" onclick="goHome()"><span class="mk">' + logo_svg + '</span>'
+        '<span>advisor-impact</span></div><div class="navlinks">'
+        '<button class="navbtn" data-page="home" onclick="showPage(\'home\')">🏠 Início</button>'
+        + nav_extra +
+        '<button id="themebtn" class="btn" onclick="toggleTheme()">☀️ Tema claro</button></div></div>')
+
+    # ---- cards de SCORE na home (estilo Power BI: só os scores, bem clean) ----
+    mdc_by_sev = {}
+    for it in ctx.get("mdc", []):
+        s = str(it.get("priority", "—")).capitalize()
+        mdc_by_sev[s] = mdc_by_sev.get(s, 0) + 1
+    _SEVS = ["Critical", "High", "Medium", "Low", "Informational"]
+    score_cards = ""
+    if m365:
+        m_pie = _svg_pie([("Obtidos", m365['current'], "#5ed16a"),
+                          ("Restantes", max(m365['max'] - m365['current'], 0), "#aeb8c7")])
+        score_cards += _score_card("🏆", "Microsoft Secure Score", f"{m365['pct']}%", "Entra ID + Microsoft 365",
+            [("Pontos atuais", m365['current'], "var(--accent)"),
+             ("Pontos máximos", m365['max'], "var(--muted)"),
+             ("Controles avaliados", m365['controls'], "var(--muted)")],
+            "showPage('page-exec')", m_pie)
+    if ss is not None:
+        d_pie = _svg_pie([(s, mdc_by_sev.get(s, 0), _SEV_COLOR.get(s, '#9fb0c8')) for s in _SEVS])
+        score_cards += _score_card("🛡️", "Defender for Cloud — Secure Score", f"{ss}%", "postura de nuvem",
+            [("Potencial", f"{ss_pot}%" if ss_pot is not None else "—", "#5ed16a"),
+             ("Elevação possível", f"+{ss_delta} pp" if ss_delta is not None else "—", "#5ed16a"),
+             ("Recomendações", n_mdc, "var(--fg)"),
+             ("Severidade alta", n_high_mdc, "#ff6b6b")],
+            "showPage('page-mdc')", d_pie)
+    if xdr:
+        x_pie = _svg_pie([(g, v, c) for g, v, c in xdr['groups']])
+        if xdr.get('mode') == 'actions':
+            sub = "Recommended Actions · Microsoft Secure Score"
+            x_rows = [(g, v, "var(--fg)") for g, v, c in xdr['groups'][:3]]
+            x_rows.append(("Pontos de melhoria", xdr.get('points_total', 0), "#5ed16a"))
+        else:
+            sub = "recomendações · Vuln Mgmt / Exposure"
+            x_rows = [("Critical", xdr['by_severity'].get('Critical', 0), "#ff4d4d"),
+                      ("High", xdr['by_severity'].get('High', 0), "#ff6b6b"),
+                      ("Exploit público", xdr.get('exploit_total', 0), "#ff6b6b"),
+                      ("Máquinas expostas", xdr.get('exposed_total', 0), "#ffd96b")]
+        score_cards += _score_card("🛡️", "Defender XDR", xdr['total'], sub, x_rows, "showPage('page-xdr')", x_pie)
+    if mcsb:
+        c_pie = _svg_pie([("Passed", mcsb.get('passed', 0), "#5ed16a"),
+                          ("Failed", mcsb.get('failed', 0), "#ff6b6b"),
+                          ("Skipped", mcsb.get('skipped', 0), "#ffd96b"),
+                          ("Unsupported", mcsb.get('unsupported', 0), "#aeb8c7")])
+        score_cards += _score_card("📋", "MCSB Compliance", f"{mcsb_pct}%" if mcsb_pct is not None else "n/a",
+            "Microsoft Cloud Security Benchmark",
+            [("Passed", mcsb.get('passed', 0), "#5ed16a"),
+             ("Failed", mcsb.get('failed', 0), "#ff6b6b"),
+             ("Skipped", mcsb.get('skipped', 0), "var(--muted)"),
+             ("Unsupported", mcsb.get('unsupported', 0), "var(--muted)")],
+            "showPage('page-mcsb')", c_pie)
+    if not score_cards:
+        score_cards = ("<div class=\"navcard\" onclick=\"showPage('page-plan')\"><div class=\"ic\">🧭</div>"
+                       "<b>Plano de Remediação</b><div class=\"big\">" + str(n) + "</div>"
+                       "<span>recomendações priorizadas por risco</span></div>")
+
+    home = (
+        '<div id="home" class="page"><div class="home-hero"><div class="logo">' + logo_svg + '</div>'
+        '<h1>Plano de Remediação</h1>'
+        '<div class="meta">Advisor + Microsoft Defender for Cloud · escopo <b>' + scope + '</b> · '
+        + str(n) + ' recomendação(ões) · ' + str(nsubs) + ' subscription(s) · gerado ' + generated + '</div></div>'
+        '<div class="scoregrid">' + score_cards + '</div></div>')
+
+    # ---- Resumo Executivo (estilo dashboard: score cards + tabelas críticas + visão consolidada) ----
+    page_exec = (
+        '<div id="page-exec" class="page" style="display:none">'
+        '<button class="btn back" onclick="goHome()">← Início</button>'
+        '<h2>📊 Resumo Executivo</h2>'
+        '<div class="scoregrid">' + score_cards + '</div>'
+        + _exec_critical_tables(ctx)
+        + '<div style="margin-top:14px"></div>'
+        + _exec_summary_html(ctx)
+        + '<div class="kpis" id="kpis" style="display:none"></div>'
+        '<div id="ssbar" style="display:none"></div>'
+        '<div class="meta" id="subline" style="display:none"></div></div>')
+
+    page_mdc = (
+        '<div id="page-mdc" class="page" style="display:none">'
+        '<button class="btn back" onclick="goHome()">← Início</button>'
+        + _render_mdc_section(ctx) + '</div>') if ctx.get("mdc") else ''
+
     filters = (
         '<div class="filters"><div class="ftop"><div class="meta">🔎 Filtros — marque para refinar; '
         'vazio = tudo. Secure Score e MCSB recalculam pelo filtro de Subscription.</div>'
         '<button class="btn" onclick="clearAll()">Limpar filtros</button></div>'
         '<div class="frow" id="frow"></div></div>')
     devops_html = _render_devops_section(ctx.get("devops"))
-    body = ('<div id="plan"></div><div id="mcsb"></div>' + devops_html +
-            '<div class="meta" style="margin-top:20px;border-top:1px solid #1e2a3f;padding-top:12px">'
-            'advisor-impact · Azure Advisor + Microsoft Defender for Cloud · risco = disrupção de aplicar '
-            '(não criticidade). Custos via Azure Retail Prices API · Compliance via MCSB '
-            '(inspirado no <a href="https://github.com/microsoft/ESA" style="color:#7cd0ff">microsoft/ESA</a>).</div></div>')
+    xdr_html = _render_xdr_section(ctx.get("xdr"))
+
+    page_plan = (
+        '<div id="page-plan" class="page" style="display:none">'
+        '<button class="btn back" onclick="goHome()">← Início</button>'
+        '<h2>🧭 Plano de Remediação <span class="meta">· Advisor + Defender for Cloud · por fase de risco de aplicar</span></h2>'
+        + filters + '<div id="plan"></div></div>')
+    page_xdr = (
+        '<div id="page-xdr" class="page" style="display:none">'
+        '<button class="btn back" onclick="goHome()">← Início</button>'
+        + xdr_html + '</div>') if xdr_html else ''
+    page_mcsb = (
+        '<div id="page-mcsb" class="page" style="display:none">'
+        '<button class="btn back" onclick="goHome()">← Início</button>'
+        '<div id="mcsb"></div></div>')
+    page_devops = (
+        '<div id="page-devops" class="page" style="display:none">'
+        '<button class="btn back" onclick="goHome()">← Início</button>'
+        + devops_html + '</div>')
+
+    footer = ('<div class="meta" style="margin-top:20px;border-top:1px solid var(--border);padding-top:12px">'
+              'advisor-impact · Azure Advisor + Microsoft Defender for Cloud · risco = disrupção de aplicar '
+              '(não criticidade). Custos via Azure Retail Prices API · Compliance via MCSB '
+              '(inspirado no <a href="https://github.com/microsoft/ESA" style="color:var(--accent)">microsoft/ESA</a>).</div>')
+
+    body = topbar + home + page_exec + page_mdc + page_plan + page_xdr + page_mcsb + page_devops + footer + '</div>'
     script = '<script>const DATA=' + data_json + ';\n' + _REPORT_JS + '</script>'
-    return head + hero + filters + body + script + '</body></html>'
+    return head + body + script + '</body></html>'
 
 def render_md(ctx, q):
     ph = q.get("phases", {})
