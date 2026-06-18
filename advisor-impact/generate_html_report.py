@@ -1272,6 +1272,90 @@ def _exec_summary_html(ctx):
             "<ul style='margin:6px 0 0;padding-left:18px;line-height:1.9'>" + "".join(b) + "</ul>"
             f"<div class='meta' style='margin-top:10px'>{prio}</div></div>")
 
+_MDC_ORDER = {"critical": 4, "high": 3, "medium": 2, "low": 1, "informational": 0}
+
+def _exec_critical_tables(ctx):
+    """Tabelas de 'recomendações/controles mais críticos' por pilar (estilo Executive Summary do dashboard)."""
+    blocks = []
+    mdc = ctx.get("mdc", [])
+    if mdc:
+        top = sorted(mdc, key=lambda it: _MDC_ORDER.get(str(it.get("priority", "")).lower(), -1), reverse=True)[:6]
+        rows = "".join(
+            f"<tr><td class='{_SEV_CLASS.get(str(it.get('priority','—')).capitalize(),'sv-informational')}' "
+            f"style='font-weight:700;white-space:nowrap'>{esc(str(it.get('priority','—')).capitalize())}</td>"
+            f"<td>{esc(it.get('title','—'))}</td></tr>" for it in top)
+        blocks.append(("🛡️ Defender for Cloud — críticas", "<table><tr><th>Sev</th><th>Recomendação</th></tr>" + rows + "</table>"))
+    mcsb = ctx.get("mcsb")
+    if mcsb and mcsb.get("failing_controls"):
+        fc = mcsb["failing_controls"][:6]
+        rows = "".join(
+            f"<tr><td class='mono'>{esc(x.get('id',''))}</td><td>{esc(x.get('name',''))}</td>"
+            f"<td style='color:#ff6b6b;font-weight:700;text-align:right'>{x.get('failed',0)}</td></tr>" for x in fc)
+        blocks.append(("📋 MCSB — controles mais falhando", "<table><tr><th>Controle</th><th>Nome</th><th>Falhas</th></tr>" + rows + "</table>"))
+    xdr = ctx.get("xdr")
+    if xdr and xdr.get("top"):
+        rows = "".join(
+            f"<tr><td class='{_SEV_CLASS.get(r['severity'],'sv-informational')}' style='font-weight:700;white-space:nowrap'>{esc(r['severity'])}</td>"
+            f"<td>{esc(r['name'])}</td><td style='text-align:right;font-weight:700'>{r['exposed']}</td></tr>" for r in xdr["top"][:6])
+        blocks.append(("🛡️ Defender XDR — críticas", "<table><tr><th>Sev</th><th>Recomendação</th><th>Máq.</th></tr>" + rows + "</table>"))
+    devops = ctx.get("devops")
+    if devops and devops.get("top_findings"):
+        rows = "".join(
+            f"<tr><td class='{_SEV_CLASS.get(f.get('severity','—'),'sv-informational')}' style='font-weight:700;white-space:nowrap'>{esc(f.get('severity','—'))}</td>"
+            f"<td>{esc(f.get('finding','—'))}</td></tr>" for f in devops["top_findings"][:6])
+        blocks.append(("🐙 DevOps — findings críticos", "<table><tr><th>Sev</th><th>Finding</th></tr>" + rows + "</table>"))
+    if not blocks:
+        return ""
+    cards = "".join(f"<div class='card'><h3 style='margin-top:0;font-size:13px'>{t}</h3>{tbl}</div>" for t, tbl in blocks)
+    return ("<h3 style='margin-top:18px'>Recomendações / controles mais críticos</h3>"
+            "<div class='critgrid'>" + cards + "</div>")
+
+def _render_mdc_section(ctx):
+    """Página 🛡️ Defender for Cloud estilo Power BI: pizza de severidade + KPIs + tabela de recomendações."""
+    mdc = ctx.get("mdc", [])
+    if not mdc:
+        return ""
+    ss, ss_pot = ctx.get("secure_score"), ctx.get("secure_score_potential")
+    by_sev = {}
+    for it in mdc:
+        s = str(it.get("priority", "—")).capitalize()
+        by_sev[s] = by_sev.get(s, 0) + 1
+    sevs = [s for s in ["Critical", "High", "Medium", "Low", "Informational"] if by_sev.get(s)]
+    pie = _svg_pie([(s, by_sev.get(s, 0), _SEV_COLOR.get(s, '#9fb0c8')) for s in sevs], 160)
+    legend = "<div class='legend'>" + "".join(
+        f"<span><i class='dot' style='background:{_SEV_COLOR.get(s,'#9fb0c8')}'></i>{esc(s)} · {by_sev.get(s,0)}</span>"
+        for s in sevs) + "</div>"
+    kc = (f"<div class='kpi'><div class='n' style='color:#1fab89'>{len(mdc)}</div><div class='l'>recomendações</div></div>")
+    for s in sevs:
+        kc += f"<div class='kpi'><div class='n {_SEV_CLASS.get(s,'sv-informational')}'>{by_sev.get(s,0)}</div><div class='l'>{esc(s)}</div></div>"
+    if ss is not None:
+        kc += f"<div class='kpi'><div class='n' style='color:#9fb0c8'>{ss}%</div><div class='l'>🛡️ Secure Score</div></div>"
+        if ss_pot is not None:
+            kc += f"<div class='kpi'><div class='n' style='color:#9ae6b4'>{ss_pot}%</div><div class='l'>🎯 potencial</div></div>"
+    top = sorted(mdc, key=lambda it: _MDC_ORDER.get(str(it.get("priority", "")).lower(), -1), reverse=True)[:25]
+    det = ""
+    for it in top:
+        s = str(it.get("priority", "—")).capitalize()
+        link = it.get("portal_link", "") or ""
+        link_html = (f"<a href='{esc(link)}' target='_blank' style='color:var(--accent);white-space:nowrap'>Portal ↗</a>"
+                     if link else "<span class='meta'>—</span>")
+        det += (f"<tr><td class='{_SEV_CLASS.get(s,'sv-informational')}' style='font-weight:700;white-space:nowrap'>{esc(s)}</td>"
+                f"<td>{esc(it.get('title','—'))}</td>"
+                f"<td class='mono'>{esc(it.get('resource_name','—'))}</td>"
+                f"<td>{link_html}</td></tr>")
+    return (
+        "<div class='phase'><h3>🛡️ Defender for Cloud — Secure Score "
+        "<span class='meta'>· security assessments (postura de nuvem)</span></h3>"
+        "<div class='card'>"
+        "<div class='dvgrid'>"
+        f"<div style='text-align:center'>{pie}{legend}</div>"
+        f"<div><div class='kpis'>{kc}</div></div>"
+        "</div>"
+        "<h3 style='margin-top:16px'>🔧 Recomendações <span class='meta'>· por severidade</span></h3>"
+        "<table><tr><th>Sev</th><th>Recomendação</th><th>Recurso</th><th>Referência</th></tr>"
+        f"{det}</table>"
+        "</div></div>")
+
 # CSS + JS do relatório interativo (string normal, SEM f-string → não precisa escapar {}).
 _REPORT_CSS = """
   :root{
@@ -1359,6 +1443,7 @@ _REPORT_CSS = """
   .scrows{margin-top:10px;border-top:1px solid var(--border);padding-top:8px}
   .scrow{display:flex;justify-content:space-between;align-items:center;font-size:13px;padding:3px 0}
   .scrow span{color:var(--muted)}
+  .critgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px;margin-top:8px}
   @media(max-width:680px){.kpis{grid-template-columns:repeat(3,1fr)}.barrow{grid-template-columns:110px 1fr 34px}}
 """
 
@@ -1476,7 +1561,7 @@ def render_html(ctx, q):
     if n_adv:
         nav_extra += "<button class=\"navbtn\" data-page=\"page-plan\" onclick=\"gotoSource('Advisor')\">📘 Advisor</button>"
     if n_mdc:
-        nav_extra += "<button class=\"navbtn\" data-page=\"page-plan\" onclick=\"gotoSource('Defender for Cloud')\">🛡️ Defender for Cloud</button>"
+        nav_extra += "<button class=\"navbtn\" data-page=\"page-mdc\" onclick=\"showPage('page-mdc')\">🛡️ Defender for Cloud</button>"
     if xdr_total:
         nav_extra += "<button class=\"navbtn\" data-page=\"page-xdr\" onclick=\"showPage('page-xdr')\">🛡️ Defender XDR</button>"
     if mcsb_pct is not None:
@@ -1512,7 +1597,7 @@ def render_html(ctx, q):
              ("Elevação possível", f"+{ss_delta} pp" if ss_delta is not None else "—", "#5ed16a"),
              ("Recomendações", n_mdc, "var(--fg)"),
              ("Severidade alta", n_high_mdc, "#ff6b6b")],
-            "gotoSource('Defender for Cloud')", d_pie)
+            "showPage('page-mdc')", d_pie)
     if xdr:
         x_pie = _svg_pie([(s, xdr['by_severity'].get(s, 0), _SEV_COLOR.get(s, '#9fb0c8')) for s in xdr['sev_order']])
         score_cards += _score_card("🛡️", "Defender XDR", xdr['total'], "recomendações · Vuln Mgmt / Exposure",
@@ -1545,15 +1630,23 @@ def render_html(ctx, q):
         + str(n) + ' recomendação(ões) · ' + str(nsubs) + ' subscription(s) · gerado ' + generated + '</div></div>'
         '<div class="scoregrid">' + score_cards + '</div></div>')
 
-    # ---- Resumo Executivo (com a faixa de KPIs ao vivo) ----
+    # ---- Resumo Executivo (estilo dashboard: score cards + tabelas críticas + visão consolidada) ----
     page_exec = (
         '<div id="page-exec" class="page" style="display:none">'
         '<button class="btn back" onclick="goHome()">← Início</button>'
         '<h2>📊 Resumo Executivo</h2>'
-        '<div class="kpis" id="kpis"></div>'
-        '<div id="ssbar" style="margin-top:12px;display:none"></div>'
-        '<div class="meta" id="subline" style="margin-top:12px;margin-bottom:14px"></div>'
-        + _exec_summary_html(ctx) + '</div>')
+        '<div class="scoregrid">' + score_cards + '</div>'
+        + _exec_critical_tables(ctx)
+        + '<div style="margin-top:14px"></div>'
+        + _exec_summary_html(ctx)
+        + '<div class="kpis" id="kpis" style="display:none"></div>'
+        '<div id="ssbar" style="display:none"></div>'
+        '<div class="meta" id="subline" style="display:none"></div></div>')
+
+    page_mdc = (
+        '<div id="page-mdc" class="page" style="display:none">'
+        '<button class="btn back" onclick="goHome()">← Início</button>'
+        + _render_mdc_section(ctx) + '</div>') if ctx.get("mdc") else ''
 
     filters = (
         '<div class="filters"><div class="ftop"><div class="meta">🔎 Filtros — marque para refinar; '
@@ -1586,7 +1679,7 @@ def render_html(ctx, q):
               '(não criticidade). Custos via Azure Retail Prices API · Compliance via MCSB '
               '(inspirado no <a href="https://github.com/microsoft/ESA" style="color:var(--accent)">microsoft/ESA</a>).</div>')
 
-    body = topbar + home + page_exec + page_plan + page_xdr + page_mcsb + page_devops + footer + '</div>'
+    body = topbar + home + page_exec + page_mdc + page_plan + page_xdr + page_mcsb + page_devops + footer + '</div>'
     script = '<script>const DATA=' + data_json + ';\n' + _REPORT_JS + '</script>'
     return head + body + script + '</body></html>'
 
