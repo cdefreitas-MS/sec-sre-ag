@@ -19,7 +19,7 @@ Dois modos:
 Saída: --format both (default) → HTML (dark, email) + Markdown (repo).
 """
 from __future__ import annotations
-import argparse, datetime as dt, html, json, os, re, shutil, subprocess, sys, tempfile
+import argparse, datetime as dt, html, json, math, os, re, shutil, subprocess, sys, tempfile
 import urllib.request, urllib.parse
 
 if sys.platform == "win32":
@@ -928,49 +928,84 @@ def _savings_raw(cd):
         return 0.0
 
 _SEV_COLOR = {"Critical": "#ff4d4d", "High": "#ff6b6b", "Medium": "#ffd96b", "Low": "#7cd0ff", "Informational": "#9fb0c8"}
+_SEV_CLASS = {"Critical": "sv-critical", "High": "sv-high", "Medium": "sv-medium", "Low": "sv-low", "Informational": "sv-informational"}
+
+def _svg_donut(segments, size=160, stroke=28):
+    """Donut SVG (sem libs) p/ proporção de severidade. segments = [(label, value, color)]."""
+    total = sum(v for _, v, _ in segments) or 1
+    r = (size - stroke) / 2.0
+    cx = cy = size / 2.0
+    circ = 2 * math.pi * r
+    off = 0.0
+    arcs = (f"<circle cx='{cx}' cy='{cy}' r='{r:.1f}' fill='none' stroke='var(--inset)' "
+            f"stroke-width='{stroke}'/>")
+    for _label, v, color in segments:
+        if v <= 0:
+            continue
+        dash = (v / total) * circ
+        arcs += (f"<circle cx='{cx}' cy='{cy}' r='{r:.1f}' fill='none' stroke='{color}' "
+                 f"stroke-width='{stroke}' stroke-dasharray='{dash:.2f} {circ - dash:.2f}' "
+                 f"stroke-dashoffset='{-off:.2f}' transform='rotate(-90 {cx} {cy})'/>")
+        off += dash
+    center = (f"<text x='{cx}' y='{cy - 2}' text-anchor='middle' class='donut-num'>{total}</text>"
+              f"<text x='{cx}' y='{cy + 17}' text-anchor='middle' class='donut-lbl'>findings</text>")
+    return (f"<svg viewBox='0 0 {size} {size}' width='{size}' height='{size}' class='donut' "
+            f"role='img' aria-label='Severidade'>{arcs}{center}</svg>")
+
+def _stacked_bars(matrix, sevs):
+    """Barras horizontais empilhadas por repo (escala pelo maior total). Estilo Power BI."""
+    maxt = max((m["total"] for m in matrix), default=1) or 1
+    rows = ""
+    for m in matrix:
+        segs = ""
+        for s in sevs:
+            v = m["by_sev"].get(s, 0)
+            if not v:
+                continue
+            w = 100.0 * v / maxt
+            segs += (f"<span class='seg' style='width:{w:.2f}%;background:{_SEV_COLOR.get(s, '#9fb0c8')}' "
+                     f"title='{esc(s)}: {v}'></span>")
+        rows += (f"<div class='barrow'><div class='barlbl mono' title='{esc(m['repo'])}'>\U0001f419 {esc(m['repo'])}</div>"
+                 f"<div class='bartrack'>{segs}</div>"
+                 f"<div class='barval'>{m['total']}</div></div>")
+    return f"<div class='bars'>{rows}</div>"
 
 def _render_devops_section(devops):
-    """Seção estática 🐙 DevOps Remediation: severidade + matriz repo×severidade + categorias."""
+    """Seção 🐙 DevOps Remediation estilo Power BI: donut de severidade + KPIs + barras por repo + findings."""
     if not devops:
         return ""
     sevs = devops["sev_order"]
-    # KPIs de severidade
-    kpis = ""
+    # KPI cards (total + severidades) com cor por classe (tema-aware)
+    kcards = (f"<div class='kpi'><div class='n' style='color:#1fab89'>{devops['total']}</div>"
+              f"<div class='l'>🐙 findings</div></div>")
     for s in sevs:
-        c = _SEV_COLOR.get(s, "#9fb0c8")
-        kpis += (f"<div class='kpi'><div class='n' style='color:{c}'>{devops['by_severity'].get(s,0)}</div>"
-                 f"<div class='l'>{esc(s)}</div></div>")
-    kpis = (f"<div class='kpi'><div class='n' style='color:#7ee2a8'>{devops['total']}</div>"
-            f"<div class='l'>🐙 findings</div></div>") + kpis
-    # categorias
+        cls = _SEV_CLASS.get(s, "sv-informational")
+        kcards += (f"<div class='kpi'><div class='n {cls}'>{devops['by_severity'].get(s,0)}</div>"
+                   f"<div class='l'>{esc(s)}</div></div>")
+    # donut de severidade + legenda
+    donut = _svg_donut([(s, devops['by_severity'].get(s, 0), _SEV_COLOR.get(s, '#9fb0c8')) for s in sevs])
+    donut_legend = "<div class='legend'>" + "".join(
+        f"<span><i class='dot' style='background:{_SEV_COLOR.get(s,'#9fb0c8')}'></i>{esc(s)} · {devops['by_severity'].get(s,0)}</span>"
+        for s in sevs) + "</div>"
     cats = " · ".join(f"{esc(k)}: <b>{v}</b>" for k, v in sorted(devops["by_category"].items(), key=lambda kv: kv[1], reverse=True))
-    # matriz repo × severidade
-    head_cells = "".join(f"<th>{esc(s)}</th>" for s in sevs)
-    rows_html = ""
-    for m in devops["matrix"]:
-        cells = ""
-        for s in sevs:
-            v = m["by_sev"].get(s, 0)
-            col = _SEV_COLOR.get(s, "#9fb0c8") if v else "#3a4a63"
-            cells += f"<td style='color:{col};font-weight:{700 if v else 400}'>{v or '·'}</td>"
-        rows_html += (f"<tr><td class='mono'>🐙 {esc(m['repo'])}</td>"
-                      f"<td style='font-weight:700'>{m['total']}</td>{cells}</tr>")
-    table = (f"<table style='margin-top:10px'><tr><th>Repositório</th><th>Total</th>{head_cells}</tr>"
-             f"{rows_html}</table>")
+    # barras empilhadas por repositório (ordenado por Critical+High)
+    bars = _stacked_bars(devops["matrix"], sevs)
+    bars_legend = "<div class='legend'>" + "".join(
+        f"<span><i class='dot' style='background:{_SEV_COLOR.get(s,'#9fb0c8')}'></i>{esc(s)}</span>" for s in sevs) + "</div>"
     # tabela de findings com referência clicável por finding (top por severidade)
     det = ""
     tf = devops.get("top_findings") or []
     LIMIT = 25
     for f in tf[:LIMIT]:
         s = f.get("severity", "—")
-        c = _SEV_COLOR.get(s, "#9fb0c8")
+        cls = _SEV_CLASS.get(s, "sv-informational")
         link = f.get("link", "") or ""
         if link:
             label = "GitHub ↗" if "github.com" in link else "Portal ↗"
-            link_html = f"<a href='{esc(link)}' target='_blank' style='color:#7cd0ff;white-space:nowrap'>{label}</a>"
+            link_html = f"<a href='{esc(link)}' target='_blank' style='color:var(--accent);white-space:nowrap'>{label}</a>"
         else:
             link_html = "<span class='meta'>—</span>"
-        det += (f"<tr><td style='color:{c};font-weight:700;white-space:nowrap'>{esc(s)}</td>"
+        det += (f"<tr><td class='{cls}' style='font-weight:700;white-space:nowrap'>{esc(s)}</td>"
                 f"<td class='mono'>🐙 {esc(f.get('repo','—'))}</td>"
                 f"<td>{esc(f.get('finding','—'))}</td>"
                 f"<td class='meta' style='white-space:nowrap'>{esc(f.get('category','—'))}</td>"
@@ -986,47 +1021,92 @@ def _render_devops_section(devops):
         "<div class='phase'><h3>🐙 DevOps Remediation — findings do GitHub/Defender DevOps "
         "<span class='meta'>· vulnerabilidades a corrigir (CVE/code/IaC/secret), não postura</span></h3>"
         "<div class='card'>"
-        f"<div class='kpis' style='margin-bottom:10px'>{kpis}</div>"
-        f"<div class='meta'>Por categoria: {cats}</div>"
-        f"{table}"
-        "<div class='meta' style='margin-top:8px'>Matriz ordenada por <b>Critical+High</b> (maior risco no topo) · "
-        "dependency CVEs normalmente têm PR do Dependabot pronto p/ merge.</div>"
+        "<div class='dvgrid'>"
+        f"<div style='text-align:center'>{donut}{donut_legend}</div>"
+        f"<div><div class='kpis'>{kcards}</div>"
+        f"<div class='meta' style='margin-top:10px'>Por categoria: {cats}</div></div>"
+        "</div>"
+        "<h3 style='margin-top:16px'>📊 Por repositório <span class='meta'>· ordenado por Critical+High (maior risco no topo)</span></h3>"
+        f"{bars}{bars_legend}"
+        "<div class='meta' style='margin-top:8px'>dependency CVEs normalmente têm PR do Dependabot pronto p/ merge.</div>"
         f"{det_table}"
         "</div></div>")
 
 # CSS + JS do relatório interativo (string normal, SEM f-string → não precisa escapar {}).
 _REPORT_CSS = """
-  body{margin:0;background:#0b0f17;color:#e7edf5;font:14px/1.5 -apple-system,Segoe UI,Roboto,sans-serif}
+  :root{
+    --bg:#0b0f17;--fg:#e7edf5;--muted:#9fb0c8;--card:#0d1422;--border:#1e2a3f;
+    --inset:#0b0f17;--th:#111a2b;--hero1:#121a2b;--hero2:#0d1422;--accent:#7cd0ff;
+    --btn:#16223a;--btn-bd:#2a3c5a;--btn-fg:#cfe0f5;--shadow:rgba(0,0,0,.25);
+    --sev-critical:#ff4d4d;--sev-high:#ff6b6b;--sev-medium:#ffd96b;--sev-low:#7cd0ff;--sev-info:#9fb0c8;
+  }
+  :root[data-theme="light"]{
+    --bg:#eef1f6;--fg:#1b2733;--muted:#5b6b80;--card:#ffffff;--border:#dce3ec;
+    --inset:#eef2f7;--th:#f4f7fb;--hero1:#ffffff;--hero2:#e7f0fb;--accent:#0a66c2;
+    --btn:#eef2f7;--btn-bd:#cbd6e4;--btn-fg:#1b2733;--shadow:rgba(20,40,80,.10);
+    --sev-critical:#d62828;--sev-high:#e85d04;--sev-medium:#b8860b;--sev-low:#0a66c2;--sev-info:#5b6b80;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;transition:background .2s,color .2s}
   .wrap{max-width:1180px;margin:0 auto;padding:24px}
-  .hero{background:linear-gradient(135deg,#121a2b,#0d1422);border:1px solid #1e2a3f;border-radius:16px;padding:22px 24px;margin-bottom:14px}
-  .hero h1{margin:0 0 10px;font-size:20px}
+  .hero{background:linear-gradient(135deg,var(--hero1),var(--hero2));border:1px solid var(--border);border-radius:16px;padding:22px 24px;margin-bottom:14px;box-shadow:0 2px 8px var(--shadow)}
+  .hero h1{margin:0;font-size:20px}
+  .herotop{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:10px}
   .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(118px,1fr));gap:10px;margin-top:6px}
-  .kpi{background:#0d1422;border:1px solid #1e2a3f;border-radius:10px;padding:10px;text-align:center}
-  .kpi .n{font-size:20px;font-weight:800} .kpi .l{font-size:11px;color:#9fb0c8;margin-top:2px}
+  .kpi{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:12px 10px;text-align:center;box-shadow:0 1px 3px var(--shadow)}
+  .kpi .n{font-size:22px;font-weight:800;line-height:1.1} .kpi .l{font-size:11px;color:var(--muted);margin-top:3px}
   h3{font-size:14px;margin:18px 0 8px}
-  table{width:100%;border-collapse:collapse;font-size:13px;background:#0d1422;border:1px solid #1e2a3f;border-radius:10px;overflow:hidden}
-  th,td{text-align:left;padding:8px 10px;border-bottom:1px solid #182337;vertical-align:top}
-  th{background:#111a2b;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:#9fb0c8}
+  table{width:100%;border-collapse:collapse;font-size:13px;background:var(--card);border:1px solid var(--border);border-radius:10px;overflow:hidden}
+  th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--border);vertical-align:top}
+  th{background:var(--th);font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
   .mono{font-family:ui-monospace,Consolas,monospace;font-size:12px}
-  .casc{color:#ffd96b;font-size:12px;margin-top:4px}
+  .casc{color:#e0a800;font-size:12px;margin-top:4px}
   .amp{color:#ff9f6b;font-size:12px;margin-top:3px}
-  .mtags{margin-top:5px;font-size:11px;color:#9fb0c8}
+  .mtags{margin-top:5px;font-size:11px;color:var(--muted)}
   .mitre{display:inline-block;background:#2a1a3a;border:1px solid #4a2d6b;color:#c9a7ff;border-radius:5px;padding:1px 6px;margin:0 4px 2px 0;font-family:ui-monospace,Consolas,monospace;font-size:11px}
-  .owner{color:#7cd0ff;font-size:11px;margin-top:4px}
+  .owner{color:var(--accent);font-size:11px;margin-top:4px}
   .devops{display:inline-block;background:#10261b;border:1px solid #1f5135;color:#7ee2a8;border-radius:5px;padding:1px 7px;margin-top:4px;font-size:11px}
-  .phase{margin-bottom:14px} .meta{color:#9fb0c8;font-size:12px}
-  .card{background:#0d1422;border:1px solid #1e2a3f;border-radius:12px;padding:14px}
-  .filters{background:#0d1422;border:1px solid #1e2a3f;border-radius:12px;padding:12px 14px;margin-bottom:16px}
+  .phase{margin-bottom:14px} .meta{color:var(--muted);font-size:12px}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:14px;box-shadow:0 1px 3px var(--shadow)}
+  .filters{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:12px 14px;margin-bottom:16px;box-shadow:0 1px 3px var(--shadow)}
   .filters .frow{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px}
   .fbox{min-width:0}
-  .flabel{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:#9fb0c8;margin-bottom:5px;display:flex;justify-content:space-between}
-  .fopts{max-height:120px;overflow:auto;background:#0b0f17;border:1px solid #1e2a3f;border-radius:8px;padding:6px 8px}
+  .flabel{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);margin-bottom:5px;display:flex;justify-content:space-between}
+  .fopts{max-height:120px;overflow:auto;background:var(--inset);border:1px solid var(--border);border-radius:8px;padding:6px 8px}
   .fopts label{display:flex;align-items:center;gap:6px;font-size:12px;padding:2px 0;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .fopts input{accent-color:#7cd0ff}
+  .fopts input{accent-color:var(--accent)}
   .ftop{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;gap:10px;flex-wrap:wrap}
-  .btn{background:#16223a;border:1px solid #2a3c5a;color:#cfe0f5;border-radius:8px;padding:6px 12px;font-size:12px;cursor:pointer}
-  .btn:hover{background:#1d2c49}
-  @media(max-width:680px){.kpis{grid-template-columns:repeat(3,1fr)}}
+  .btn{background:var(--btn);border:1px solid var(--btn-bd);color:var(--btn-fg);border-radius:8px;padding:6px 12px;font-size:12px;cursor:pointer}
+  .btn:hover{filter:brightness(1.08)}
+  .sv-critical{color:var(--sev-critical)} .sv-high{color:var(--sev-high)} .sv-medium{color:var(--sev-medium)} .sv-low{color:var(--sev-low)} .sv-informational{color:var(--sev-info)}
+  .dvgrid{display:grid;grid-template-columns:190px 1fr;gap:20px;align-items:center}
+  @media(max-width:620px){.dvgrid{grid-template-columns:1fr}}
+  .donut .donut-num{font-size:30px;font-weight:800;fill:var(--fg)} .donut .donut-lbl{font-size:11px;fill:var(--muted)}
+  .legend{display:flex;flex-wrap:wrap;gap:10px;margin-top:8px;justify-content:center}
+  .legend span{font-size:11px;color:var(--muted);display:flex;align-items:center;gap:5px}
+  .dot{width:10px;height:10px;border-radius:3px;display:inline-block}
+  .bars{margin-top:8px} .barrow{display:grid;grid-template-columns:170px 1fr 42px;gap:10px;align-items:center;margin:6px 0}
+  .barlbl{font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .bartrack{display:flex;height:16px;border-radius:6px;overflow:hidden;background:var(--inset);border:1px solid var(--border)}
+  .seg{height:100%} .barval{font-size:12px;font-weight:700;text-align:right}
+  .topbar{position:sticky;top:0;z-index:10;display:flex;justify-content:space-between;align-items:center;gap:12px;background:var(--card);border:1px solid var(--border);border-radius:14px;padding:9px 14px;margin-bottom:16px;box-shadow:0 2px 8px var(--shadow);flex-wrap:wrap}
+  .brand{display:flex;align-items:center;gap:9px;cursor:pointer;font-weight:800;font-size:15px}
+  .brand .mk{width:28px;height:28px;display:inline-flex}
+  .navlinks{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+  .navbtn{background:transparent;border:1px solid transparent;color:var(--muted);border-radius:8px;padding:6px 10px;font-size:12px;cursor:pointer}
+  .navbtn:hover{background:var(--inset);color:var(--fg)}
+  .navbtn.active{background:var(--inset);color:var(--fg);border-color:var(--border);font-weight:700}
+  .page{animation:fade .18s ease}
+  @keyframes fade{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+  .home-hero{text-align:center;padding:24px 16px 4px}
+  .home-hero .logo{width:74px;height:74px;margin:0 auto 12px;display:inline-flex}
+  .home-hero h1{font-size:24px;margin:0 0 6px}
+  .navgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px;margin-top:10px}
+  .navcard{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:18px;cursor:pointer;box-shadow:0 1px 3px var(--shadow);transition:transform .12s,box-shadow .12s,border-color .12s;display:flex;flex-direction:column;gap:3px}
+  .navcard:hover{transform:translateY(-3px);box-shadow:0 8px 20px var(--shadow);border-color:var(--accent)}
+  .navcard .ic{font-size:26px} .navcard b{font-size:15px} .navcard .big{font-size:26px;font-weight:800;margin-top:2px} .navcard span{color:var(--muted);font-size:12px}
+  .back{margin-bottom:12px} h2{font-size:18px;margin:4px 0 12px}
+  @media(max-width:680px){.kpis{grid-template-columns:repeat(3,1fr)}.barrow{grid-template-columns:110px 1fr 34px}}
 """
 
 _REPORT_JS = """
@@ -1045,11 +1125,17 @@ function aggSecure(subs){let cur=0,max=0,pot=0,has=false;subs.forEach(sid=>{cons
 function aggMcsb(subs){let p=0,f=0,sk=0,un=0,has=false;subs.forEach(sid=>{const s=DATA.subs[sid];if(s&&s.mcsb){has=true;p+=s.mcsb.passed;f+=s.mcsb.failed;sk+=s.mcsb.skipped;un+=s.mcsb.unsupported;}});if(!has)return null;const a=p+f;return {passed:p,failed:f,skipped:sk,unsupported:un,pct:a>0?Math.round(1000*p/a)/10:null};}
 function rowHtml(it){let cs=it.cost_delta?`<span style="color:#5ed16a">${esc(it.cost_delta)}</span>`:"";let ci=it.cost_increase?`<span style="color:#ff6b6b">${esc(it.cost_increase)}</span>`:"";let cost=(cs&&ci)?cs+"<br/>"+ci:(cs||ci||"—");let ss=it.score_impact_label?`<span style="color:#9ae6b4;font-weight:700">${esc(it.score_impact_label)}</span><div class="meta" style="font-size:11px">${esc(it.score_control)}</div>`:"—";let title=esc(it.title);if(it.portal_link){title=`<a href="${esc(it.portal_link)}" style="color:#e7edf5;text-decoration:none;border-bottom:1px dotted #4a5a72">${title}</a> <a href="${esc(it.portal_link)}" title="Abrir no portal" style="color:#7cd0ff;text-decoration:none">🔗</a>`;}const tags=(it.tactics||[]).concat(it.techniques||[]);let mitre=tags.length?`<div class="mtags">🎯 ${tags.slice(0,4).map(m=>`<span class="mitre">${esc(m)}</span>`).join("")}</div>`:"";let owner=it.owner?`<div class="owner">👤 ${esc(it.owner)}</div>`:"";let casc=it.cascade?`<div class="casc">↳ ${esc(it.cascade)}</div>`:"";let dvo=it.devops_repo?`<div class="devops">🐙 ${esc(it.devops_provider||"DevOps")} · ${esc(it.devops_repo)}</div>`:"";let src=`<span style="color:${it.source==="Advisor"?"#7cd0ff":"#c9a7ff"};font-weight:700">${esc(it.source)}</span>`;let subn=it.subscription_name&&it.subscription_name!=="—"?`<div class="meta" style="font-size:11px">${esc(it.subscription_name)} / ${esc(it.resource_group)}</div>`:"";return `<tr><td>${src}</td><td>${title}${dvo}${mitre}${owner}${casc}</td><td>${esc(it.category)}</td><td>${esc(it.priority)}</td><td>${ss}</td><td class="mono">${esc(it.resource_name)}${subn}</td><td>${cost}</td></tr>`;}
 function renderPlan(items){const by={safe:[],low:[],medium:[],high:[]};items.forEach(it=>{(by[it.risk]||by.low).push(it);});let html="";PHASES.forEach(lvl=>{const rows=by[lvl];if(!rows.length)return;const m=PHMETA[lvl]||{};html+=`<div class="phase"><h3>${esc(m.emoji||"")} ${esc(m.label||lvl)} <span class="meta">· ${esc(m.action||"")} · ${rows.length} item(ns)</span></h3><table><tr><th>Fonte</th><th>Recomendação</th><th>Categoria</th><th>Prioridade</th><th>Impacto SS</th><th>Recurso</th><th>Custo</th></tr>${rows.map(rowHtml).join("")}</table></div>`;});document.getElementById("plan").innerHTML=html||`<div class="card meta">Nenhuma recomendação para os filtros selecionados.</div>`;}
-function renderKpis(items,subs){const c={safe:0,low:0,medium:0,high:0};let sav=0,impl=0,devops=0;items.forEach(it=>{c[it.risk]=(c[it.risk]||0)+1;sav+=it.savings_raw||0;impl+=it.cost_increase_raw||0;if(it.devops_repo)devops++;});const ssA=aggSecure(subs);const mc=aggMcsb(subs);const k=document.getElementById("kpis");let cards=[["#7cd0ff",items.length,"recomendações"],["#5ed16a",c.safe,"🟢 quick wins"],["#ffd96b",c.low+c.medium,"🟡🟠 janela"],["#ff6b6b",c.high,"🔴 aprovação"],["#9fb0c8",ssA?ssA.cur+"%":"n/a","🛡️ SS atual"],["#9ae6b4",ssA?ssA.pot+"%":"n/a","🎯 SS potencial"],["#ff6b6b",impl?"+"+fmtUSD(impl,"/mês"):"—","💰 custo impl."]];if(mc&&mc.pct!=null){const cc=mc.pct>=80?"#5ed16a":(mc.pct>=50?"#ffd96b":"#ff6b6b");cards.push([cc,mc.pct+"%","🛡️ MCSB compliance"]);}if(devops)cards.push(["#7ee2a8",devops,"🐙 DevOps findings"]);k.innerHTML=cards.map(([col,n,l])=>`<div class="kpi"><div class="n" style="color:${col};font-size:${String(n).length>7?"14px":"20px"}">${esc(n)}</div><div class="l">${esc(l)}</div></div>`).join("");document.getElementById("subline").innerHTML=`economia potencial: <b style="color:#5ed16a">${sav?"−"+fmtUSD(sav,"/ano"):"—"}</b> · custo de implementação: <b style="color:#ff6b6b">${impl?"+"+fmtUSD(impl,"/mês"):"—"}</b> · 100% read-only`;const bar=document.getElementById("ssbar");if(ssA){bar.style.display="block";bar.innerHTML=`<div class="meta" style="margin-bottom:4px">🛡️ Secure Score: <b style="color:#9fb0c8">${ssA.cur}%</b> agora → <b style="color:#9ae6b4">${ssA.pot}%</b> se remediar tudo (<b style="color:#9ae6b4">+${Math.round(10*(ssA.pot-ssA.cur))/10} pp</b>)</div><div style="background:#0b0f17;border:1px solid #1e2a3f;border-radius:8px;height:14px;overflow:hidden;position:relative"><div style="position:absolute;left:0;top:0;height:100%;width:${ssA.pot}%;background:linear-gradient(90deg,#2d6a4f,#52b788);opacity:.45"></div><div style="position:absolute;left:0;top:0;height:100%;width:${ssA.cur}%;background:linear-gradient(90deg,#7cd0ff,#5ed16a)"></div></div>`;}else{bar.style.display="none";}}
-function renderMcsb(subs){const el=document.getElementById("mcsb");const mc=aggMcsb(subs);if(!mc){el.innerHTML="";return;}const cc=(mc.pct||0)>=80?"#5ed16a":((mc.pct||0)>=50?"#ffd96b":"#ff6b6b");const fc=(DATA.mcsb&&DATA.mcsb.failing_controls||[]).filter(x=>!sel("sub").size||subs.has(x.subscription_id)).slice(0,15);let ft="";if(fc.length){ft=`<table style="margin-top:10px"><tr><th>Controle</th><th>Nome</th><th>Falhando</th><th>OK</th></tr>${fc.map(x=>{let nm=esc(x.name);if(x.link)nm=`<a href="${esc(x.link)}" style="color:#e7edf5;text-decoration:none;border-bottom:1px dotted #4a5a72">${nm}</a>`;return `<tr><td class="mono">${esc(x.id)}</td><td>${nm}</td><td style="color:#ff6b6b;font-weight:700">${x.failed}</td><td style="color:#5ed16a">${x.passed}</td></tr>`;}).join("")}</table>`;}el.innerHTML=`<div class="phase"><h3>🛡️ Postura de Compliance — Microsoft Cloud Security Benchmark <span class="meta">· standard: ${esc(DATA.mcsb?DATA.mcsb.standard_name:"")}</span></h3><div class="card"><div style="display:flex;gap:18px;flex-wrap:wrap;align-items:center"><div><span style="font-size:28px;font-weight:800;color:${cc}">${mc.pct!=null?mc.pct+"%":"n/a"}</span><div class="meta">controles em conformidade</div></div><div class="meta">✅ ${mc.passed} passed · ❌ ${mc.failed} failed · ⏭️ ${mc.skipped} skipped · ⚪ ${mc.unsupported} unsupported</div></div><div style="background:#0b0f17;border:1px solid #1e2a3f;border-radius:8px;height:12px;overflow:hidden;margin-top:10px"><div style="height:100%;width:${mc.pct||0}%;background:linear-gradient(90deg,${cc},#52b788)"></div></div>${ft}</div></div>`;}
+function renderKpis(items,subs){const c={safe:0,low:0,medium:0,high:0};let sav=0,impl=0,devops=0;items.forEach(it=>{c[it.risk]=(c[it.risk]||0)+1;sav+=it.savings_raw||0;impl+=it.cost_increase_raw||0;if(it.devops_repo)devops++;});const ssA=aggSecure(subs);const mc=aggMcsb(subs);const k=document.getElementById("kpis");let cards=[["#7cd0ff",items.length,"recomendações"],["#5ed16a",c.safe,"🟢 quick wins"],["#ffd96b",c.low+c.medium,"🟡🟠 janela"],["#ff6b6b",c.high,"🔴 aprovação"],["#9fb0c8",ssA?ssA.cur+"%":"n/a","🛡️ SS atual"],["#9ae6b4",ssA?ssA.pot+"%":"n/a","🎯 SS potencial"],["#ff6b6b",impl?"+"+fmtUSD(impl,"/mês"):"—","💰 custo impl."]];if(mc&&mc.pct!=null){const cc=mc.pct>=80?"#5ed16a":(mc.pct>=50?"#ffd96b":"#ff6b6b");cards.push([cc,mc.pct+"%","🛡️ MCSB compliance"]);}if(devops)cards.push(["#7ee2a8",devops,"🐙 DevOps findings"]);k.innerHTML=cards.map(([col,n,l])=>`<div class="kpi"><div class="n" style="color:${col};font-size:${String(n).length>7?"14px":"20px"}">${esc(n)}</div><div class="l">${esc(l)}</div></div>`).join("");document.getElementById("subline").innerHTML=`economia potencial: <b style="color:#5ed16a">${sav?"−"+fmtUSD(sav,"/ano"):"—"}</b> · custo de implementação: <b style="color:#ff6b6b">${impl?"+"+fmtUSD(impl,"/mês"):"—"}</b> · 100% read-only`;const bar=document.getElementById("ssbar");if(ssA){bar.style.display="block";bar.innerHTML=`<div class="meta" style="margin-bottom:4px">🛡️ Secure Score: <b style="color:#9fb0c8">${ssA.cur}%</b> agora → <b style="color:#9ae6b4">${ssA.pot}%</b> se remediar tudo (<b style="color:#9ae6b4">+${Math.round(10*(ssA.pot-ssA.cur))/10} pp</b>)</div><div style="background:var(--inset);border:1px solid var(--border);border-radius:8px;height:14px;overflow:hidden;position:relative"><div style="position:absolute;left:0;top:0;height:100%;width:${ssA.pot}%;background:linear-gradient(90deg,#2d6a4f,#52b788);opacity:.45"></div><div style="position:absolute;left:0;top:0;height:100%;width:${ssA.cur}%;background:linear-gradient(90deg,#7cd0ff,#5ed16a)"></div></div>`;}else{bar.style.display="none";}}
+function renderMcsb(subs){const el=document.getElementById("mcsb");const mc=aggMcsb(subs);if(!mc){el.innerHTML="";return;}const cc=(mc.pct||0)>=80?"#5ed16a":((mc.pct||0)>=50?"#ffd96b":"#ff6b6b");const fc=(DATA.mcsb&&DATA.mcsb.failing_controls||[]).filter(x=>!sel("sub").size||subs.has(x.subscription_id)).slice(0,15);let ft="";if(fc.length){ft=`<table style="margin-top:10px"><tr><th>Controle</th><th>Nome</th><th>Falhando</th><th>OK</th></tr>${fc.map(x=>{let nm=esc(x.name);if(x.link)nm=`<a href="${esc(x.link)}" style="color:#e7edf5;text-decoration:none;border-bottom:1px dotted #4a5a72">${nm}</a>`;return `<tr><td class="mono">${esc(x.id)}</td><td>${nm}</td><td style="color:#ff6b6b;font-weight:700">${x.failed}</td><td style="color:#5ed16a">${x.passed}</td></tr>`;}).join("")}</table>`;}el.innerHTML=`<div class="phase"><h3>🛡️ Postura de Compliance — Microsoft Cloud Security Benchmark <span class="meta">· standard: ${esc(DATA.mcsb?DATA.mcsb.standard_name:"")}</span></h3><div class="card"><div style="display:flex;gap:18px;flex-wrap:wrap;align-items:center"><div><span style="font-size:28px;font-weight:800;color:${cc}">${mc.pct!=null?mc.pct+"%":"n/a"}</span><div class="meta">controles em conformidade</div></div><div class="meta">✅ ${mc.passed} passed · ❌ ${mc.failed} failed · ⏭️ ${mc.skipped} skipped · ⚪ ${mc.unsupported} unsupported</div></div><div style="background:var(--inset);border:1px solid var(--border);border-radius:8px;height:12px;overflow:hidden;margin-top:10px"><div style="height:100%;width:${mc.pct||0}%;background:linear-gradient(90deg,${cc},#52b788)"></div></div>${ft}</div></div>`;}
 function apply(){let items=DATA.items;DIMS.forEach(([dim])=>{const s=sel(dim);if(s.size)items=items.filter(it=>s.has(val(it,dim)));});const subs=selectedSubs();renderKpis(items,subs);renderPlan(items);renderMcsb(subs);}
 function clearAll(){document.querySelectorAll("#frow input[type=checkbox]").forEach(c=>c.checked=false);apply();}
+function setTheme(t){document.documentElement.setAttribute("data-theme",t);try{localStorage.setItem("ai_theme",t);}catch(e){}var b=document.getElementById("themebtn");if(b)b.textContent=(t==="light"?"🌙 Tema escuro":"☀️ Tema claro");}
+function toggleTheme(){var c=document.documentElement.getAttribute("data-theme")||"dark";setTheme(c==="light"?"dark":"light");}
+function showPage(id){document.querySelectorAll(".page").forEach(function(p){p.style.display="none";});var el=document.getElementById(id);if(el)el.style.display="block";document.querySelectorAll(".navbtn").forEach(function(b){b.classList.toggle("active",b.getAttribute("data-page")===id);});try{location.hash=id;}catch(e){}window.scrollTo(0,0);}
+function goHome(){showPage("home");}
+(function(){var t="dark";try{t=localStorage.getItem("ai_theme")||"dark";}catch(e){}setTheme(t);})();
 buildFilters();apply();
+(function(){var h=(location.hash||"").replace("#","");showPage(h&&document.getElementById(h)?h:"home");})();
 """
 
 def render_html(ctx, q):
@@ -1111,27 +1197,85 @@ def render_html(ctx, q):
             '<meta name="viewport" content="width=device-width,initial-scale=1">'
             '<title>Advisor + Defender for Cloud — Remediation Plan</title>'
             '<style>' + _REPORT_CSS + '</style></head><body><div class="wrap">')
-    hero = (
-        '<div class="hero"><h1>🧭 Plano de Remediação — Advisor + Defender for Cloud</h1>'
-        '<div class="meta" style="margin-bottom:8px">escopo: <b>' + scope + '</b> · '
-        + str(n) + ' recomendação(ões) · ' + str(nsubs) + ' subscription(s) · gerado '
-        + esc(ctx.get("generated", "")) + '</div>'
+
+    generated = esc(ctx.get("generated", ""))
+    mcsb_pct = ctx["mcsb"].get("compliance_pct") if ctx.get("mcsb") else None
+    devops_total = ctx["devops"]["total"] if ctx.get("devops") else 0
+
+    logo_svg = (
+        "<svg viewBox='0 0 48 48' width='100%' height='100%' fill='none' xmlns='http://www.w3.org/2000/svg'>"
+        "<defs><linearGradient id='lg' x1='0' y1='0' x2='1' y2='1'>"
+        "<stop offset='0' stop-color='#7cd0ff'/><stop offset='1' stop-color='#5ed16a'/></linearGradient></defs>"
+        "<path d='M24 3l16 6v10c0 11-7 18-16 23C15 37 8 30 8 19V9l16-6z' fill='url(#lg)'/>"
+        "<path d='M16.5 24l5 5 10-11' stroke='#08111d' stroke-width='3.4' stroke-linecap='round' stroke-linejoin='round'/></svg>")
+
+    # ---- barra superior (sempre visível) ----
+    nav_extra = ""
+    if mcsb_pct is not None:
+        nav_extra += "<button class=\"navbtn\" data-page=\"page-mcsb\" onclick=\"showPage('page-mcsb')\">📋 MCSB</button>"
+    if devops_total:
+        nav_extra += "<button class=\"navbtn\" data-page=\"page-devops\" onclick=\"showPage('page-devops')\">🐙 DevOps</button>"
+    topbar = (
+        '<div class="topbar"><div class="brand" onclick="goHome()"><span class="mk">' + logo_svg + '</span>'
+        '<span>advisor-impact</span></div><div class="navlinks">'
+        '<button class="navbtn" data-page="home" onclick="showPage(\'home\')">🏠 Início</button>'
+        '<button class="navbtn" data-page="page-plan" onclick="showPage(\'page-plan\')">🧭 Plano</button>'
+        + nav_extra +
+        '<button id="themebtn" class="btn" onclick="toggleTheme()">☀️ Tema claro</button></div></div>')
+
+    # ---- cards de avaliação na home ----
+    cards = ("<div class=\"navcard\" onclick=\"showPage('page-plan')\"><div class=\"ic\">🧭</div>"
+             "<b>Plano de Remediação</b><div class=\"big\">" + str(n) + "</div>"
+             "<span>recomendações priorizadas por risco de aplicar</span></div>")
+    if mcsb_pct is not None:
+        cards += ("<div class=\"navcard\" onclick=\"showPage('page-mcsb')\"><div class=\"ic\">📋</div>"
+                  "<b>MCSB Compliance</b><div class=\"big\">" + str(mcsb_pct) + "%</div>"
+                  "<span>conformidade Microsoft Cloud Security Benchmark</span></div>")
+    if devops_total:
+        cards += ("<div class=\"navcard\" onclick=\"showPage('page-devops')\"><div class=\"ic\">🐙</div>"
+                  "<b>DevOps Remediation</b><div class=\"big\">" + str(devops_total) + "</div>"
+                  "<span>findings GitHub / Defender DevOps (CVE/code/IaC)</span></div>")
+
+    home = (
+        '<div id="home" class="page"><div class="home-hero"><div class="logo">' + logo_svg + '</div>'
+        '<h1>Plano de Remediação</h1>'
+        '<div class="meta">Advisor + Microsoft Defender for Cloud · escopo <b>' + scope + '</b> · '
+        + str(n) + ' recomendação(ões) · ' + str(nsubs) + ' subscription(s) · gerado ' + generated + '</div></div>'
         '<div class="kpis" id="kpis"></div>'
         '<div id="ssbar" style="margin-top:12px;display:none"></div>'
-        '<div class="meta" id="subline" style="margin-top:12px"></div></div>')
+        '<div class="meta" id="subline" style="margin-top:12px"></div>'
+        '<h3 style="margin-top:22px">Avaliações</h3>'
+        '<div class="navgrid">' + cards + '</div></div>')
+
     filters = (
         '<div class="filters"><div class="ftop"><div class="meta">🔎 Filtros — marque para refinar; '
         'vazio = tudo. Secure Score e MCSB recalculam pelo filtro de Subscription.</div>'
         '<button class="btn" onclick="clearAll()">Limpar filtros</button></div>'
         '<div class="frow" id="frow"></div></div>')
     devops_html = _render_devops_section(ctx.get("devops"))
-    body = ('<div id="plan"></div><div id="mcsb"></div>' + devops_html +
-            '<div class="meta" style="margin-top:20px;border-top:1px solid #1e2a3f;padding-top:12px">'
-            'advisor-impact · Azure Advisor + Microsoft Defender for Cloud · risco = disrupção de aplicar '
-            '(não criticidade). Custos via Azure Retail Prices API · Compliance via MCSB '
-            '(inspirado no <a href="https://github.com/microsoft/ESA" style="color:#7cd0ff">microsoft/ESA</a>).</div></div>')
+
+    page_plan = (
+        '<div id="page-plan" class="page" style="display:none">'
+        '<button class="btn back" onclick="goHome()">← Início</button>'
+        '<h2>🧭 Plano de Remediação <span class="meta">· por fase de risco de aplicar</span></h2>'
+        + filters + '<div id="plan"></div></div>')
+    page_mcsb = (
+        '<div id="page-mcsb" class="page" style="display:none">'
+        '<button class="btn back" onclick="goHome()">← Início</button>'
+        '<div id="mcsb"></div></div>')
+    page_devops = (
+        '<div id="page-devops" class="page" style="display:none">'
+        '<button class="btn back" onclick="goHome()">← Início</button>'
+        + devops_html + '</div>')
+
+    footer = ('<div class="meta" style="margin-top:20px;border-top:1px solid var(--border);padding-top:12px">'
+              'advisor-impact · Azure Advisor + Microsoft Defender for Cloud · risco = disrupção de aplicar '
+              '(não criticidade). Custos via Azure Retail Prices API · Compliance via MCSB '
+              '(inspirado no <a href="https://github.com/microsoft/ESA" style="color:var(--accent)">microsoft/ESA</a>).</div>')
+
+    body = topbar + home + page_plan + page_mcsb + page_devops + footer + '</div>'
     script = '<script>const DATA=' + data_json + ';\n' + _REPORT_JS + '</script>'
-    return head + hero + filters + body + script + '</body></html>'
+    return head + body + script + '</body></html>'
 
 def render_md(ctx, q):
     ph = q.get("phases", {})
