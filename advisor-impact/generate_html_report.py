@@ -879,6 +879,9 @@ def build_context(q, raw, params):
     # Pilar XDR — recomendações do Defender XDR/TVM (dataset opcional, prefetch)
     xdr = analyze_xdr_recommendations(raw.get("xdr_recommendations"), sub_names)
 
+    # Microsoft Secure Score (M365/Entra) — dataset opcional (prefetch via Graph)
+    m365 = analyze_m365_secure_score(raw.get("m365_secure_score") or raw.get("secure_score_m365"))
+
     # Mapa POR SUBSCRIPTION (p/ recalcular SS + MCSB sob filtro de subscription no JS)
     subs = {}
     sub_ids = set(it.get("subscription_id") for it in items if it.get("subscription_id"))
@@ -908,6 +911,7 @@ def build_context(q, raw, params):
         "subs": subs,
         "devops": devops,
         "xdr": xdr,
+        "m365": m365,
         "scope_label": params.get("_scope_label", ""),
         "resources_in_scope": len(rmap) or len({it.get("resource_id") for it in items if it.get("resource_id")}),
         "savings_total": savings_total,
@@ -1161,6 +1165,68 @@ def _render_xdr_section(xdr):
         f"{det}</table>"
         "</div></div>")
 
+# =============================================================================
+# Microsoft Secure Score (M365/Entra) — dataset OPCIONAL (Graph /security/secureScores)
+# + cards de score (estilo Power BI) e Resumo Executivo
+# =============================================================================
+def analyze_m365_secure_score(data):
+    """Microsoft Secure Score (Entra ID + Microsoft 365) via Graph /security/secureScores. Opcional."""
+    rows = as_list(data)
+    if not rows:
+        return None
+    r = rows[0] if isinstance(rows[0], dict) else {}
+    p = r.get("properties") if isinstance(r.get("properties"), dict) else r
+    try:
+        cur = float(p.get("currentScore"))
+        mx = float(p.get("maxScore"))
+    except (TypeError, ValueError):
+        return None
+    if mx <= 0:
+        return None
+    return {"pct": round(100.0 * cur / mx, 1), "current": round(cur, 1),
+            "max": round(mx, 1), "controls": len(p.get("controlScores") or [])}
+
+def _score_card(icon, title, big, big_sub, rows, onclick=""):
+    """Card de score estilo Power BI: ícone + título + número grande + sub-métricas. rows=[(label,value,color)]."""
+    click = (" onclick=\"" + onclick + "\" style=\"cursor:pointer\"") if onclick else ""
+    rh = "".join(f"<div class='scrow'><span>{esc(l)}</span><b style='color:{c}'>{esc(str(v))}</b></div>"
+                 for l, v, c in rows)
+    return (f"<div class='scorecard'{click}><div class='schead'><span class='scic'>{icon}</span>"
+            f"<span class='sctitle'>{esc(title)}</span></div>"
+            f"<div class='scbig'>{esc(str(big))}</div>"
+            + (f"<div class='scbiglbl'>{esc(big_sub)}</div>" if big_sub else "")
+            + f"<div class='scrows'>{rh}</div></div>")
+
+def _exec_summary_html(ctx):
+    """Resumo executivo consolidado (narrativa server-side a partir do ctx)."""
+    n = len(ctx["items"])
+    ph = ctx.get("phases", {})
+    safe, low, med, high = (len(ph.get(k, [])) for k in ("safe", "low", "medium", "high"))
+    ss, ss_pot, ss_delta = ctx.get("secure_score"), ctx.get("secure_score_potential"), ctx.get("secure_score_delta")
+    mcsb, xdr, devops, m365 = ctx.get("mcsb"), ctx.get("xdr"), ctx.get("devops"), ctx.get("m365")
+    savings = ctx.get("savings_total") or 0
+    b = []
+    sav_txt = (f" Economia potencial <b style='color:#5ed16a'>−US$ {savings:,.0f}/ano</b>." if savings else "")
+    b.append(f"<li><b>Plano de remediação:</b> {n} recomendações — 🟢 {safe} quick wins · 🟡🟠 {low+med} em janela · 🔴 {high} exigem aprovação.{sav_txt}</li>")
+    if m365:
+        b.append(f"<li><b>Microsoft Secure Score:</b> <b>{m365['pct']}%</b> (Entra ID + Microsoft 365).</li>")
+    if ss is not None:
+        ptxt = (f" → potencial <b style='color:#9ae6b4'>{ss_pot}%</b> (+{ss_delta} pp se remediar tudo)" if ss_pot is not None else "")
+        b.append(f"<li><b>Defender for Cloud — Secure Score:</b> atual <b>{ss}%</b>{ptxt}.</li>")
+    if mcsb:
+        b.append(f"<li><b>MCSB Compliance:</b> <b>{mcsb.get('compliance_pct')}%</b> de conformidade — {mcsb.get('passed',0)} passed / <b style='color:#ff6b6b'>{mcsb.get('failed',0)} failed</b>.</li>")
+    if xdr:
+        b.append(f"<li><b>Defender XDR:</b> {xdr['total']} recomendações — <b style='color:#ff6b6b'>{xdr['exploit_total']}</b> com exploit público · {xdr['exposed_total']} máquinas expostas.</li>")
+    if devops:
+        c = devops['by_severity'].get('Critical', 0)
+        h = devops['by_severity'].get('High', 0)
+        b.append(f"<li><b>DevOps Remediation:</b> {devops['total']} findings — <b style='color:#ff4d4d'>{c} Critical</b> / <b style='color:#ff6b6b'>{h} High</b>.</li>")
+    prio = ("Prioridade sugerida: 🔴 aprovações + Critical/High (XDR/DevOps) → 🟢 quick wins do Secure Score → "
+            "controles MCSB em falha.")
+    return ("<div class='card'><h3 style='margin-top:0'>Visão consolidada</h3>"
+            "<ul style='margin:6px 0 0;padding-left:18px;line-height:1.9'>" + "".join(b) + "</ul>"
+            f"<div class='meta' style='margin-top:10px'>{prio}</div></div>")
+
 # CSS + JS do relatório interativo (string normal, SEM f-string → não precisa escapar {}).
 _REPORT_CSS = """
   :root{
@@ -1235,6 +1301,16 @@ _REPORT_CSS = """
   .navcard:hover{transform:translateY(-3px);box-shadow:0 8px 20px var(--shadow);border-color:var(--accent)}
   .navcard .ic{font-size:26px} .navcard b{font-size:15px} .navcard .big{font-size:26px;font-weight:800;margin-top:2px} .navcard span{color:var(--muted);font-size:12px}
   .back{margin-bottom:12px} h2{font-size:18px;margin:4px 0 12px}
+  .scoregrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:16px;margin-top:8px}
+  .scorecard{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:18px 20px;box-shadow:0 1px 3px var(--shadow);transition:transform .12s,box-shadow .12s,border-color .12s}
+  .scorecard[onclick]:hover{transform:translateY(-3px);box-shadow:0 8px 20px var(--shadow);border-color:var(--accent)}
+  .schead{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:13px;font-weight:600;min-height:38px}
+  .scic{font-size:20px}
+  .scbig{font-size:40px;font-weight:800;text-align:center;margin:6px 0 0;letter-spacing:-1px}
+  .scbiglbl{text-align:center;color:var(--muted);font-size:12px;margin-bottom:6px}
+  .scrows{margin-top:8px;border-top:1px solid var(--border);padding-top:8px}
+  .scrow{display:flex;justify-content:space-between;align-items:center;font-size:13px;padding:3px 0}
+  .scrow span{color:var(--muted)}
   @media(max-width:680px){.kpis{grid-template-columns:repeat(3,1fr)}.barrow{grid-template-columns:110px 1fr 34px}}
 """
 
@@ -1331,9 +1407,14 @@ def render_html(ctx, q):
     generated = esc(ctx.get("generated", ""))
     mcsb_pct = ctx["mcsb"].get("compliance_pct") if ctx.get("mcsb") else None
     devops_total = ctx["devops"]["total"] if ctx.get("devops") else 0
-    xdr_total = ctx["xdr"]["total"] if ctx.get("xdr") else 0
+    xdr = ctx.get("xdr")
+    xdr_total = xdr["total"] if xdr else 0
+    mcsb = ctx.get("mcsb")
+    m365 = ctx.get("m365")
+    ss, ss_pot, ss_delta = ctx.get("secure_score"), ctx.get("secure_score_potential"), ctx.get("secure_score_delta")
     n_adv = len(ctx.get("advisor", []))
     n_mdc = len(ctx.get("mdc", []))
+    n_high_mdc = sum(1 for it in ctx.get("mdc", []) if str(it.get("priority", "")).lower() in ("high", "critical"))
 
     logo_svg = (
         "<svg viewBox='0 0 48 48' width='100%' height='100%' fill='none' xmlns='http://www.w3.org/2000/svg'>"
@@ -1343,7 +1424,7 @@ def render_html(ctx, q):
         "<path d='M16.5 24l5 5 10-11' stroke='#08111d' stroke-width='3.4' stroke-linecap='round' stroke-linejoin='round'/></svg>")
 
     # ---- barra superior (sempre visível) ----
-    nav_extra = ""
+    nav_extra = "<button class=\"navbtn\" data-page=\"page-exec\" onclick=\"showPage('page-exec')\">📊 Resumo Executivo</button>"
     if n_adv:
         nav_extra += "<button class=\"navbtn\" data-page=\"page-plan\" onclick=\"gotoSource('Advisor')\">📘 Advisor</button>"
     if n_mdc:
@@ -1361,43 +1442,57 @@ def render_html(ctx, q):
         + nav_extra +
         '<button id="themebtn" class="btn" onclick="toggleTheme()">☀️ Tema claro</button></div></div>')
 
-    # ---- cards de avaliação na home (Advisor e Defender for Cloud separados) ----
-    cards = ""
-    if n_adv:
-        cards += ("<div class=\"navcard\" onclick=\"gotoSource('Advisor')\"><div class=\"ic\">📘</div>"
-                  "<b>Azure Advisor</b><div class=\"big\">" + str(n_adv) + "</div>"
-                  "<span>recomendações Cost / Reliability / Performance / OpEx</span></div>")
-    if n_mdc:
-        cards += ("<div class=\"navcard\" onclick=\"gotoSource('Defender for Cloud')\"><div class=\"ic\">🛡️</div>"
-                  "<b>Defender for Cloud</b><div class=\"big\">" + str(n_mdc) + "</div>"
-                  "<span>security assessments (postura de nuvem)</span></div>")
-    if not cards:
-        cards += ("<div class=\"navcard\" onclick=\"showPage('page-plan')\"><div class=\"ic\">🧭</div>"
-                  "<b>Plano de Remediação</b><div class=\"big\">" + str(n) + "</div>"
-                  "<span>recomendações priorizadas por risco</span></div>")
-    if xdr_total:
-        cards += ("<div class=\"navcard\" onclick=\"showPage('page-xdr')\"><div class=\"ic\">🛡️</div>"
-                  "<b>Defender XDR</b><div class=\"big\">" + str(xdr_total) + "</div>"
-                  "<span>recomendações Vulnerability Management / Exposure</span></div>")
-    if mcsb_pct is not None:
-        cards += ("<div class=\"navcard\" onclick=\"showPage('page-mcsb')\"><div class=\"ic\">📋</div>"
-                  "<b>MCSB Compliance</b><div class=\"big\">" + str(mcsb_pct) + "%</div>"
-                  "<span>conformidade Microsoft Cloud Security Benchmark</span></div>")
-    if devops_total:
-        cards += ("<div class=\"navcard\" onclick=\"showPage('page-devops')\"><div class=\"ic\">🐙</div>"
-                  "<b>DevOps Remediation</b><div class=\"big\">" + str(devops_total) + "</div>"
-                  "<span>findings GitHub / Defender DevOps (CVE/code/IaC)</span></div>")
+    # ---- cards de SCORE na home (estilo Power BI: só os scores, bem clean) ----
+    score_cards = ""
+    if m365:
+        score_cards += _score_card("🏆", "Microsoft Secure Score", f"{m365['pct']}%", "Entra ID + Microsoft 365",
+            [("Pontos atuais", m365['current'], "var(--accent)"),
+             ("Pontos máximos", m365['max'], "var(--muted)"),
+             ("Controles avaliados", m365['controls'], "var(--muted)")],
+            "showPage('page-exec')")
+    if ss is not None:
+        score_cards += _score_card("🛡️", "Defender for Cloud — Secure Score", f"{ss}%", "postura de nuvem",
+            [("Potencial", f"{ss_pot}%" if ss_pot is not None else "—", "#5ed16a"),
+             ("Elevação possível", f"+{ss_delta} pp" if ss_delta is not None else "—", "#5ed16a"),
+             ("Recomendações", n_mdc, "var(--fg)"),
+             ("Severidade alta", n_high_mdc, "#ff6b6b")],
+            "gotoSource('Defender for Cloud')")
+    if xdr:
+        score_cards += _score_card("🛡️", "Defender XDR", xdr['total'], "recomendações · Vuln Mgmt / Exposure",
+            [("Critical", xdr['by_severity'].get('Critical', 0), "#ff4d4d"),
+             ("High", xdr['by_severity'].get('High', 0), "#ff6b6b"),
+             ("Exploit público", xdr['exploit_total'], "#ff6b6b"),
+             ("Máquinas expostas", xdr['exposed_total'], "#ffd96b")],
+            "showPage('page-xdr')")
+    if mcsb:
+        score_cards += _score_card("📋", "MCSB Compliance", f"{mcsb_pct}%" if mcsb_pct is not None else "n/a",
+            "Microsoft Cloud Security Benchmark",
+            [("Passed", mcsb.get('passed', 0), "#5ed16a"),
+             ("Failed", mcsb.get('failed', 0), "#ff6b6b"),
+             ("Skipped", mcsb.get('skipped', 0), "var(--muted)"),
+             ("Unsupported", mcsb.get('unsupported', 0), "var(--muted)")],
+            "showPage('page-mcsb')")
+    if not score_cards:
+        score_cards = ("<div class=\"navcard\" onclick=\"showPage('page-plan')\"><div class=\"ic\">🧭</div>"
+                       "<b>Plano de Remediação</b><div class=\"big\">" + str(n) + "</div>"
+                       "<span>recomendações priorizadas por risco</span></div>")
 
     home = (
         '<div id="home" class="page"><div class="home-hero"><div class="logo">' + logo_svg + '</div>'
         '<h1>Plano de Remediação</h1>'
         '<div class="meta">Advisor + Microsoft Defender for Cloud · escopo <b>' + scope + '</b> · '
         + str(n) + ' recomendação(ões) · ' + str(nsubs) + ' subscription(s) · gerado ' + generated + '</div></div>'
+        '<div class="scoregrid">' + score_cards + '</div></div>')
+
+    # ---- Resumo Executivo (com a faixa de KPIs ao vivo) ----
+    page_exec = (
+        '<div id="page-exec" class="page" style="display:none">'
+        '<button class="btn back" onclick="goHome()">← Início</button>'
+        '<h2>📊 Resumo Executivo</h2>'
         '<div class="kpis" id="kpis"></div>'
         '<div id="ssbar" style="margin-top:12px;display:none"></div>'
-        '<div class="meta" id="subline" style="margin-top:12px"></div>'
-        '<h3 style="margin-top:22px">Avaliações</h3>'
-        '<div class="navgrid">' + cards + '</div></div>')
+        '<div class="meta" id="subline" style="margin-top:12px;margin-bottom:14px"></div>'
+        + _exec_summary_html(ctx) + '</div>')
 
     filters = (
         '<div class="filters"><div class="ftop"><div class="meta">🔎 Filtros — marque para refinar; '
@@ -1430,7 +1525,7 @@ def render_html(ctx, q):
               '(não criticidade). Custos via Azure Retail Prices API · Compliance via MCSB '
               '(inspirado no <a href="https://github.com/microsoft/ESA" style="color:var(--accent)">microsoft/ESA</a>).</div>')
 
-    body = topbar + home + page_plan + page_xdr + page_mcsb + page_devops + footer + '</div>'
+    body = topbar + home + page_exec + page_plan + page_xdr + page_mcsb + page_devops + footer + '</div>'
     script = '<script>const DATA=' + data_json + ';\n' + _REPORT_JS + '</script>'
     return head + body + script + '</body></html>'
 
