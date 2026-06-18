@@ -1420,98 +1420,29 @@ def analyze_m365_dashboard(m365_raw, profiles_raw):
     return out
 
 
-def _m365_pie_card(title, segs, size=150):
-    """Mini-card pizza + legenda (estilo Power BI)."""
-    nz = [(l, v, c) for l, v, c in segs if v]
-    pie = _svg_pie([(l, v, c) for l, v, c in nz], size)
-    legend = "<div class='legend'>" + "".join(
-        f"<span><i class='dot' style='background:{c}'></i>{esc(l)} · {v}</span>" for l, v, c in nz) + "</div>"
-    return f"<div class='piecard'><div class='pctitle'>{esc(title)}</div>{pie}{legend}</div>"
-
-
 def _render_m365_section(ctx):
-    """Página 🏆 Microsoft Secure Score (dashboard estilo ESA, melhorado)."""
+    """Página 🏆 Microsoft Secure Score (dashboard estilo ESA, interativo via JS).
+    O shell traz filtros + placeholders; o JS (renderM365) calcula KPIs/pizzas/tabelas sob filtro."""
     m = ctx.get("m365")
     if not m or not m.get("dashboard"):
         return ""
-    kpis = [("#9fb0c8", f"{m['pct']}%", "🏆 Secure Score"),
-            ("#7cd0ff", m["total"], "recomendações"),
-            ("#5ed16a", m["completed"], "✅ concluídas"),
-            ("#ffb020", m["to_address"], "🟠 a endereçar"),
-            ("#9ae6b4", f"+{int(m['missing_total'])}", "🎯 pontos a ganhar")]
-    if m["no_license"]:
-        kpis.append(("#ff6b6b", m["no_license"], "⚠️ sem licença"))
-    kstrip = "".join(
-        f"<div class='kpi'><div class='n' style='color:{c}'>{esc(str(v))}</div><div class='l'>{esc(l)}</div></div>"
-        for c, v, l in kpis)
-
-    st = m["by_status"]
-    status_segs = [(s, st[s], _M365_STATUS_COLOR.get(s, "#9fb0c8")) for s in sorted(st, key=st.get, reverse=True)]
-    ct = m["by_category"]
-    cat_segs = [(c, ct[c], _M365_CAT_COLOR.get(c, "#9fb0c8")) for c in sorted(ct, key=ct.get, reverse=True)]
-    bk = m["by_bucket"]
-    bucket_segs = [(b, bk.get(b, 0), _M365_BUCKET_COLOR[b]) for b in ("Alcançado", "Parcial", "Oportunidade") if bk.get(b)]
-    pies = (_m365_pie_card("Status", status_segs) + _m365_pie_card("Categoria", cat_segs)
-            + _m365_pie_card("Pontuação", bucket_segs))
-    if m.get("license_segs"):
-        pies += _m365_pie_card("Licença", m["license_segs"])
-
-    # Recomendações por produto
-    pr = ""
-    for p in m["by_product"][:15]:
-        pr += (f"<tr><td>{esc(p['product'])}</td>"
-               f"<td style='text-align:right;color:#5ed16a;font-weight:700'>{p['completed']}</td>"
-               f"<td style='text-align:right;color:#ffb020;font-weight:700'>{p['to_address']}</td>"
-               f"<td style='text-align:right'>{p['pct']}%</td>"
-               f"<td><div class='bartrack' style='height:10px'><span class='seg' style='width:{p['pct']}%;background:#52b788'></span></div></td></tr>")
-    prod_table = ("<table><tr><th>Produto</th><th style='text-align:right'>Concluídas</th>"
-                  "<th style='text-align:right'>A endereçar</th><th style='text-align:right'>% atingido</th>"
-                  "<th>&nbsp;</th></tr>" + pr + "</table>")
-
-    # Barras: pontuação (verde) vs pontos a ganhar (cinza) — top por pontos a ganhar
-    top_bar = [x for x in m["top"] if x["max"] > 0][:12]
-    maxv = max((x["max"] for x in top_bar), default=1) or 1
-    bars = ""
-    for x in top_bar:
-        sw = 100.0 * x["score"] / maxv
-        mw = 100.0 * x["missing"] / maxv
-        seg = (f"<span class='seg' style='width:{sw:.1f}%;background:#52b788' title='pontuação {x['score']}'></span>"
-               f"<span class='seg' style='width:{mw:.1f}%;background:var(--inset);border-left:1px solid var(--border)' title='a ganhar {x['missing']}'></span>")
-        bars += (f"<div class='barrow'><div class='barlbl' title='{esc(x['name'])}'>{esc(x['name'])}</div>"
-                 f"<div class='bartrack'>{seg}</div><div class='barval'>{x['score']:g}/{x['max']:g}</div></div>")
-    bars_html = f"<div class='bars'>{bars}</div>"
-
-    # Tabela detalhada
-    det = ""
-    for x in m["top"][:30]:
-        sc = _M365_STATUS_COLOR.get(x["status"], "#9fb0c8")
-        link = x.get("link") or ""
-        ref = (f"<a href='{esc(link)}' target='_blank' style='color:var(--accent);white-space:nowrap'>Portal ↗</a>"
-               if link else "<span class='meta'>—</span>")
-        det += (f"<tr><td>{esc(x['name'])}</td>"
-                f"<td class='meta' style='white-space:nowrap'>{esc(x['category'])}</td>"
-                f"<td class='meta' style='white-space:nowrap'>{esc(x['product'])}</td>"
-                f"<td style='white-space:nowrap;color:{sc};font-weight:700'>{esc(x['status'])}</td>"
-                f"<td style='text-align:right'>{x['score']:g}</td>"
-                f"<td style='text-align:right' class='meta'>{x['max']:g}</td>"
-                f"<td style='text-align:right;color:#9ae6b4;font-weight:700'>+{x['missing']:g}</td>"
-                f"<td>{ref}</td></tr>")
-    det_table = ("<table><tr><th>Ação recomendada</th><th>Categoria</th><th>Produto</th><th>Status</th>"
-                 "<th style='text-align:right'>Pontuação</th><th style='text-align:right'>Máx</th>"
-                 "<th style='text-align:right'>A ganhar</th><th>Referência</th></tr>" + det + "</table>")
-
+    filters = (
+        '<div class="filters"><div class="ftop">'
+        '<div class="meta">🔎 Filtros — marque para refinar; vazio = tudo. Tudo recalcula conforme a seleção.</div>'
+        '<button class="btn" onclick="clearM365()">Limpar filtros</button></div>'
+        '<div class="frow" id="m365frow"></div></div>')
     return (
         "<div class='phase'><h3>🏆 Microsoft Secure Score "
         "<span class='meta'>· Entra ID + Microsoft 365 · Recommended Actions (security.microsoft.com/securescore)</span></h3>"
+        + filters +
         "<div class='card'>"
-        f"<div class='kpis'>{kstrip}</div>"
-        f"<div class='pgrid' style='margin-top:14px'>{pies}</div>"
-        "<h3 style='margin-top:16px'>📦 Recomendações por produto</h3>"
-        f"{prod_table}"
+        "<div class='kpis' id='m365kpis'></div>"
+        "<div class='pgrid' id='m365pies' style='margin-top:14px'></div>"
+        "<h3 style='margin-top:16px'>📦 Recomendações por produto</h3><div id='m365prod'></div>"
         "<h3 style='margin-top:16px'>📊 Pontuação vs pontos a ganhar <span class='meta'>· top 12 por oportunidade</span></h3>"
-        f"{bars_html}"
+        "<div id='m365bars'></div>"
         "<h3 style='margin-top:16px'>🔧 Ações recomendadas <span class='meta'>· ordenadas por pontos a ganhar</span></h3>"
-        f"{det_table}"
+        "<div id='m365table'></div>"
         "</div></div>")
 
 def _score_card(icon, title, big, big_sub, rows, onclick="", pie=""):
@@ -1791,8 +1722,22 @@ function toggleTheme(){var c=document.documentElement.getAttribute("data-theme")
 function showPage(id){document.querySelectorAll(".page").forEach(function(p){p.style.display="none";});var el=document.getElementById(id);if(el)el.style.display="block";document.querySelectorAll(".navbtn").forEach(function(b){b.classList.toggle("active",b.getAttribute("data-page")===id);});try{location.hash=id;}catch(e){}window.scrollTo(0,0);}
 function goHome(){showPage("home");}
 function gotoSource(src){document.querySelectorAll("#frow input[type=checkbox]").forEach(function(c){c.checked=false;});if(src){var box=document.querySelector('#frow input[data-dim="source"][value="'+src.replace(/"/g,'\\\\"')+'"]');if(box)box.checked=true;}apply();showPage("page-plan");}
+const M365_STATUS_COLOR={"Concluído":"#5ed16a","A endereçar":"#ffb020","Planejado":"#7cd0ff","Em revisão":"#9aa7ff","Risco aceito":"#c9a7ff","Mitigação alternativa":"#f48fb1"};
+const M365_CAT_COLOR={"Identity":"#7cd0ff","Device":"#7ee2a8","Apps":"#c9a7ff","Data":"#ffd96b","Account":"#7cd0ff","Infrastructure":"#ff9f6b","—":"#9fb0c8"};
+const M365_BUCKET_COLOR={"Alcançado":"#5ed16a","Parcial":"#ffd96b","Oportunidade":"#ff6b6b"};
+const M365DIMS=[["status","Status"],["category","Categoria"],["product","Produto"],["bucket","Pontuação"],["license","Licença"]];
+function m365Val(it,dim){return dim==="license"?(it.licensed?"Licenciado":"Sem licença"):it[dim];}
+function m365Pie(segs,size){size=size||150;var nz=segs.filter(s=>s[1]>0);if(!nz.length)return "";var total=nz.reduce((a,s)=>a+s[1],0)||1;var cx=size/2,cy=size/2,r=size/2-1;if(nz.length===1)return '<svg viewBox="0 0 '+size+' '+size+'" width="'+size+'" height="'+size+'" class="pie"><circle cx="'+cx+'" cy="'+cy+'" r="'+r+'" fill="'+nz[0][2]+'"/></svg>';var ang=-90,p="";nz.forEach(s=>{var f=s[1]/total,a0=ang*Math.PI/180;ang+=f*360;var a1=ang*Math.PI/180,x0=cx+r*Math.cos(a0),y0=cy+r*Math.sin(a0),x1=cx+r*Math.cos(a1),y1=cy+r*Math.sin(a1),lg=f>0.5?1:0;p+='<path d="M'+cx+','+cy+' L'+x0.toFixed(2)+','+y0.toFixed(2)+' A'+r+','+r+' 0 '+lg+' 1 '+x1.toFixed(2)+','+y1.toFixed(2)+' Z" fill="'+s[2]+'"/>';});return '<svg viewBox="0 0 '+size+' '+size+'" width="'+size+'" height="'+size+'" class="pie">'+p+'</svg>';}
+function m365PieCard(title,segs){var nz=segs.filter(s=>s[1]);var lg=nz.map(s=>'<span><i class="dot" style="background:'+s[2]+'"></i>'+esc(s[0])+' · '+s[1]+'</span>').join("");return '<div class="piecard"><div class="pctitle">'+esc(title)+'</div>'+m365Pie(nz)+'<div class="legend">'+lg+'</div></div>';}
+function m365Uniq(dim){var set=new Set();DATA.m365.recs.forEach(it=>{var v=m365Val(it,dim);if(v&&v!=="—")set.add(v);});return [...set].sort();}
+function buildM365Filters(){var root=document.getElementById("m365frow");if(!root)return;M365DIMS.forEach(([dim,name])=>{var vals=m365Uniq(dim);if(!vals.length)return;var box=document.createElement("div");box.className="fbox";var opts=vals.map(v=>'<label title="'+esc(v)+'"><input type="checkbox" data-m365dim="'+dim+'" value="'+esc(v)+'">'+esc(v)+'</label>').join("");box.innerHTML='<div class="flabel"><span>'+esc(name)+'</span><span class="meta">'+vals.length+'</span></div><div class="fopts">'+opts+'</div>';root.appendChild(box);});root.querySelectorAll("input[type=checkbox]").forEach(cb=>cb.addEventListener("change",applyM365));}
+function m365SelDim(dim){return new Set([...document.querySelectorAll('input[data-m365dim="'+dim+'"]:checked')].map(c=>c.value));}
+function clearM365(){document.querySelectorAll("#m365frow input[type=checkbox]").forEach(c=>c.checked=false);applyM365();}
+function applyM365(){if(!DATA.m365)return;var recs=DATA.m365.recs;M365DIMS.forEach(([dim])=>{var s=m365SelDim(dim);if(s.size)recs=recs.filter(it=>s.has(m365Val(it,dim)));});renderM365(recs);}
+function renderM365(recs){var d=DATA.m365;var done=recs.filter(x=>x.status==="Concluído").length;var miss=recs.reduce((a,x)=>a+x.missing,0);var nol=recs.filter(x=>!x.licensed).length;var kp=[["#9fb0c8",d.pct+"%","🏆 Secure Score"],["#7cd0ff",recs.length,"recomendações"],["#5ed16a",done,"✅ concluídas"],["#ffb020",recs.length-done,"🟠 a endereçar"],["#9ae6b4","+"+Math.round(miss),"🎯 pontos a ganhar"]];if(nol)kp.push(["#ff6b6b",nol,"⚠️ sem licença"]);document.getElementById("m365kpis").innerHTML=kp.map(a=>'<div class="kpi"><div class="n" style="color:'+a[0]+'">'+esc(a[1])+'</div><div class="l">'+esc(a[2])+'</div></div>').join("");var tal=function(fn){var m={};recs.forEach(x=>{var k=fn(x);m[k]=(m[k]||0)+1;});return m;};var st=tal(x=>x.status),ct=tal(x=>x.category),bk=tal(x=>x.bucket);var sS=Object.keys(st).sort((a,b)=>st[b]-st[a]).map(s=>[s,st[s],M365_STATUS_COLOR[s]||"#9fb0c8"]);var cS=Object.keys(ct).sort((a,b)=>ct[b]-ct[a]).map(c=>[c,ct[c],M365_CAT_COLOR[c]||"#9fb0c8"]);var bS=["Alcançado","Parcial","Oportunidade"].filter(b=>bk[b]).map(b=>[b,bk[b],M365_BUCKET_COLOR[b]]);var pies=m365PieCard("Status",sS)+m365PieCard("Categoria",cS)+m365PieCard("Pontuação",bS);if(recs.some(x=>!x.licensed))pies+=m365PieCard("Licença",[["Licenciado",recs.length-nol,"#5ed16a"],["Sem licença",nol,"#ff6b6b"]]);document.getElementById("m365pies").innerHTML=pies;var pr={};recs.forEach(x=>{var p=pr[x.product]||(pr[x.product]={c:0,t:0,cur:0,mx:0});if(x.status==="Concluído")p.c++;else p.t++;p.cur+=x.score;p.mx+=x.max;});var prows=Object.keys(pr).map(k=>({p:k,c:pr[k].c,t:pr[k].t,pct:pr[k].mx?Math.round(100*pr[k].cur/pr[k].mx):0})).sort((a,b)=>b.t-a.t||b.pct-a.pct).slice(0,15);document.getElementById("m365prod").innerHTML='<table><tr><th>Produto</th><th style="text-align:right">Concluídas</th><th style="text-align:right">A endereçar</th><th style="text-align:right">% atingido</th><th>&nbsp;</th></tr>'+prows.map(p=>'<tr><td>'+esc(p.p)+'</td><td style="text-align:right;color:#5ed16a;font-weight:700">'+p.c+'</td><td style="text-align:right;color:#ffb020;font-weight:700">'+p.t+'</td><td style="text-align:right">'+p.pct+'%</td><td><div class="bartrack" style="height:10px"><span class="seg" style="width:'+p.pct+'%;background:#52b788"></span></div></td></tr>').join("")+'</table>';var srt=recs.slice().sort((a,b)=>b.missing-a.missing||b.max-a.max);var tb=srt.filter(x=>x.max>0).slice(0,12);var mv=Math.max.apply(null,[1].concat(tb.map(x=>x.max)));document.getElementById("m365bars").innerHTML='<div class="bars">'+tb.map(x=>{var sw=100*x.score/mv,mw=100*x.missing/mv;return '<div class="barrow"><div class="barlbl" title="'+esc(x.name)+'">'+esc(x.name)+'</div><div class="bartrack"><span class="seg" style="width:'+sw.toFixed(1)+'%;background:#52b788"></span><span class="seg" style="width:'+mw.toFixed(1)+'%;background:var(--inset);border-left:1px solid var(--border)"></span></div><div class="barval">'+(+x.score)+'/'+(+x.max)+'</div></div>';}).join("")+'</div>';document.getElementById("m365table").innerHTML='<table><tr><th>Ação recomendada</th><th>Categoria</th><th>Produto</th><th>Status</th><th style="text-align:right">Pontuação</th><th style="text-align:right">Máx</th><th style="text-align:right">A ganhar</th><th>Referência</th></tr>'+srt.slice(0,30).map(x=>{var sc=M365_STATUS_COLOR[x.status]||"#9fb0c8";var rf=x.link?'<a href="'+esc(x.link)+'" target="_blank" style="color:var(--accent);white-space:nowrap">Portal ↗</a>':'<span class="meta">—</span>';return '<tr><td>'+esc(x.name)+'</td><td class="meta" style="white-space:nowrap">'+esc(x.category)+'</td><td class="meta" style="white-space:nowrap">'+esc(x.product)+'</td><td style="white-space:nowrap;color:'+sc+';font-weight:700">'+esc(x.status)+'</td><td style="text-align:right">'+(+x.score)+'</td><td style="text-align:right" class="meta">'+(+x.max)+'</td><td style="text-align:right;color:#9ae6b4;font-weight:700">+'+(+x.missing)+'</td><td>'+rf+'</td></tr>';}).join("")+'</table>';}
 (function(){var t="dark";try{t=localStorage.getItem("ai_theme")||"dark";}catch(e){}setTheme(t);})();
 buildFilters();apply();
+if(DATA.m365){buildM365Filters();applyM365();}
 (function(){var h=(location.hash||"").replace("#","");showPage(h&&document.getElementById(h)?h:"home");})();
 """
 
@@ -1838,11 +1783,26 @@ def render_html(ctx, q):
             ],
         }
 
+    m365_ctx = ctx.get("m365")
+    m365_js = None
+    if m365_ctx and m365_ctx.get("dashboard"):
+        m365_js = {
+            "pct": m365_ctx["pct"],
+            "recs": [
+                {"name": x["name"], "category": x["category"], "product": x["product"],
+                 "status": x["status"], "bucket": x["bucket"], "score": x["score"],
+                 "max": x["max"], "missing": x["missing"], "licensed": bool(x["licensed"]),
+                 "link": x.get("link", "")}
+                for x in (m365_ctx.get("top") or [])
+            ],
+        }
+
     data = {
         "items": [slim(it) for it in ctx["items"]],
         "subs": ctx.get("subs", {}),
         "phases_meta": phases_meta,
         "mcsb": mcsb_js,
+        "m365": m365_js,
         "scope_label": ctx.get("scope_label", ""),
         "generated": ctx.get("generated", ""),
     }
