@@ -1561,50 +1561,48 @@ def _exec_critical_tables(ctx):
             "<div class='critgrid'>" + cards + "</div>")
 
 def _render_mdc_section(ctx):
-    """Página 🛡️ Defender for Cloud estilo Power BI: pizza de severidade + KPIs + tabela de recomendações."""
-    mdc = ctx.get("mdc", [])
-    if not mdc:
+    """Página Defender for Cloud (dashboard interativo via JS: KPIs + pizzas + tabela + dropdowns)."""
+    if not ctx.get("mdc"):
         return ""
-    ss, ss_pot = ctx.get("secure_score"), ctx.get("secure_score_potential")
-    by_sev = {}
-    for it in mdc:
-        s = str(it.get("priority", "—")).capitalize()
-        by_sev[s] = by_sev.get(s, 0) + 1
-    sevs = [s for s in ["Critical", "High", "Medium", "Low", "Informational"] if by_sev.get(s)]
-    pie = _svg_pie([(s, by_sev.get(s, 0), _SEV_COLOR.get(s, '#9fb0c8')) for s in sevs], 160)
-    legend = "<div class='legend'>" + "".join(
-        f"<span><i class='dot' style='background:{_SEV_COLOR.get(s,'#9fb0c8')}'></i>{esc(s)} · {by_sev.get(s,0)}</span>"
-        for s in sevs) + "</div>"
-    kc = (f"<div class='kpi'><div class='n' style='color:#1fab89'>{len(mdc)}</div><div class='l'>recomendações</div></div>")
-    for s in sevs:
-        kc += f"<div class='kpi'><div class='n {_SEV_CLASS.get(s,'sv-informational')}'>{by_sev.get(s,0)}</div><div class='l'>{esc(s)}</div></div>"
-    if ss is not None:
-        kc += f"<div class='kpi'><div class='n' style='color:#9fb0c8'>{ss}%</div><div class='l'>🛡️ Secure Score</div></div>"
-        if ss_pot is not None:
-            kc += f"<div class='kpi'><div class='n' style='color:#9ae6b4'>{ss_pot}%</div><div class='l'>🎯 potencial</div></div>"
-    top = sorted(mdc, key=lambda it: _MDC_ORDER.get(str(it.get("priority", "")).lower(), -1), reverse=True)[:25]
-    det = ""
-    for it in top:
-        s = str(it.get("priority", "—")).capitalize()
-        link = it.get("portal_link", "") or ""
-        link_html = (f"<a href='{esc(link)}' target='_blank' style='color:var(--accent);white-space:nowrap'>Portal ↗</a>"
-                     if link else "<span class='meta'>—</span>")
-        det += (f"<tr><td class='{_SEV_CLASS.get(s,'sv-informational')}' style='font-weight:700;white-space:nowrap'>{esc(s)}</td>"
-                f"<td>{esc(it.get('title','—'))}</td>"
-                f"<td class='mono'>{esc(it.get('resource_name','—'))}</td>"
-                f"<td>{link_html}</td></tr>")
+    filters = (
+        '<div class="filters"><div class="ftop">'
+        '<div class="meta">🔎 Filtros — selecione para refinar; vazio = tudo. Tudo recalcula conforme a seleção.</div>'
+        '<button class="btn" onclick="clearMdc()">Limpar filtros</button></div>'
+        '<div class="frow" id="mdcfrow"></div></div>')
     return (
         "<div class='phase'><h3><img class='plogo-h' src='" + _DFC_LOGO_URI + "' alt=''>Defender for Cloud — Secure Score "
         "<span class='meta'>· security assessments (postura de nuvem)</span></h3>"
+        + filters +
         "<div class='card'>"
-        "<div class='dvgrid'>"
-        f"<div style='text-align:center'>{pie}{legend}</div>"
-        f"<div><div class='kpis'>{kc}</div></div>"
-        "</div>"
+        "<div class='kpis' id='mdckpis'></div>"
+        "<div class='pgrid' id='mdcpies' style='margin-top:14px'></div>"
         "<h3 style='margin-top:16px'>🔧 Recomendações <span class='meta'>· por severidade</span></h3>"
-        "<table><tr><th>Sev</th><th>Recomendação</th><th>Recurso</th><th>Referência</th></tr>"
-        f"{det}</table>"
+        "<div id='mdctable'></div>"
         "</div></div>")
+
+
+def _render_mcsb_section(ctx):
+    """Página Microsoft Cloud Security Benchmark (dashboard interativo via JS, filtro por Subscription)."""
+    mcsb = ctx.get("mcsb")
+    if not mcsb:
+        return ""
+    std = esc(mcsb.get("standard_name", ""))
+    filters = (
+        '<div class="filters"><div class="ftop">'
+        '<div class="meta">🔎 Filtro — escolha a(s) subscription(s); vazio = todas. Recalcula a conformidade.</div>'
+        '<button class="btn" onclick="clearMcsb()">Limpar filtros</button></div>'
+        '<div class="frow" id="mcsbfrow"></div></div>')
+    return (
+        "<div class='phase'><h3>📋 Microsoft Cloud Security Benchmark "
+        "<span class='meta'>· standard: " + std + " (postura de compliance)</span></h3>"
+        + filters +
+        "<div class='card'>"
+        "<div class='kpis' id='mcsbkpis'></div>"
+        "<div class='pgrid' id='mcsbpies' style='margin-top:14px'></div>"
+        "<h3 style='margin-top:16px'>🔧 Controles em falha <span class='meta'>· por nº de avaliações falhando</span></h3>"
+        "<div id='mcsbtable'></div>"
+        "</div></div>")
+
 
 # CSS + JS do relatório interativo (string normal, SEM f-string → não precisa escapar {}).
 _REPORT_CSS = """
@@ -1735,8 +1733,25 @@ function aggMcsb(subs){let p=0,f=0,sk=0,un=0,has=false;subs.forEach(sid=>{const 
 function rowHtml(it){let cs=it.cost_delta?`<span style="color:#5ed16a">${esc(it.cost_delta)}</span>`:"";let ci=it.cost_increase?`<span style="color:#ff6b6b">${esc(it.cost_increase)}</span>`:"";let cost=(cs&&ci)?cs+"<br/>"+ci:(cs||ci||"—");let ss=it.score_impact_label?`<span style="color:#9ae6b4;font-weight:700">${esc(it.score_impact_label)}</span><div class="meta" style="font-size:11px">${esc(it.score_control)}</div>`:"—";let title=esc(it.title);if(it.portal_link){title=`<a href="${esc(it.portal_link)}" style="color:#e7edf5;text-decoration:none;border-bottom:1px dotted #4a5a72">${title}</a> <a href="${esc(it.portal_link)}" title="Abrir no portal" style="color:#7cd0ff;text-decoration:none">🔗</a>`;}const tags=(it.tactics||[]).concat(it.techniques||[]);let mitre=tags.length?`<div class="mtags">🎯 ${tags.slice(0,4).map(m=>`<span class="mitre">${esc(m)}</span>`).join("")}</div>`:"";let owner=it.owner?`<div class="owner">👤 ${esc(it.owner)}</div>`:"";let casc=it.cascade?`<div class="casc">↳ ${esc(it.cascade)}</div>`:"";let dvo=it.devops_repo?`<div class="devops">🐙 ${esc(it.devops_provider||"DevOps")} · ${esc(it.devops_repo)}</div>`:"";let src=`<span style="color:${it.source==="Advisor"?"#7cd0ff":"#c9a7ff"};font-weight:700">${esc(it.source)}</span>`;let subn=it.subscription_name&&it.subscription_name!=="—"?`<div class="meta" style="font-size:11px">${esc(it.subscription_name)} / ${esc(it.resource_group)}</div>`:"";return `<tr><td>${src}</td><td>${title}${dvo}${mitre}${owner}${casc}</td><td>${esc(it.category)}</td><td>${esc(it.priority)}</td><td>${ss}</td><td class="mono">${esc(it.resource_name)}${subn}</td><td>${cost}</td></tr>`;}
 function renderPlan(items){const by={safe:[],low:[],medium:[],high:[]};items.forEach(it=>{(by[it.risk]||by.low).push(it);});let html="";PHASES.forEach(lvl=>{const rows=by[lvl];if(!rows.length)return;const m=PHMETA[lvl]||{};html+=`<div class="phase"><h3>${esc(m.emoji||"")} ${esc(m.label||lvl)} <span class="meta">· ${esc(m.action||"")} · ${rows.length} item(ns)</span></h3><table><tr><th>Fonte</th><th>Recomendação</th><th>Categoria</th><th>Prioridade</th><th>Impacto SS</th><th>Recurso</th><th>Custo</th></tr>${rows.map(rowHtml).join("")}</table></div>`;});document.getElementById("plan").innerHTML=html||`<div class="card meta">Nenhuma recomendação para os filtros selecionados.</div>`;}
 function renderKpis(items,subs){const c={safe:0,low:0,medium:0,high:0};let sav=0,impl=0,devops=0;items.forEach(it=>{c[it.risk]=(c[it.risk]||0)+1;sav+=it.savings_raw||0;impl+=it.cost_increase_raw||0;if(it.devops_repo)devops++;});const ssA=aggSecure(subs);const mc=aggMcsb(subs);const k=document.getElementById("kpis");let cards=[["#7cd0ff",items.length,"recomendações"],["#5ed16a",c.safe,"🟢 quick wins"],["#ffd96b",c.low+c.medium,"🟡🟠 janela"],["#ff6b6b",c.high,"🔴 aprovação"],["#9fb0c8",ssA?ssA.cur+"%":"n/a","🛡️ SS atual"],["#9ae6b4",ssA?ssA.pot+"%":"n/a","🎯 SS potencial"],["#ff6b6b",impl?"+"+fmtUSD(impl,"/mês"):"—","💰 custo impl."]];if(mc&&mc.pct!=null){const cc=mc.pct>=80?"#5ed16a":(mc.pct>=50?"#ffd96b":"#ff6b6b");cards.push([cc,mc.pct+"%","🛡️ MCSB compliance"]);}if(devops)cards.push(["#7ee2a8",devops,"🐙 DevOps findings"]);k.innerHTML=cards.map(([col,n,l])=>`<div class="kpi"><div class="n" style="color:${col};font-size:${String(n).length>7?"14px":"20px"}">${esc(n)}</div><div class="l">${esc(l)}</div></div>`).join("");document.getElementById("subline").innerHTML=`economia potencial: <b style="color:#5ed16a">${sav?"−"+fmtUSD(sav,"/ano"):"—"}</b> · custo de implementação: <b style="color:#ff6b6b">${impl?"+"+fmtUSD(impl,"/mês"):"—"}</b> · 100% read-only`;const bar=document.getElementById("ssbar");if(ssA){bar.style.display="block";bar.innerHTML=`<div class="meta" style="margin-bottom:4px">🛡️ Secure Score: <b style="color:#9fb0c8">${ssA.cur}%</b> agora → <b style="color:#9ae6b4">${ssA.pot}%</b> se remediar tudo (<b style="color:#9ae6b4">+${Math.round(10*(ssA.pot-ssA.cur))/10} pp</b>)</div><div style="background:var(--inset);border:1px solid var(--border);border-radius:8px;height:14px;overflow:hidden;position:relative"><div style="position:absolute;left:0;top:0;height:100%;width:${ssA.pot}%;background:linear-gradient(90deg,#2d6a4f,#52b788);opacity:.45"></div><div style="position:absolute;left:0;top:0;height:100%;width:${ssA.cur}%;background:linear-gradient(90deg,#7cd0ff,#5ed16a)"></div></div>`;}else{bar.style.display="none";}}
-function renderMcsb(subs){const el=document.getElementById("mcsb");const mc=aggMcsb(subs);if(!mc){el.innerHTML="";return;}const cc=(mc.pct||0)>=80?"#5ed16a":((mc.pct||0)>=50?"#ffd96b":"#ff6b6b");const fc=(DATA.mcsb&&DATA.mcsb.failing_controls||[]).filter(x=>!sel("sub").size||subs.has(x.subscription_id)).slice(0,15);let ft="";if(fc.length){ft=`<table style="margin-top:10px"><tr><th>Controle</th><th>Nome</th><th>Falhando</th><th>OK</th></tr>${fc.map(x=>{let nm=esc(x.name);if(x.link)nm=`<a href="${esc(x.link)}" style="color:#e7edf5;text-decoration:none;border-bottom:1px dotted #4a5a72">${nm}</a>`;return `<tr><td class="mono">${esc(x.id)}</td><td>${nm}</td><td style="color:#ff6b6b;font-weight:700">${x.failed}</td><td style="color:#5ed16a">${x.passed}</td></tr>`;}).join("")}</table>`;}el.innerHTML=`<div class="phase"><h3>🛡️ Postura de Compliance — Microsoft Cloud Security Benchmark <span class="meta">· standard: ${esc(DATA.mcsb?DATA.mcsb.standard_name:"")}</span></h3><div class="card"><div style="display:flex;gap:18px;flex-wrap:wrap;align-items:center"><div><span style="font-size:28px;font-weight:800;color:${cc}">${mc.pct!=null?mc.pct+"%":"n/a"}</span><div class="meta">controles em conformidade</div></div><div class="meta">✅ ${mc.passed} passed · ❌ ${mc.failed} failed · ⏭️ ${mc.skipped} skipped · ⚪ ${mc.unsupported} unsupported</div></div><div style="background:var(--inset);border:1px solid var(--border);border-radius:8px;height:12px;overflow:hidden;margin-top:10px"><div style="height:100%;width:${mc.pct||0}%;background:linear-gradient(90deg,${cc},#52b788)"></div></div>${ft}</div></div>`;}
-function apply(){let items=DATA.items;DIMS.forEach(([dim])=>{const s=sel(dim);if(s.size)items=items.filter(it=>s.has(val(it,dim)));});const subs=selectedSubs();renderKpis(items,subs);renderPlan(items);renderMcsb(subs);}
+const MDC_SEV_COLOR={"Critical":"#ff4d4d","High":"#ff6b6b","Medium":"#ffd96b","Low":"#7cd0ff","Informational":"#9fb0c8","Unknown":"#9fb0c8"};
+const MDCDIMS=[["severity","Severidade"],["category","Categoria"],["sub","Subscription"],["rg","Resource Group"]];
+function mdcRaw(it,dim){return dim==="sub"?(it.sub||""):(it[dim]||"—");}
+function mdcLabel(dim,v){if(dim==="sub"){var s=DATA.subs[v];return (s&&s.name)?s.name:(v?v.slice(0,8):"—");}return v;}
+function mdcUniq(dim){var set=new Set();DATA.mdc.recs.forEach(it=>{var v=mdcRaw(it,dim);if(v&&v!=="—")set.add(v);});return [...set].sort((a,b)=>String(mdcLabel(dim,a)).localeCompare(String(mdcLabel(dim,b))));}
+function buildMdcFilters(){var root=document.getElementById("mdcfrow");if(!root)return;root.className="slicers";MDCDIMS.forEach(([dim,name])=>{var vals=mdcUniq(dim);if(vals.length<2)return;var wrap=document.createElement("div");wrap.className="slicer";var opts=vals.map(v=>'<label><input type="checkbox" data-mdcdim="'+dim+'" value="'+esc(v)+'">'+esc(mdcLabel(dim,v))+'</label>').join("");wrap.innerHTML='<button type="button" class="slicer-btn" data-dim="'+dim+'"><span class="cap">'+esc(name)+'</span><span class="valtxt">Todos</span><span class="car">▾</span></button><div class="slicer-pop"><button type="button" class="slicer-clear" data-dim="'+dim+'">Limpar</button>'+opts+'</div>';root.appendChild(wrap);});root.querySelectorAll(".slicer-btn").forEach(b=>b.addEventListener("click",function(e){e.stopPropagation();var pop=this.nextElementSibling;var op=pop.classList.contains("open");closeAllSlicers();if(!op)pop.classList.add("open");}));root.querySelectorAll(".slicer-pop").forEach(p=>p.addEventListener("click",e=>e.stopPropagation()));root.querySelectorAll('.slicer-pop input[data-mdcdim]').forEach(cb=>cb.addEventListener("change",function(){mdcUpdateBtn(this.getAttribute("data-mdcdim"));applyMdc();}));root.querySelectorAll(".slicer-clear").forEach(b=>b.addEventListener("click",function(){var dim=this.getAttribute("data-dim");this.parentNode.querySelectorAll('input[data-mdcdim="'+dim+'"]').forEach(x=>x.checked=false);mdcUpdateBtn(dim);applyMdc();}));document.addEventListener("click",closeAllSlicers);}
+function mdcSelDim(dim){return new Set([...document.querySelectorAll('input[data-mdcdim="'+dim+'"]:checked')].map(c=>c.value));}
+function mdcUpdateBtn(dim){var btn=document.querySelector('#mdcfrow .slicer-btn[data-dim="'+dim+'"]');if(!btn)return;var s=mdcSelDim(dim);btn.querySelector(".valtxt").textContent=!s.size?"Todos":(s.size===1?mdcLabel(dim,[...s][0]):s.size+" selecionados");btn.classList.toggle("on",s.size>0);}
+function clearMdc(){document.querySelectorAll("#mdcfrow input[type=checkbox]").forEach(c=>c.checked=false);MDCDIMS.forEach(d=>mdcUpdateBtn(d[0]));applyMdc();}
+function applyMdc(){if(!DATA.mdc)return;var recs=DATA.mdc.recs;MDCDIMS.forEach(([dim])=>{var s=mdcSelDim(dim);if(s.size)recs=recs.filter(it=>s.has(mdcRaw(it,dim)));});renderMdc(recs);}
+function renderMdc(recs){var SEVO=["Critical","High","Medium","Low","Informational","Unknown"];var sev={};recs.forEach(x=>{sev[x.severity]=(sev[x.severity]||0)+1;});var hi=(sev["Critical"]||0)+(sev["High"]||0);var kp=[["#1fab89",recs.length,"recomendações"],["#ff6b6b",hi,"🔴 Critical+High"]];SEVO.forEach(s=>{if(sev[s])kp.push([MDC_SEV_COLOR[s],sev[s],s]);});if(DATA.mdc.ss!=null){kp.push(["#9fb0c8",DATA.mdc.ss+"%","🛡️ Secure Score"]);if(DATA.mdc.ss_pot!=null)kp.push(["#9ae6b4",DATA.mdc.ss_pot+"%","🎯 potencial"]);}document.getElementById("mdckpis").innerHTML=kp.map(a=>'<div class="kpi"><div class="n" style="color:'+a[0]+'">'+esc(a[1])+'</div><div class="l">'+esc(a[2])+'</div></div>').join("");var sevSegs=SEVO.filter(s=>sev[s]).map(s=>[s,sev[s],MDC_SEV_COLOR[s]]);var cat={};recs.forEach(x=>{var c=x.category||"—";cat[c]=(cat[c]||0)+1;});var pal=["#7cd0ff","#7ee2a8","#c9a7ff","#ffd96b","#ff9f6b","#9fb0c8"];var catSegs=Object.keys(cat).filter(c=>c!=="—").sort((a,b)=>cat[b]-cat[a]).slice(0,6).map((c,i)=>[c,cat[c],pal[i]||"#9fb0c8"]);var pies=m365PieCard("Severidade",sevSegs);if(catSegs.length>1)pies+=m365PieCard("Categoria",catSegs);document.getElementById("mdcpies").innerHTML=pies;var ord={Critical:5,High:4,Medium:3,Low:2,Informational:1,Unknown:0};var top=recs.slice().sort((a,b)=>(ord[b.severity]||0)-(ord[a.severity]||0)).slice(0,30);document.getElementById("mdctable").innerHTML='<table><tr><th>Sev</th><th>Recomendação</th><th>Recurso</th><th>Referência</th></tr>'+top.map(x=>{var rf=x.link?'<a href="'+esc(x.link)+'" target="_blank" style="color:var(--accent);white-space:nowrap">Portal ↗</a>':'<span class="meta">—</span>';return '<tr><td style="font-weight:700;white-space:nowrap;color:'+(MDC_SEV_COLOR[x.severity]||"#9fb0c8")+'">'+esc(x.severity)+'</td><td>'+esc(x.title)+'</td><td class="mono">'+esc(x.resource)+'</td><td>'+rf+'</td></tr>';}).join("")+'</table>';}
+function mcsbSubsAll(){return Object.keys(DATA.subs||{}).filter(s=>DATA.subs[s]&&DATA.subs[s].mcsb);}
+function buildMcsbFilters(){var root=document.getElementById("mcsbfrow");if(!root)return;root.className="slicers";var subs=mcsbSubsAll();if(subs.length<2)return;var wrap=document.createElement("div");wrap.className="slicer";var opts=subs.map(s=>'<label><input type="checkbox" data-mcsbdim="sub" value="'+esc(s)+'">'+esc(DATA.subs[s].name||s.slice(0,8))+'</label>').join("");wrap.innerHTML='<button type="button" class="slicer-btn" data-dim="sub"><span class="cap">Subscription</span><span class="valtxt">Todos</span><span class="car">▾</span></button><div class="slicer-pop"><button type="button" class="slicer-clear" data-dim="sub">Limpar</button>'+opts+'</div>';root.appendChild(wrap);root.querySelectorAll(".slicer-btn").forEach(b=>b.addEventListener("click",function(e){e.stopPropagation();var pop=this.nextElementSibling;var op=pop.classList.contains("open");closeAllSlicers();if(!op)pop.classList.add("open");}));root.querySelectorAll(".slicer-pop").forEach(p=>p.addEventListener("click",e=>e.stopPropagation()));root.querySelectorAll('.slicer-pop input[data-mcsbdim]').forEach(cb=>cb.addEventListener("change",function(){mcsbUpdateBtn();applyMcsb();}));root.querySelectorAll(".slicer-clear").forEach(b=>b.addEventListener("click",function(){this.parentNode.querySelectorAll('input[data-mcsbdim]').forEach(x=>x.checked=false);mcsbUpdateBtn();applyMcsb();}));document.addEventListener("click",closeAllSlicers);}
+function mcsbSel(){return new Set([...document.querySelectorAll('input[data-mcsbdim="sub"]:checked')].map(c=>c.value));}
+function mcsbUpdateBtn(){var btn=document.querySelector('#mcsbfrow .slicer-btn[data-dim="sub"]');if(!btn)return;var s=mcsbSel();btn.querySelector(".valtxt").textContent=!s.size?"Todos":(s.size===1?(DATA.subs[[...s][0]]&&DATA.subs[[...s][0]].name||"1"):s.size+" selecionados");btn.classList.toggle("on",s.size>0);}
+function clearMcsb(){document.querySelectorAll("#mcsbfrow input[type=checkbox]").forEach(c=>c.checked=false);mcsbUpdateBtn();applyMcsb();}
+function applyMcsb(){if(!DATA.mcsb)return;var s=mcsbSel();var subs=s.size?s:new Set(mcsbSubsAll());renderMcsbDash(subs);}
+function renderMcsbDash(subs){var p=0,f=0,sk=0,un=0;subs.forEach(sid=>{var m=DATA.subs[sid]&&DATA.subs[sid].mcsb;if(m){p+=m.passed;f+=m.failed;sk+=m.skipped;un+=m.unsupported;}});var pct=(p+f)>0?Math.round(1000*p/(p+f))/10:null;var cc=(pct||0)>=80?"#5ed16a":((pct||0)>=50?"#ffd96b":"#ff6b6b");var kp=[[cc,(pct!=null?pct+"%":"n/a"),"📋 conformidade"],["#5ed16a",p,"✅ passed"],["#ff6b6b",f,"❌ failed"],["#ffd96b",sk,"⏭️ skipped"],["#aeb8c7",un,"⚪ unsupported"]];document.getElementById("mcsbkpis").innerHTML=kp.map(a=>'<div class="kpi"><div class="n" style="color:'+a[0]+'">'+esc(a[1])+'</div><div class="l">'+esc(a[2])+'</div></div>').join("");var segs=[["Passed",p,"#5ed16a"],["Failed",f,"#ff6b6b"],["Skipped",sk,"#ffd96b"],["Unsupported",un,"#aeb8c7"]];document.getElementById("mcsbpies").innerHTML=m365PieCard("Conformidade",segs);var hasSel=mcsbSel().size>0;var fc=(DATA.mcsb.failing_controls||[]).filter(x=>!hasSel||subs.has(x.subscription_id)).slice(0,20);document.getElementById("mcsbtable").innerHTML='<table><tr><th>Controle</th><th>Nome</th><th style="text-align:right">Falhando</th><th style="text-align:right">OK</th></tr>'+fc.map(x=>{var nm=esc(x.name);if(x.link)nm='<a href="'+esc(x.link)+'" target="_blank" style="color:var(--fg);text-decoration:none;border-bottom:1px dotted #4a5a72">'+nm+'</a>';return '<tr><td class="mono">'+esc(x.id)+'</td><td>'+nm+'</td><td style="text-align:right;color:#ff6b6b;font-weight:700">'+x.failed+'</td><td style="text-align:right;color:#5ed16a">'+x.passed+'</td></tr>';}).join("")+'</table>';}
+function apply(){let items=DATA.items;DIMS.forEach(([dim])=>{const s=sel(dim);if(s.size)items=items.filter(it=>s.has(val(it,dim)));});const subs=selectedSubs();renderKpis(items,subs);renderPlan(items);}
 function clearAll(){document.querySelectorAll("#frow input[type=checkbox]").forEach(c=>c.checked=false);DIMS.forEach(d=>planUpdateBtn(d[0]));apply();}
 function setTheme(t){document.documentElement.setAttribute("data-theme",t);try{localStorage.setItem("ai_theme",t);}catch(e){}var b=document.getElementById("themebtn");if(b)b.textContent=(t==="light"?"🌙 Tema escuro":"☀️ Tema claro");}
 function toggleTheme(){var c=document.documentElement.getAttribute("data-theme")||"dark";setTheme(c==="light"?"dark":"light");}
@@ -1761,6 +1776,8 @@ function renderM365(recs){var d=DATA.m365;var done=recs.filter(x=>x.status==="Co
 (function(){var t="dark";try{t=localStorage.getItem("ai_theme")||"dark";}catch(e){}setTheme(t);})();
 buildFilters();apply();
 if(DATA.m365){buildM365Filters();applyM365();}
+if(DATA.mdc){buildMdcFilters();applyMdc();}
+if(DATA.mcsb){buildMcsbFilters();applyMcsb();}
 (function(){var h=(location.hash||"").replace("#","");showPage(h&&document.getElementById(h)?h:"home");})();
 """
 
@@ -1820,12 +1837,30 @@ def render_html(ctx, q):
             ],
         }
 
+    mdc_ctx = ctx.get("mdc") or []
+    mdc_js = None
+    if mdc_ctx:
+        mdc_js = {
+            "ss": ctx.get("secure_score"), "ss_pot": ctx.get("secure_score_potential"),
+            "recs": [
+                {"title": it.get("title") or "—",
+                 "severity": str(it.get("priority", "—")).capitalize(),
+                 "category": it.get("category") or "—",
+                 "resource": it.get("resource_name") or "—",
+                 "link": it.get("portal_link") or it.get("rec_link") or "",
+                 "sub": it.get("subscription_id") or "",
+                 "rg": it.get("resource_group") or "—"}
+                for it in mdc_ctx
+            ],
+        }
+
     data = {
         "items": [slim(it) for it in ctx["items"]],
         "subs": ctx.get("subs", {}),
         "phases_meta": phases_meta,
         "mcsb": mcsb_js,
         "m365": m365_js,
+        "mdc": mdc_js,
         "scope_label": ctx.get("scope_label", ""),
         "generated": ctx.get("generated", ""),
     }
@@ -1946,7 +1981,7 @@ def render_html(ctx, q):
 
     filters = (
         '<div class="filters"><div class="ftop"><div class="meta">🔎 Filtros — marque para refinar; '
-        'vazio = tudo. Secure Score e MCSB recalculam pelo filtro de Subscription.</div>'
+        'vazio = tudo. O Secure Score recalcula pelo filtro de Subscription.</div>'
         '<button class="btn" onclick="clearAll()">Limpar filtros</button></div>'
         '<div class="frow" id="frow"></div></div>')
     devops_html = _render_devops_section(ctx.get("devops"))
@@ -1959,7 +1994,7 @@ def render_html(ctx, q):
     page_mcsb = (
         '<div id="page-mcsb" class="page" style="display:none">'
         '<button class="btn back" onclick="goHome()">← Início</button>'
-        '<div id="mcsb"></div></div>')
+        + _render_mcsb_section(ctx) + '</div>') if ctx.get("mcsb") else ''
     page_devops = (
         '<div id="page-devops" class="page" style="display:none">'
         '<button class="btn back" onclick="goHome()">← Início</button>'
