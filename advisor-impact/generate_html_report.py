@@ -716,31 +716,38 @@ def analyze_devops_findings(data, sub_names=None):
         })
     if not findings:
         return None
-    by_sev, by_cat, by_repo = {}, {}, {}
+    by_sev, by_cat, by_repo, by_repo_sev = {}, {}, {}, {}
     for f in findings:
         by_sev[f["severity"]] = by_sev.get(f["severity"], 0) + 1
         by_cat[f["category"]] = by_cat.get(f["category"], 0) + 1
         by_repo[f["repo"]] = by_repo.get(f["repo"], 0) + 1
-    # ordena severidades canônico e repos por volume
+        rs = by_repo_sev.setdefault(f["repo"], {})
+        rs[f["severity"]] = rs.get(f["severity"], 0) + 1
+    # ordena severidades canônico
     sev_order = sorted(by_sev.items(), key=lambda kv: _SEV.get(kv[0].lower(), -1), reverse=True)
-    repo_top = sorted(by_repo.items(), key=lambda kv: kv[1], reverse=True)
-    # matriz repo × severidade (top 20 repos)
     sevs = [s for s, _ in sev_order]
+    # ordena repos por RISCO: Critical+High primeiro, total como desempate
+    def _repo_risk(repo):
+        rs = by_repo_sev.get(repo, {})
+        return (rs.get("Critical", 0) + rs.get("High", 0), by_repo.get(repo, 0))
+    repos_ranked = sorted(by_repo.keys(), key=_repo_risk, reverse=True)
+    # matriz repo × severidade (top 20 repos por risco)
     matrix = []
-    for repo, _tot in repo_top[:20]:
-        rowsev = {s: 0 for s in sevs}
-        for f in findings:
-            if f["repo"] == repo:
-                rowsev[f["severity"]] = rowsev.get(f["severity"], 0) + 1
-        matrix.append({"repo": repo, "total": _tot, "by_sev": rowsev})
+    for repo in repos_ranked[:20]:
+        rs = by_repo_sev.get(repo, {})
+        matrix.append({"repo": repo, "total": by_repo.get(repo, 0),
+                       "by_sev": {s: rs.get(s, 0) for s in sevs}})
+    # findings ordenados por severidade (Critical→) p/ tabela de remediação por finding
+    top_findings = sorted(findings, key=lambda f: _SEV.get(f["severity"].lower(), -1), reverse=True)
     return {
         "total": len(findings),
         "by_severity": dict(sev_order),
         "by_category": by_cat,
-        "by_repo": dict(repo_top),
+        "by_repo": {r: by_repo[r] for r in repos_ranked},
         "sev_order": sevs,
         "matrix": matrix,
         "findings": findings,
+        "top_findings": top_findings,
     }
 
 # =============================================================================
@@ -899,6 +906,30 @@ def _render_devops_section(devops):
                       f"<td style='font-weight:700'>{m['total']}</td>{cells}</tr>")
     table = (f"<table style='margin-top:10px'><tr><th>Repositório</th><th>Total</th>{head_cells}</tr>"
              f"{rows_html}</table>")
+    # tabela de findings com remediação + link oficial por finding (top por severidade)
+    det = ""
+    tf = devops.get("top_findings") or []
+    LIMIT = 25
+    for f in tf[:LIMIT]:
+        s = f.get("severity", "—")
+        c = _SEV_COLOR.get(s, "#9fb0c8")
+        rem = esc(f.get("remediation", "") or "—")
+        link = f.get("link", "") or ""
+        link_html = (f"<a href='{esc(link)}' target='_blank' style='color:#7cd0ff'>Portal ↗</a>"
+                     if link else "<span class='meta'>—</span>")
+        det += (f"<tr><td style='color:{c};font-weight:700;white-space:nowrap'>{esc(s)}</td>"
+                f"<td class='mono'>🐙 {esc(f.get('repo','—'))}</td>"
+                f"<td>{esc(f.get('finding','—'))}</td>"
+                f"<td class='meta'>{esc(f.get('category','—'))}</td>"
+                f"<td class='meta'>{rem}</td>"
+                f"<td style='white-space:nowrap'>{link_html}</td></tr>")
+    more = ""
+    if len(tf) > LIMIT:
+        more = f"<div class='meta' style='margin-top:6px'>… +{len(tf) - LIMIT} findings (priorize Critical→High; veja o relatório completo).</div>"
+    det_table = (
+        "<h3 style='margin-top:16px'>🔧 Findings a corrigir <span class='meta'>· por severidade · remediação + link oficial</span></h3>"
+        "<table><tr><th>Sev</th><th>Repositório</th><th>Finding</th><th>Categoria</th>"
+        f"<th>Remediação</th><th>Link</th></tr>{det}</table>{more}") if det else ""
     return (
         "<div class='phase'><h3>🐙 DevOps Remediation — findings do GitHub/Defender DevOps "
         "<span class='meta'>· vulnerabilidades a corrigir (CVE/code/IaC/secret), não postura</span></h3>"
@@ -906,8 +937,9 @@ def _render_devops_section(devops):
         f"<div class='kpis' style='margin-bottom:10px'>{kpis}</div>"
         f"<div class='meta'>Por categoria: {cats}</div>"
         f"{table}"
-        "<div class='meta' style='margin-top:8px'>Prioridade: Critical→High primeiro · "
+        "<div class='meta' style='margin-top:8px'>Matriz ordenada por <b>Critical+High</b> (maior risco no topo) · "
         "dependency CVEs normalmente têm PR do Dependabot pronto p/ merge.</div>"
+        f"{det_table}"
         "</div></div>")
 
 # CSS + JS do relatório interativo (string normal, SEM f-string → não precisa escapar {}).
@@ -1130,8 +1162,25 @@ def render_md(ctx, q):
             cells = " | ".join(str(m["by_sev"].get(s, 0)) for s in sevs)
             lines.append(f"| 🐙 {m['repo']} | {m['total']} | {cells} |")
         lines.append("")
-        lines.append("_Prioridade: Critical→High primeiro · dependency CVEs normalmente têm PR do Dependabot pronto p/ merge._")
+        lines.append("_Matriz ordenada por Critical+High (maior risco no topo) · dependency CVEs normalmente têm PR do Dependabot pronto p/ merge._")
         lines.append("")
+        # tabela de findings com remediação + link oficial por finding
+        tf = devops.get("top_findings") or []
+        if tf:
+            LIMIT = 25
+            lines.append("### 🔧 Findings a corrigir (por severidade · remediação + link oficial)")
+            lines.append("| Sev | Repositório | Finding | Categoria | Remediação | Link |")
+            lines.append("|---|---|---|---|---|---|")
+            for f in tf[:LIMIT]:
+                rem = (f.get("remediation", "") or "—").replace("|", "\\|").replace("\n", " ")
+                fnd = (f.get("finding", "—") or "—").replace("|", "\\|").replace("\n", " ")
+                link = f.get("link", "") or ""
+                link_md = f"[Portal]({link})" if link else "—"
+                lines.append(f"| {f.get('severity','—')} | 🐙 {f.get('repo','—')} | {fnd} | {f.get('category','—')} | {rem} | {link_md} |")
+            if len(tf) > LIMIT:
+                lines.append("")
+                lines.append(f"_… +{len(tf) - LIMIT} findings (priorize Critical→High; veja o relatório completo)._")
+            lines.append("")
     lines.append(f"_advisor-impact · gerado {ctx['generated']} · read-only · MCSB inspirado no microsoft/ESA (MIT)._")
     return "\n".join(lines)
 
