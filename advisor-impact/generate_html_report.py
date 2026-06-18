@@ -1066,15 +1066,22 @@ def _render_devops_section(devops):
         "</div></div>")
 
 # =============================================================================
-# Pilar XDR — recomendações do Microsoft Defender XDR (Vulnerability Management / Exposure)
-# Dataset OPCIONAL (prefetch Mode B): chave "xdr_recommendations". Coletado pelo agente via
-# MDE API (api.securitycenter.microsoft.com/api/recommendations) ou Graph exposure mgmt.
+# Pilar XDR — recomendações do Microsoft Defender XDR / Microsoft Secure Score
+# Dataset OPCIONAL (prefetch Mode B): chave "xdr_recommendations".
+# Aceita DOIS shapes:
+#   (A) Microsoft Graph `GET /security/secureScoreControlProfiles` = Recommended Actions
+#       (security.microsoft.com/securescore): title, controlCategory (Identity/Device/Apps/Data),
+#       service, maxScore, actionUrl, controlStateUpdates(state), threats, remediation…
+#   (B) MDE TVM `api.securitycenter.microsoft.com/api/recommendations`: recommendationName,
+#       recommendationCategory, severityScore, exposedMachinesCount, publicExploit…
 # =============================================================================
 _SEV_ORDER = {"critical": 4, "high": 3, "medium": 2, "low": 1, "informational": 0}
+_CAT_COLOR = {"Identity": "#7cd0ff", "Device": "#7ee2a8", "Apps": "#c9a7ff", "Data": "#ffd96b",
+              "Account": "#7cd0ff", "Infrastructure": "#ff9f6b", "Network": "#5ed16a", "—": "#9fb0c8"}
 
 def analyze_xdr_recommendations(data, sub_names=None):
-    """Sumariza recomendações do Defender XDR/TVM. Aceita shape flat (MDE API) ou nested (properties)."""
-    rows = as_list(data)
+    """Sumariza Recommended Actions (Graph secureScoreControlProfiles) OU recs TVM (MDE). Unifica em groups/top."""
+    rows = [r for r in as_list(data) if isinstance(r, dict)]
     if not rows:
         return None
 
@@ -1087,6 +1094,52 @@ def analyze_xdr_recommendations(data, sub_names=None):
                 return p.get(k)
         return None
 
+    # Detecta shape Recommended Actions (Secure Score control profiles)
+    is_actions = any(
+        (r.get("controlCategory") or r.get("actionType") or r.get("controlStateUpdates")
+         or ("maxScore" in r and "severityScore" not in r)) for r in rows)
+
+    if is_actions:
+        recs = []
+        for r in rows:
+            name = str(field(r, "title", "controlName", "displayName", "name", "id") or "—")
+            if len(name) > 130:
+                name = _short_finding(name, 130)
+            status = ""
+            csu = field(r, "controlStateUpdates")
+            if isinstance(csu, list) and csu:
+                last = csu[-1] if isinstance(csu[-1], dict) else {}
+                status = str(last.get("state") or last.get("assignedTo") or "")
+            status = (status or str(field(r, "implementationStatus", "state") or "To address")).strip() or "To address"
+            try:
+                pts = round(float(field(r, "maxScore", "score") or 0), 1)
+            except (TypeError, ValueError):
+                pts = 0.0
+            threats = field(r, "threats") or []
+            recs.append({
+                "name": name,
+                "category": str(field(r, "controlCategory", "category") or "—"),
+                "service": str(field(r, "service", "actionType") or "—"),
+                "status": status,
+                "points": pts,
+                "link": str(field(r, "actionUrl", "remediationUrl", "link") or ""),
+                "threats": ", ".join(str(t) for t in threats) if isinstance(threats, list) else str(threats),
+                "severity": "", "exposed": 0, "exploit": False,
+            })
+        by_cat, by_status = {}, {}
+        for r in recs:
+            by_cat[r["category"]] = by_cat.get(r["category"], 0) + 1
+            by_status[r["status"]] = by_status.get(r["status"], 0) + 1
+        groups = [(c, n, _CAT_COLOR.get(c, "#9fb0c8")) for c, n in sorted(by_cat.items(), key=lambda kv: kv[1], reverse=True)]
+        top = sorted(recs, key=lambda r: r["points"], reverse=True)
+        return {
+            "total": len(recs), "mode": "actions", "groups": groups, "group_label": "Categoria",
+            "by_category": by_cat, "by_status": by_status,
+            "points_total": round(sum(r["points"] for r in recs), 1),
+            "top": top,
+        }
+
+    # ---- Shape TVM (severidade) ----
     def sev_of(r):
         s = field(r, "severity", "severityLevel")
         if s:
@@ -1099,8 +1152,6 @@ def analyze_xdr_recommendations(data, sub_names=None):
 
     recs = []
     for r in rows:
-        if not isinstance(r, dict):
-            continue
         name = str(field(r, "recommendationName", "displayName", "title", "name") or "—")
         if len(name) > 130:
             name = _short_finding(name, 130)
@@ -1111,8 +1162,8 @@ def analyze_xdr_recommendations(data, sub_names=None):
             "exposed": int(field(r, "exposedMachinesCount", "exposedDevicesCount", "exposedAssetsCount") or 0),
             "exploit": bool(field(r, "publicExploit", "hasExploit")),
             "weaknesses": int(field(r, "weaknesses", "cveCount") or 0),
-            "remediation": str(field(r, "remediationType", "remediation") or ""),
             "link": str(field(r, "recommendationLink", "portalLink", "link") or ""),
+            "service": "", "status": "", "points": 0,
         })
     if not recs:
         return None
@@ -1121,12 +1172,12 @@ def analyze_xdr_recommendations(data, sub_names=None):
         by_sev[r["severity"]] = by_sev.get(r["severity"], 0) + 1
         by_cat[r["category"]] = by_cat.get(r["category"], 0) + 1
     sev_order = sorted(by_sev.items(), key=lambda kv: _SEV_ORDER.get(kv[0].lower(), -1), reverse=True)
+    sevs = [s for s, _ in sev_order]
+    groups = [(s, by_sev.get(s, 0), _SEV_COLOR.get(s, "#9fb0c8")) for s in sevs]
     top = sorted(recs, key=lambda r: (_SEV_ORDER.get(r["severity"].lower(), -1), r["exposed"], r["weaknesses"]), reverse=True)
     return {
-        "total": len(recs),
-        "by_severity": dict(sev_order),
-        "by_category": by_cat,
-        "sev_order": [s for s, _ in sev_order],
+        "total": len(recs), "mode": "severity", "groups": groups, "group_label": "Severidade",
+        "by_severity": dict(sev_order), "by_category": by_cat, "sev_order": sevs,
         "exposed_total": sum(r["exposed"] for r in recs),
         "exploit_total": sum(1 for r in recs if r["exploit"]),
         "top": top,
@@ -1144,50 +1195,75 @@ def _count_bars(pairs, color="var(--accent)"):
     return f"<div class='bars'>{rows}</div>"
 
 def _render_xdr_section(xdr):
-    """Página 🛡️ Defender XDR estilo Power BI: donut de severidade + KPIs + barras por categoria + tabela."""
+    """Página 🛡️ Defender XDR / Recommended Actions estilo Power BI: pizza/donut + KPIs + barras + tabela."""
     if not xdr:
         return ""
-    sevs = xdr["sev_order"]
-    kcards = (f"<div class='kpi'><div class='n' style='color:#1fab89'>{xdr['total']}</div>"
-              f"<div class='l'>🛡️ recomendações</div></div>")
-    for s in sevs:
-        cls = _SEV_CLASS.get(s, "sv-informational")
-        kcards += (f"<div class='kpi'><div class='n {cls}'>{xdr['by_severity'].get(s,0)}</div>"
-                   f"<div class='l'>{esc(s)}</div></div>")
-    kcards += (f"<div class='kpi'><div class='n' style='color:#ff6b6b'>{xdr['exploit_total']}</div>"
-               f"<div class='l'>💥 exploit público</div></div>"
-               f"<div class='kpi'><div class='n' style='color:#ffd96b'>{xdr['exposed_total']}</div>"
-               f"<div class='l'>🖥️ máquinas expostas</div></div>")
-    donut = _svg_donut([(s, xdr['by_severity'].get(s, 0), _SEV_COLOR.get(s, '#9fb0c8')) for s in sevs])
+    groups = xdr.get("groups", [])
+    donut = _svg_donut([(g, v, c) for g, v, c in groups])
     donut_legend = "<div class='legend'>" + "".join(
-        f"<span><i class='dot' style='background:{_SEV_COLOR.get(s,'#9fb0c8')}'></i>{esc(s)} · {xdr['by_severity'].get(s,0)}</span>"
-        for s in sevs) + "</div>"
+        f"<span><i class='dot' style='background:{c}'></i>{esc(g)} · {v}</span>" for g, v, c in groups) + "</div>"
     bars = _count_bars(sorted(xdr["by_category"].items(), key=lambda kv: kv[1], reverse=True))
-    det = ""
-    for r in xdr["top"][:25]:
-        cls = _SEV_CLASS.get(r["severity"], "sv-informational")
-        ex = "💥 sim" if r["exploit"] else "<span class='meta'>—</span>"
-        link = r.get("link", "") or ""
-        link_html = (f"<a href='{esc(link)}' target='_blank' style='color:var(--accent);white-space:nowrap'>Defender ↗</a>"
-                     if link else "<span class='meta'>—</span>")
-        det += (f"<tr><td class='{cls}' style='font-weight:700;white-space:nowrap'>{esc(r['severity'])}</td>"
-                f"<td>{esc(r['name'])}</td>"
-                f"<td class='meta' style='white-space:nowrap'>{esc(r['category'])}</td>"
-                f"<td style='text-align:right;font-weight:700'>{r['exposed']}</td>"
-                f"<td style='white-space:nowrap'>{ex}</td><td>{link_html}</td></tr>")
+
+    if xdr.get("mode") == "actions":
+        kcards = (f"<div class='kpi'><div class='n' style='color:#1fab89'>{xdr['total']}</div>"
+                  f"<div class='l'>🛡️ recommended actions</div></div>")
+        for g, v, c in groups[:5]:
+            kcards += f"<div class='kpi'><div class='n' style='color:{c}'>{v}</div><div class='l'>{esc(g)}</div></div>"
+        kcards += (f"<div class='kpi'><div class='n' style='color:#9ae6b4'>{xdr.get('points_total',0)}</div>"
+                   f"<div class='l'>🎯 pontos de melhoria</div></div>")
+        det = ""
+        for r in xdr["top"][:25]:
+            link = r.get("link", "") or ""
+            link_html = (f"<a href='{esc(link)}' target='_blank' style='color:var(--accent);white-space:nowrap'>Portal ↗</a>"
+                         if link else "<span class='meta'>—</span>")
+            det += (f"<tr><td>{esc(r['name'])}</td>"
+                    f"<td class='meta' style='white-space:nowrap'>{esc(r.get('service','—'))}</td>"
+                    f"<td class='meta' style='white-space:nowrap'>{esc(r['category'])}</td>"
+                    f"<td class='meta' style='white-space:nowrap'>{esc(r.get('status','—'))}</td>"
+                    f"<td style='text-align:right;font-weight:700'>{r.get('points',0)}</td><td>{link_html}</td></tr>")
+        table = ("<h3 style='margin-top:16px'>🔧 Recommended Actions <span class='meta'>· ordenadas por pontos de melhoria</span></h3>"
+                 "<table><tr><th>Ação recomendada</th><th>Serviço</th><th>Categoria</th><th>Status</th><th>Pontos</th><th>Referência</th></tr>"
+                 f"{det}</table>")
+        subtitle = "· Microsoft Secure Score — Recommended Actions (security.microsoft.com/securescore)"
+        bars_title = "📊 Por categoria (Identity / Device / Apps / Data)"
+    else:
+        kcards = (f"<div class='kpi'><div class='n' style='color:#1fab89'>{xdr['total']}</div>"
+                  f"<div class='l'>🛡️ recomendações</div></div>")
+        for g, v, c in groups:
+            kcards += f"<div class='kpi'><div class='n' style='color:{c}'>{v}</div><div class='l'>{esc(g)}</div></div>"
+        kcards += (f"<div class='kpi'><div class='n' style='color:#ff6b6b'>{xdr.get('exploit_total',0)}</div>"
+                   f"<div class='l'>💥 exploit público</div></div>"
+                   f"<div class='kpi'><div class='n' style='color:#ffd96b'>{xdr.get('exposed_total',0)}</div>"
+                   f"<div class='l'>🖥️ máquinas expostas</div></div>")
+        det = ""
+        for r in xdr["top"][:25]:
+            cls = _SEV_CLASS.get(r["severity"], "sv-informational")
+            ex = "💥 sim" if r["exploit"] else "<span class='meta'>—</span>"
+            link = r.get("link", "") or ""
+            link_html = (f"<a href='{esc(link)}' target='_blank' style='color:var(--accent);white-space:nowrap'>Defender ↗</a>"
+                         if link else "<span class='meta'>—</span>")
+            det += (f"<tr><td class='{cls}' style='font-weight:700;white-space:nowrap'>{esc(r['severity'])}</td>"
+                    f"<td>{esc(r['name'])}</td>"
+                    f"<td class='meta' style='white-space:nowrap'>{esc(r['category'])}</td>"
+                    f"<td style='text-align:right;font-weight:700'>{r['exposed']}</td>"
+                    f"<td style='white-space:nowrap'>{ex}</td><td>{link_html}</td></tr>")
+        table = ("<h3 style='margin-top:16px'>🔧 Recomendações <span class='meta'>· por severidade e máquinas expostas</span></h3>"
+                 "<table><tr><th>Sev</th><th>Recomendação</th><th>Categoria</th><th>Máquinas</th><th>Exploit</th><th>Referência</th></tr>"
+                 f"{det}</table>")
+        subtitle = "· Vulnerability Management / Exposure — priorize por exposição e exploit"
+        bars_title = "📊 Por categoria"
+
     return (
         "<div class='phase'><h3>🛡️ Recomendações do Defender XDR "
-        "<span class='meta'>· Vulnerability Management / Exposure — priorize por exposição e exploit</span></h3>"
+        f"<span class='meta'>{subtitle}</span></h3>"
         "<div class='card'>"
         "<div class='dvgrid'>"
         f"<div style='text-align:center'>{donut}{donut_legend}</div>"
         f"<div><div class='kpis'>{kcards}</div></div>"
         "</div>"
-        "<h3 style='margin-top:16px'>📊 Por categoria</h3>"
+        f"<h3 style='margin-top:16px'>{bars_title}</h3>"
         f"{bars}"
-        "<h3 style='margin-top:16px'>🔧 Recomendações <span class='meta'>· por severidade e máquinas expostas</span></h3>"
-        "<table><tr><th>Sev</th><th>Recomendação</th><th>Categoria</th><th>Máquinas</th><th>Exploit</th><th>Referência</th></tr>"
-        f"{det}</table>"
+        f"{table}"
         "</div></div>")
 
 # =============================================================================
@@ -1261,7 +1337,10 @@ def _exec_summary_html(ctx):
     if mcsb:
         b.append(f"<li><b>MCSB Compliance:</b> <b>{mcsb.get('compliance_pct')}%</b> de conformidade — {mcsb.get('passed',0)} passed / <b style='color:#ff6b6b'>{mcsb.get('failed',0)} failed</b>.</li>")
     if xdr:
-        b.append(f"<li><b>Defender XDR:</b> {xdr['total']} recomendações — <b style='color:#ff6b6b'>{xdr['exploit_total']}</b> com exploit público · {xdr['exposed_total']} máquinas expostas.</li>")
+        if xdr.get("mode") == "actions":
+            b.append(f"<li><b>Defender XDR — Recommended Actions:</b> {xdr['total']} ações de melhoria do Microsoft Secure Score (<b style='color:#5ed16a'>{xdr.get('points_total',0)}</b> pontos de oportunidade).</li>")
+        else:
+            b.append(f"<li><b>Defender XDR:</b> {xdr['total']} recomendações — <b style='color:#ff6b6b'>{xdr.get('exploit_total',0)}</b> com exploit público · {xdr.get('exposed_total',0)} máquinas expostas.</li>")
     if devops:
         c = devops['by_severity'].get('Critical', 0)
         h = devops['by_severity'].get('High', 0)
@@ -1294,10 +1373,16 @@ def _exec_critical_tables(ctx):
         blocks.append(("📋 MCSB — controles mais falhando", "<table><tr><th>Controle</th><th>Nome</th><th>Falhas</th></tr>" + rows + "</table>"))
     xdr = ctx.get("xdr")
     if xdr and xdr.get("top"):
-        rows = "".join(
-            f"<tr><td class='{_SEV_CLASS.get(r['severity'],'sv-informational')}' style='font-weight:700;white-space:nowrap'>{esc(r['severity'])}</td>"
-            f"<td>{esc(r['name'])}</td><td style='text-align:right;font-weight:700'>{r['exposed']}</td></tr>" for r in xdr["top"][:6])
-        blocks.append(("🛡️ Defender XDR — críticas", "<table><tr><th>Sev</th><th>Recomendação</th><th>Máq.</th></tr>" + rows + "</table>"))
+        if xdr.get("mode") == "actions":
+            rows = "".join(
+                f"<tr><td>{esc(r['name'])}</td><td class='meta' style='white-space:nowrap'>{esc(r.get('category','—'))}</td>"
+                f"<td style='text-align:right;font-weight:700'>{r.get('points',0)}</td></tr>" for r in xdr["top"][:6])
+            blocks.append(("🛡️ Defender XDR — recommended actions", "<table><tr><th>Ação</th><th>Categoria</th><th>Pontos</th></tr>" + rows + "</table>"))
+        else:
+            rows = "".join(
+                f"<tr><td class='{_SEV_CLASS.get(r['severity'],'sv-informational')}' style='font-weight:700;white-space:nowrap'>{esc(r['severity'])}</td>"
+                f"<td>{esc(r['name'])}</td><td style='text-align:right;font-weight:700'>{r['exposed']}</td></tr>" for r in xdr["top"][:6])
+            blocks.append(("🛡️ Defender XDR — críticas", "<table><tr><th>Sev</th><th>Recomendação</th><th>Máq.</th></tr>" + rows + "</table>"))
     devops = ctx.get("devops")
     if devops and devops.get("top_findings"):
         rows = "".join(
@@ -1599,13 +1684,18 @@ def render_html(ctx, q):
              ("Severidade alta", n_high_mdc, "#ff6b6b")],
             "showPage('page-mdc')", d_pie)
     if xdr:
-        x_pie = _svg_pie([(s, xdr['by_severity'].get(s, 0), _SEV_COLOR.get(s, '#9fb0c8')) for s in xdr['sev_order']])
-        score_cards += _score_card("🛡️", "Defender XDR", xdr['total'], "recomendações · Vuln Mgmt / Exposure",
-            [("Critical", xdr['by_severity'].get('Critical', 0), "#ff4d4d"),
-             ("High", xdr['by_severity'].get('High', 0), "#ff6b6b"),
-             ("Exploit público", xdr['exploit_total'], "#ff6b6b"),
-             ("Máquinas expostas", xdr['exposed_total'], "#ffd96b")],
-            "showPage('page-xdr')", x_pie)
+        x_pie = _svg_pie([(g, v, c) for g, v, c in xdr['groups']])
+        if xdr.get('mode') == 'actions':
+            sub = "Recommended Actions · Microsoft Secure Score"
+            x_rows = [(g, v, "var(--fg)") for g, v, c in xdr['groups'][:3]]
+            x_rows.append(("Pontos de melhoria", xdr.get('points_total', 0), "#5ed16a"))
+        else:
+            sub = "recomendações · Vuln Mgmt / Exposure"
+            x_rows = [("Critical", xdr['by_severity'].get('Critical', 0), "#ff4d4d"),
+                      ("High", xdr['by_severity'].get('High', 0), "#ff6b6b"),
+                      ("Exploit público", xdr.get('exploit_total', 0), "#ff6b6b"),
+                      ("Máquinas expostas", xdr.get('exposed_total', 0), "#ffd96b")]
+        score_cards += _score_card("🛡️", "Defender XDR", xdr['total'], sub, x_rows, "showPage('page-xdr')", x_pie)
     if mcsb:
         c_pie = _svg_pie([("Passed", mcsb.get('passed', 0), "#5ed16a"),
                           ("Failed", mcsb.get('failed', 0), "#ff6b6b"),
