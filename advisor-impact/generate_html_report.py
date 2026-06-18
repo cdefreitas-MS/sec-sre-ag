@@ -960,6 +960,31 @@ def _svg_donut(segments, size=160, stroke=28):
     return (f"<svg viewBox='0 0 {size} {size}' width='{size}' height='{size}' class='donut' "
             f"role='img' aria-label='Severidade'>{arcs}{center}</svg>")
 
+def _svg_pie(segments, size=88):
+    """Gráfico de pizza (pie) cheio, sem libs. segments = [(label, value, color)]."""
+    nz = [(l, v, c) for l, v, c in segments if v and v > 0]
+    if not nz:
+        return ""
+    total = sum(v for _, v, _ in nz) or 1
+    cx = cy = size / 2.0
+    r = size / 2.0 - 1
+    if len(nz) == 1:
+        return (f"<svg viewBox='0 0 {size} {size}' width='{size}' height='{size}' class='pie' role='img'>"
+                f"<circle cx='{cx}' cy='{cy}' r='{r:.1f}' fill='{nz[0][2]}'/></svg>")
+    ang = -90.0
+    paths = ""
+    for _l, v, c in nz:
+        frac = v / total
+        a0 = math.radians(ang)
+        ang += frac * 360.0
+        a1 = math.radians(ang)
+        x0 = cx + r * math.cos(a0); y0 = cy + r * math.sin(a0)
+        x1 = cx + r * math.cos(a1); y1 = cy + r * math.sin(a1)
+        large = 1 if frac > 0.5 else 0
+        paths += (f"<path d='M{cx:.2f},{cy:.2f} L{x0:.2f},{y0:.2f} "
+                  f"A{r:.2f},{r:.2f} 0 {large} 1 {x1:.2f},{y1:.2f} Z' fill='{c}'/>")
+    return (f"<svg viewBox='0 0 {size} {size}' width='{size}' height='{size}' class='pie' role='img'>{paths}</svg>")
+
 def _stacked_bars(matrix, sevs):
     """Barras horizontais empilhadas por repo (escala pelo maior total). Estilo Power BI."""
     maxt = max((m["total"] for m in matrix), default=1) or 1
@@ -1186,16 +1211,17 @@ def analyze_m365_secure_score(data):
     return {"pct": round(100.0 * cur / mx, 1), "current": round(cur, 1),
             "max": round(mx, 1), "controls": len(p.get("controlScores") or [])}
 
-def _score_card(icon, title, big, big_sub, rows, onclick=""):
-    """Card de score estilo Power BI: ícone + título + número grande + sub-métricas. rows=[(label,value,color)]."""
+def _score_card(icon, title, big, big_sub, rows, onclick="", pie=""):
+    """Card de score estilo Power BI: ícone + título + número grande + pizza + sub-métricas. rows=[(label,value,color)]."""
     click = (" onclick=\"" + onclick + "\" style=\"cursor:pointer\"") if onclick else ""
     rh = "".join(f"<div class='scrow'><span>{esc(l)}</span><b style='color:{c}'>{esc(str(v))}</b></div>"
                  for l, v, c in rows)
+    big_lbl = (f"<div class='scbiglbl'>{esc(big_sub)}</div>" if big_sub else "")
+    pie_html = (f"<div class='scpie'>{pie}</div>" if pie else "")
     return (f"<div class='scorecard'{click}><div class='schead'><span class='scic'>{icon}</span>"
             f"<span class='sctitle'>{esc(title)}</span></div>"
-            f"<div class='scbig'>{esc(str(big))}</div>"
-            + (f"<div class='scbiglbl'>{esc(big_sub)}</div>" if big_sub else "")
-            + f"<div class='scrows'>{rh}</div></div>")
+            f"<div class='sctop'><div class='scnum'><div class='scbig'>{esc(str(big))}</div>{big_lbl}</div>{pie_html}</div>"
+            f"<div class='scrows'>{rh}</div></div>")
 
 def _exec_summary_html(ctx):
     """Resumo executivo consolidado (narrativa server-side a partir do ctx)."""
@@ -1205,6 +1231,25 @@ def _exec_summary_html(ctx):
     ss, ss_pot, ss_delta = ctx.get("secure_score"), ctx.get("secure_score_potential"), ctx.get("secure_score_delta")
     mcsb, xdr, devops, m365 = ctx.get("mcsb"), ctx.get("xdr"), ctx.get("devops"), ctx.get("m365")
     savings = ctx.get("savings_total") or 0
+    # pizza de VOLUME de recomendações/ações por origem
+    ov = []
+    if len(ctx.get("advisor", [])):
+        ov.append(("Advisor", len(ctx["advisor"]), "#7cd0ff"))
+    if len(ctx.get("mdc", [])):
+        ov.append(("Defender for Cloud", len(ctx["mdc"]), "#c9a7ff"))
+    if xdr:
+        ov.append(("Defender XDR", xdr["total"], "#ffd96b"))
+    if devops:
+        ov.append(("DevOps", devops["total"], "#7ee2a8"))
+    pie_block = ""
+    if ov:
+        pie = _svg_pie(ov, 150)
+        legend = "".join(f"<span><i class='dot' style='background:{c}'></i>{esc(l)} · <b>{v}</b></span>" for l, v, c in ov)
+        total_actions = sum(v for _, v, _ in ov)
+        pie_block = ("<div class='card' style='margin-bottom:14px'><h3 style='margin-top:0'>Volume de recomendações / ações por origem "
+                     f"<span class='meta'>· total {total_actions}</span></h3>"
+                     "<div style='display:flex;gap:20px;align-items:center;flex-wrap:wrap'>"
+                     f"<div>{pie}</div><div class='legend' style='justify-content:flex-start'>{legend}</div></div></div>")
     b = []
     sav_txt = (f" Economia potencial <b style='color:#5ed16a'>−US$ {savings:,.0f}/ano</b>." if savings else "")
     b.append(f"<li><b>Plano de remediação:</b> {n} recomendações — 🟢 {safe} quick wins · 🟡🟠 {low+med} em janela · 🔴 {high} exigem aprovação.{sav_txt}</li>")
@@ -1223,7 +1268,7 @@ def _exec_summary_html(ctx):
         b.append(f"<li><b>DevOps Remediation:</b> {devops['total']} findings — <b style='color:#ff4d4d'>{c} Critical</b> / <b style='color:#ff6b6b'>{h} High</b>.</li>")
     prio = ("Prioridade sugerida: 🔴 aprovações + Critical/High (XDR/DevOps) → 🟢 quick wins do Secure Score → "
             "controles MCSB em falha.")
-    return ("<div class='card'><h3 style='margin-top:0'>Visão consolidada</h3>"
+    return (pie_block + "<div class='card'><h3 style='margin-top:0'>Visão consolidada</h3>"
             "<ul style='margin:6px 0 0;padding-left:18px;line-height:1.9'>" + "".join(b) + "</ul>"
             f"<div class='meta' style='margin-top:10px'>{prio}</div></div>")
 
@@ -1306,9 +1351,12 @@ _REPORT_CSS = """
   .scorecard[onclick]:hover{transform:translateY(-3px);box-shadow:0 8px 20px var(--shadow);border-color:var(--accent)}
   .schead{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:13px;font-weight:600;min-height:38px}
   .scic{font-size:20px}
-  .scbig{font-size:40px;font-weight:800;text-align:center;margin:6px 0 0;letter-spacing:-1px}
-  .scbiglbl{text-align:center;color:var(--muted);font-size:12px;margin-bottom:6px}
-  .scrows{margin-top:8px;border-top:1px solid var(--border);padding-top:8px}
+  .sctop{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:4px}
+  .scnum{min-width:0}
+  .scbig{font-size:38px;font-weight:800;text-align:left;margin:0;letter-spacing:-1px;line-height:1.05}
+  .scbiglbl{text-align:left;color:var(--muted);font-size:12px;margin-top:2px}
+  .scpie{flex-shrink:0} .pie{display:block}
+  .scrows{margin-top:10px;border-top:1px solid var(--border);padding-top:8px}
   .scrow{display:flex;justify-content:space-between;align-items:center;font-size:13px;padding:3px 0}
   .scrow span{color:var(--muted)}
   @media(max-width:680px){.kpis{grid-template-columns:repeat(3,1fr)}.barrow{grid-template-columns:110px 1fr 34px}}
@@ -1443,35 +1491,48 @@ def render_html(ctx, q):
         '<button id="themebtn" class="btn" onclick="toggleTheme()">☀️ Tema claro</button></div></div>')
 
     # ---- cards de SCORE na home (estilo Power BI: só os scores, bem clean) ----
+    mdc_by_sev = {}
+    for it in ctx.get("mdc", []):
+        s = str(it.get("priority", "—")).capitalize()
+        mdc_by_sev[s] = mdc_by_sev.get(s, 0) + 1
+    _SEVS = ["Critical", "High", "Medium", "Low", "Informational"]
     score_cards = ""
     if m365:
+        m_pie = _svg_pie([("Obtidos", m365['current'], "#5ed16a"),
+                          ("Restantes", max(m365['max'] - m365['current'], 0), "#aeb8c7")])
         score_cards += _score_card("🏆", "Microsoft Secure Score", f"{m365['pct']}%", "Entra ID + Microsoft 365",
             [("Pontos atuais", m365['current'], "var(--accent)"),
              ("Pontos máximos", m365['max'], "var(--muted)"),
              ("Controles avaliados", m365['controls'], "var(--muted)")],
-            "showPage('page-exec')")
+            "showPage('page-exec')", m_pie)
     if ss is not None:
+        d_pie = _svg_pie([(s, mdc_by_sev.get(s, 0), _SEV_COLOR.get(s, '#9fb0c8')) for s in _SEVS])
         score_cards += _score_card("🛡️", "Defender for Cloud — Secure Score", f"{ss}%", "postura de nuvem",
             [("Potencial", f"{ss_pot}%" if ss_pot is not None else "—", "#5ed16a"),
              ("Elevação possível", f"+{ss_delta} pp" if ss_delta is not None else "—", "#5ed16a"),
              ("Recomendações", n_mdc, "var(--fg)"),
              ("Severidade alta", n_high_mdc, "#ff6b6b")],
-            "gotoSource('Defender for Cloud')")
+            "gotoSource('Defender for Cloud')", d_pie)
     if xdr:
+        x_pie = _svg_pie([(s, xdr['by_severity'].get(s, 0), _SEV_COLOR.get(s, '#9fb0c8')) for s in xdr['sev_order']])
         score_cards += _score_card("🛡️", "Defender XDR", xdr['total'], "recomendações · Vuln Mgmt / Exposure",
             [("Critical", xdr['by_severity'].get('Critical', 0), "#ff4d4d"),
              ("High", xdr['by_severity'].get('High', 0), "#ff6b6b"),
              ("Exploit público", xdr['exploit_total'], "#ff6b6b"),
              ("Máquinas expostas", xdr['exposed_total'], "#ffd96b")],
-            "showPage('page-xdr')")
+            "showPage('page-xdr')", x_pie)
     if mcsb:
+        c_pie = _svg_pie([("Passed", mcsb.get('passed', 0), "#5ed16a"),
+                          ("Failed", mcsb.get('failed', 0), "#ff6b6b"),
+                          ("Skipped", mcsb.get('skipped', 0), "#ffd96b"),
+                          ("Unsupported", mcsb.get('unsupported', 0), "#aeb8c7")])
         score_cards += _score_card("📋", "MCSB Compliance", f"{mcsb_pct}%" if mcsb_pct is not None else "n/a",
             "Microsoft Cloud Security Benchmark",
             [("Passed", mcsb.get('passed', 0), "#5ed16a"),
              ("Failed", mcsb.get('failed', 0), "#ff6b6b"),
              ("Skipped", mcsb.get('skipped', 0), "var(--muted)"),
              ("Unsupported", mcsb.get('unsupported', 0), "var(--muted)")],
-            "showPage('page-mcsb')")
+            "showPage('page-mcsb')", c_pie)
     if not score_cards:
         score_cards = ("<div class=\"navcard\" onclick=\"showPage('page-plan')\"><div class=\"ic\">🧭</div>"
                        "<b>Plano de Remediação</b><div class=\"big\">" + str(n) + "</div>"
