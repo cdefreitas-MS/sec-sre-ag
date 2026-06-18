@@ -880,7 +880,7 @@ def build_context(q, raw, params):
     xdr = analyze_xdr_recommendations(raw.get("xdr_recommendations"), sub_names)
 
     # Microsoft Secure Score (M365/Entra) — dataset opcional (prefetch via Graph)
-    m365 = analyze_m365_secure_score(raw.get("m365_secure_score") or raw.get("secure_score_m365"))
+    m365 = analyze_m365_dashboard(raw.get("m365_secure_score") or raw.get("secure_score_m365"), raw.get("xdr_recommendations"))
 
     # Mapa POR SUBSCRIPTION (p/ recalcular SS + MCSB sob filtro de subscription no JS)
     subs = {}
@@ -1295,6 +1295,225 @@ def analyze_m365_secure_score(data):
     return {"pct": round(100.0 * cur / mx, 1), "current": round(cur, 1),
             "max": round(mx, 1), "controls": len(p.get("controlScores") or [])}
 
+# ----- Dashboard Microsoft Secure Score (estilo ESA, página dedicada) ---------
+# Junta secureScores.controlScores (score ATUAL por controle) com
+# secureScoreControlProfiles (título/categoria/produto/maxScore/estado).
+_M365_STATE_MAP = {
+    "default": "A endereçar", "toaddress": "A endereçar", "reviewed": "Em revisão",
+    "planned": "Planejado", "ignored": "Risco aceito", "riskaccepted": "Risco aceito",
+    "thirdparty": "Mitigação alternativa", "resolved": "Concluído", "completed": "Concluído",
+}
+_M365_STATUS_COLOR = {
+    "Concluído": "#5ed16a", "A endereçar": "#ffb020", "Planejado": "#7cd0ff",
+    "Em revisão": "#9aa7ff", "Risco aceito": "#c9a7ff", "Mitigação alternativa": "#f48fb1",
+}
+_M365_CAT_COLOR = {"Identity": "#7cd0ff", "Device": "#7ee2a8", "Apps": "#c9a7ff", "Data": "#ffd96b",
+                   "Account": "#7cd0ff", "Infrastructure": "#ff9f6b", "—": "#9fb0c8"}
+_M365_BUCKET_COLOR = {"Alcançado": "#5ed16a", "Parcial": "#ffd96b", "Oportunidade": "#ff6b6b"}
+
+
+def analyze_m365_dashboard(m365_raw, profiles_raw):
+    """Dashboard Microsoft Secure Score (estilo ESA): por-recomendação com status/categoria/
+    produto/pontuação/impacto/licença. Requer secureScores; enriquece com secureScoreControlProfiles."""
+    base = analyze_m365_secure_score(m365_raw)
+    if not base:
+        return None
+    rows = as_list(m365_raw)
+    head = rows[0] if rows and isinstance(rows[0], dict) else {}
+    hp = head.get("properties") if isinstance(head.get("properties"), dict) else head
+    cscores = {}
+    for cs in (hp.get("controlScores") or []):
+        if not isinstance(cs, dict):
+            continue
+        key = str(cs.get("controlName") or cs.get("name") or "").strip().lower()
+        if not key:
+            continue
+        try:
+            sc = float(cs.get("score") or 0)
+        except (TypeError, ValueError):
+            sc = 0.0
+        cscores[key] = {"score": sc, "category": cs.get("controlCategory") or "",
+                        "applicable": cs.get("IsApplicable", cs.get("isApplicable", None))}
+    profs = [r for r in as_list(profiles_raw) if isinstance(r, dict)]
+    if not profs:
+        return base  # só o card simples (sem página de dashboard)
+
+    def field(r, *keys):
+        p = r.get("properties") if isinstance(r.get("properties"), dict) else {}
+        for k in keys:
+            if r.get(k) not in (None, ""):
+                return r.get(k)
+            if p.get(k) not in (None, ""):
+                return p.get(k)
+        return None
+
+    recs = []
+    for r in profs:
+        if bool(field(r, "deprecated")):
+            continue
+        cid = str(field(r, "id", "controlName", "name") or "").strip()
+        title = str(field(r, "title", "displayName", "controlName", "id") or "—")
+        cat = str(field(r, "controlCategory", "category") or "")
+        product = str(field(r, "service", "actionType") or "—")
+        try:
+            maxs = float(field(r, "maxScore", "max") or 0)
+        except (TypeError, ValueError):
+            maxs = 0.0
+        csu = field(r, "controlStateUpdates")
+        state_raw = ""
+        if isinstance(csu, list) and csu and isinstance(csu[-1], dict):
+            state_raw = str(csu[-1].get("state") or "")
+        cs = cscores.get(cid.lower(), {})
+        cur = cs.get("score", 0.0)
+        if not cat or cat == "—":
+            cat = cs.get("category") or "—"
+        if maxs > 0 and cur >= maxs - 1e-9:
+            status = "Concluído"
+        else:
+            status = _M365_STATE_MAP.get(re.sub(r"\s+", "", state_raw).lower(), "A endereçar")
+        if maxs <= 0 or cur <= 0:
+            bucket = "Oportunidade"
+        elif cur >= maxs - 1e-9:
+            bucket = "Alcançado"
+        else:
+            bucket = "Parcial"
+        appl = cs.get("applicable", None)
+        recs.append({
+            "name": title, "category": cat or "—", "product": product or "—",
+            "score": round(cur, 1), "max": round(maxs, 1), "missing": round(max(maxs - cur, 0.0), 1),
+            "status": status, "bucket": bucket, "licensed": (appl is not False),
+            "link": str(field(r, "actionUrl", "remediationUrl", "link") or ""),
+        })
+    if not recs:
+        return base
+
+    def tally(key):
+        d = {}
+        for x in recs:
+            d[x[key]] = d.get(x[key], 0) + 1
+        return d
+
+    prod = {}
+    for x in recs:
+        pp = prod.setdefault(x["product"], {"completed": 0, "to_address": 0, "cur": 0.0, "max": 0.0})
+        pp["completed" if x["status"] == "Concluído" else "to_address"] += 1
+        pp["cur"] += x["score"]
+        pp["max"] += x["max"]
+    by_product = sorted(
+        [{"product": k, "completed": v["completed"], "to_address": v["to_address"],
+          "pct": round(100.0 * v["cur"] / v["max"]) if v["max"] else 0,
+          "gain": round(v["max"] - v["cur"], 1)} for k, v in prod.items()],
+        key=lambda r: (r["to_address"], r["gain"]), reverse=True)
+    no_license = sum(1 for x in recs if not x["licensed"])
+    completed = sum(1 for x in recs if x["status"] == "Concluído")
+    out = dict(base)
+    out.update({
+        "dashboard": True, "total": len(recs), "completed": completed,
+        "to_address": len(recs) - completed, "no_license": no_license,
+        "missing_total": round(sum(x["missing"] for x in recs)),
+        "by_status": tally("status"), "by_category": tally("category"), "by_bucket": tally("bucket"),
+        "by_product": by_product,
+        "license_segs": ([("Licenciado", len(recs) - no_license, "#5ed16a"),
+                          ("Sem licença", no_license, "#ff6b6b")] if no_license else None),
+        "top": sorted(recs, key=lambda x: (x["missing"], x["max"]), reverse=True),
+    })
+    return out
+
+
+def _m365_pie_card(title, segs, size=150):
+    """Mini-card pizza + legenda (estilo Power BI)."""
+    nz = [(l, v, c) for l, v, c in segs if v]
+    pie = _svg_pie([(l, v, c) for l, v, c in nz], size)
+    legend = "<div class='legend'>" + "".join(
+        f"<span><i class='dot' style='background:{c}'></i>{esc(l)} · {v}</span>" for l, v, c in nz) + "</div>"
+    return f"<div class='piecard'><div class='pctitle'>{esc(title)}</div>{pie}{legend}</div>"
+
+
+def _render_m365_section(ctx):
+    """Página 🏆 Microsoft Secure Score (dashboard estilo ESA, melhorado)."""
+    m = ctx.get("m365")
+    if not m or not m.get("dashboard"):
+        return ""
+    kpis = [("#9fb0c8", f"{m['pct']}%", "🏆 Secure Score"),
+            ("#7cd0ff", m["total"], "recomendações"),
+            ("#5ed16a", m["completed"], "✅ concluídas"),
+            ("#ffb020", m["to_address"], "🟠 a endereçar"),
+            ("#9ae6b4", f"+{int(m['missing_total'])}", "🎯 pontos a ganhar")]
+    if m["no_license"]:
+        kpis.append(("#ff6b6b", m["no_license"], "⚠️ sem licença"))
+    kstrip = "".join(
+        f"<div class='kpi'><div class='n' style='color:{c}'>{esc(str(v))}</div><div class='l'>{esc(l)}</div></div>"
+        for c, v, l in kpis)
+
+    st = m["by_status"]
+    status_segs = [(s, st[s], _M365_STATUS_COLOR.get(s, "#9fb0c8")) for s in sorted(st, key=st.get, reverse=True)]
+    ct = m["by_category"]
+    cat_segs = [(c, ct[c], _M365_CAT_COLOR.get(c, "#9fb0c8")) for c in sorted(ct, key=ct.get, reverse=True)]
+    bk = m["by_bucket"]
+    bucket_segs = [(b, bk.get(b, 0), _M365_BUCKET_COLOR[b]) for b in ("Alcançado", "Parcial", "Oportunidade") if bk.get(b)]
+    pies = (_m365_pie_card("Status", status_segs) + _m365_pie_card("Categoria", cat_segs)
+            + _m365_pie_card("Pontuação", bucket_segs))
+    if m.get("license_segs"):
+        pies += _m365_pie_card("Licença", m["license_segs"])
+
+    # Recomendações por produto
+    pr = ""
+    for p in m["by_product"][:15]:
+        pr += (f"<tr><td>{esc(p['product'])}</td>"
+               f"<td style='text-align:right;color:#5ed16a;font-weight:700'>{p['completed']}</td>"
+               f"<td style='text-align:right;color:#ffb020;font-weight:700'>{p['to_address']}</td>"
+               f"<td style='text-align:right'>{p['pct']}%</td>"
+               f"<td><div class='bartrack' style='height:10px'><span class='seg' style='width:{p['pct']}%;background:#52b788'></span></div></td></tr>")
+    prod_table = ("<table><tr><th>Produto</th><th style='text-align:right'>Concluídas</th>"
+                  "<th style='text-align:right'>A endereçar</th><th style='text-align:right'>% atingido</th>"
+                  "<th>&nbsp;</th></tr>" + pr + "</table>")
+
+    # Barras: pontuação (verde) vs pontos a ganhar (cinza) — top por pontos a ganhar
+    top_bar = [x for x in m["top"] if x["max"] > 0][:12]
+    maxv = max((x["max"] for x in top_bar), default=1) or 1
+    bars = ""
+    for x in top_bar:
+        sw = 100.0 * x["score"] / maxv
+        mw = 100.0 * x["missing"] / maxv
+        seg = (f"<span class='seg' style='width:{sw:.1f}%;background:#52b788' title='pontuação {x['score']}'></span>"
+               f"<span class='seg' style='width:{mw:.1f}%;background:var(--inset);border-left:1px solid var(--border)' title='a ganhar {x['missing']}'></span>")
+        bars += (f"<div class='barrow'><div class='barlbl' title='{esc(x['name'])}'>{esc(x['name'])}</div>"
+                 f"<div class='bartrack'>{seg}</div><div class='barval'>{x['score']:g}/{x['max']:g}</div></div>")
+    bars_html = f"<div class='bars'>{bars}</div>"
+
+    # Tabela detalhada
+    det = ""
+    for x in m["top"][:30]:
+        sc = _M365_STATUS_COLOR.get(x["status"], "#9fb0c8")
+        link = x.get("link") or ""
+        ref = (f"<a href='{esc(link)}' target='_blank' style='color:var(--accent);white-space:nowrap'>Portal ↗</a>"
+               if link else "<span class='meta'>—</span>")
+        det += (f"<tr><td>{esc(x['name'])}</td>"
+                f"<td class='meta' style='white-space:nowrap'>{esc(x['category'])}</td>"
+                f"<td class='meta' style='white-space:nowrap'>{esc(x['product'])}</td>"
+                f"<td style='white-space:nowrap;color:{sc};font-weight:700'>{esc(x['status'])}</td>"
+                f"<td style='text-align:right'>{x['score']:g}</td>"
+                f"<td style='text-align:right' class='meta'>{x['max']:g}</td>"
+                f"<td style='text-align:right;color:#9ae6b4;font-weight:700'>+{x['missing']:g}</td>"
+                f"<td>{ref}</td></tr>")
+    det_table = ("<table><tr><th>Ação recomendada</th><th>Categoria</th><th>Produto</th><th>Status</th>"
+                 "<th style='text-align:right'>Pontuação</th><th style='text-align:right'>Máx</th>"
+                 "<th style='text-align:right'>A ganhar</th><th>Referência</th></tr>" + det + "</table>")
+
+    return (
+        "<div class='phase'><h3>🏆 Microsoft Secure Score "
+        "<span class='meta'>· Entra ID + Microsoft 365 · Recommended Actions (security.microsoft.com/securescore)</span></h3>"
+        "<div class='card'>"
+        f"<div class='kpis'>{kstrip}</div>"
+        f"<div class='pgrid' style='margin-top:14px'>{pies}</div>"
+        "<h3 style='margin-top:16px'>📦 Recomendações por produto</h3>"
+        f"{prod_table}"
+        "<h3 style='margin-top:16px'>📊 Pontuação vs pontos a ganhar <span class='meta'>· top 12 por oportunidade</span></h3>"
+        f"{bars_html}"
+        "<h3 style='margin-top:16px'>🔧 Ações recomendadas <span class='meta'>· ordenadas por pontos a ganhar</span></h3>"
+        f"{det_table}"
+        "</div></div>")
+
 def _score_card(icon, title, big, big_sub, rows, onclick="", pie=""):
     """Card de score estilo Power BI: ícone + título + número grande + pizza + sub-métricas. rows=[(label,value,color)]."""
     click = (" onclick=\"" + onclick + "\" style=\"cursor:pointer\"") if onclick else ""
@@ -1541,6 +1760,9 @@ _REPORT_CSS = """
   .scrow{display:flex;justify-content:space-between;align-items:center;font-size:13px;padding:3px 0}
   .scrow span{color:var(--muted)}
   .critgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px;margin-top:8px}
+  .pgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px}
+  .piecard{background:var(--inset);border:1px solid var(--border);border-radius:12px;padding:14px 12px;text-align:center}
+  .pctitle{font-size:12px;font-weight:700;color:var(--muted);margin-bottom:8px;text-transform:uppercase;letter-spacing:.03em}
   @media(max-width:680px){.kpis{grid-template-columns:repeat(3,1fr)}.barrow{grid-template-columns:110px 1fr 34px}}
 """
 
@@ -1651,6 +1873,8 @@ def render_html(ctx, q):
 
     # ---- barra superior (sempre visível) ----
     nav_extra = "<button class=\"navbtn\" data-page=\"page-exec\" onclick=\"showPage('page-exec')\">📊 Resumo Executivo</button>"
+    if m365 and m365.get("dashboard"):
+        nav_extra += "<button class=\"navbtn\" data-page=\"page-m365\" onclick=\"showPage('page-m365')\">🏆 Microsoft Secure Score</button>"
     if n_adv:
         nav_extra += "<button class=\"navbtn\" data-page=\"page-plan\" onclick=\"gotoSource('Advisor')\">📘 Advisor</button>"
     if n_mdc:
@@ -1678,11 +1902,12 @@ def render_html(ctx, q):
     if m365:
         m_pie = _svg_pie([("Obtidos", m365['current'], "#5ed16a"),
                           ("Restantes", max(m365['max'] - m365['current'], 0), "#aeb8c7")])
+        m_click = "showPage('page-m365')" if m365.get('dashboard') else "showPage('page-exec')"
         score_cards += _score_card("🏆", "Microsoft Secure Score", f"{m365['pct']}%", "Entra ID + Microsoft 365",
             [("Pontos atuais", m365['current'], "var(--accent)"),
              ("Pontos máximos", m365['max'], "var(--muted)"),
              ("Controles avaliados", m365['controls'], "var(--muted)")],
-            "showPage('page-exec')", m_pie)
+            m_click, m_pie)
     if ss is not None:
         d_pie = _svg_pie([(s, mdc_by_sev.get(s, 0), _SEV_COLOR.get(s, '#9fb0c8')) for s in _SEVS])
         score_cards += _score_card("<img class='plogo' src='" + _DFC_LOGO_URI + "' alt=''>", "Defender for Cloud — Secure Score", f"{ss}%", "postura de nuvem",
@@ -1746,6 +1971,11 @@ def render_html(ctx, q):
         '<button class="btn back" onclick="goHome()">← Início</button>'
         + _render_mdc_section(ctx) + '</div>') if ctx.get("mdc") else ''
 
+    page_m365 = (
+        '<div id="page-m365" class="page" style="display:none">'
+        '<button class="btn back" onclick="goHome()">← Início</button>'
+        + _render_m365_section(ctx) + '</div>') if (m365 and m365.get("dashboard")) else ''
+
     filters = (
         '<div class="filters"><div class="ftop"><div class="meta">🔎 Filtros — marque para refinar; '
         'vazio = tudo. Secure Score e MCSB recalculam pelo filtro de Subscription.</div>'
@@ -1777,7 +2007,7 @@ def render_html(ctx, q):
               '(não criticidade). Custos via Azure Retail Prices API · Compliance via MCSB '
               '(inspirado no <a href="https://github.com/microsoft/ESA" style="color:var(--accent)">microsoft/ESA</a>).</div>')
 
-    body = topbar + home + page_exec + page_mdc + page_plan + page_xdr + page_mcsb + page_devops + footer + '</div>'
+    body = topbar + home + page_exec + page_mdc + page_m365 + page_plan + page_xdr + page_mcsb + page_devops + footer + '</div>'
     script = '<script>const DATA=' + data_json + ';\n' + _REPORT_JS + '</script>'
     return head + body + script + '</body></html>'
 
