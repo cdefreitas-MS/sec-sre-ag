@@ -1,0 +1,134 @@
+# =============================================================================
+# threat-correlation — verified queries (single source of truth)
+# Pattern: collector↔renderer. This file = CAPTURE. generate_html_report.py = RENDER.
+#
+# WHAT IT ANSWERS (≠ vulnerability-exposure):
+#   "Quais ameaças importam AGORA pra MIM?" — cruza inteligência de ameaça (exploit/exposição)
+#   com as vulnerabilidades do MEU ambiente E com alertas ATIVOS nos mesmos ativos.
+#   vulnerability-exposure = catálogo de risco (MDE REST API). threat-correlation =
+#   correlação CVE↔alerta ativo + crown-jewels + (opcional) enriquecimento MDTI.
+#
+# ROTEAMENTO POR ORIGEM DO DADO (não é fallback genérico):
+#   • Tier 1 — Defender XDR Advanced Hunting (NÃO vive no Sentinel) → Microsoft Graph runHuntingQuery.
+#         DeviceTvmSoftwareVulnerabilitiesKB · DeviceTvmSoftwareVulnerabilities · AlertInfo · AlertEvidence
+#         Perm (UAMI): ThreatHunting.Read.All (já concedida). Advanced Hunting usa `Timestamp`.
+#   • Tier 2 — Microsoft Defender Threat Intelligence (MDTI) → Graph /security/threatIntelligence/*.
+#         Requer add-on de API MDTI premium. Degrada gracioso no 402 PaymentRequired / 403.
+# =============================================================================
+metadata:
+  skill: threat-correlation
+  title: Threat ↔ Vulnerability Correlation
+  description: >
+    Correlates threat intelligence with the environment's real vulnerabilities and active
+    alerts to surface the CVEs that matter right now. Tier 1 (license-free): Defender TVM via
+    Advanced Hunting — exposed-device count per CVE, CVSS and exploit signal from the TVM KB,
+    cross-referenced with active alerts on the same devices (active threat on a vulnerable asset).
+    Tier 2 (with MDTI premium): enriches the top CVEs with actor/article/dark-web context from
+    Microsoft Defender Threat Intelligence. Read-only. Ranks each CVE and renders an executive
+    verdict (🔴 corrigir agora / 🟠 janela / 🟢 monitorar).
+  data_sources:
+    - Microsoft Defender XDR Advanced Hunting (DeviceTvm* + Alert* via Graph runHuntingQuery)
+    - Microsoft Defender Threat Intelligence (MDTI Graph API — optional, premium)
+
+parameters:
+  lookback_days: 14        # janela de alertas ativos a correlacionar
+  cvss_min: 7.0            # piso de CVSS p/ entrar no catálogo (Critical/High já filtrado)
+  top_cves: 15             # CVEs no relatório (após ranking)
+  top_threats: 5           # "Top ameaças que importam pra você" no destaque
+  mdti_enrich_top: 8       # quantas CVEs do topo enriquecer com MDTI (Tier 2)
+
+scoring:
+  # prioridade(CVE) = exposed_devices × cvss × exploit_weight × alert_bonus × asset_criticality
+  severity_weight:
+    Critical: 1.0
+    High: 0.6
+    Medium: 0.3
+    Low: 0.1
+  exploit_weight: 3.0      # IsExploitAvailable == 1 → ameaça weaponizada
+  alert_bonus: 2.0         # device exposto QUE TAMBÉM tem alerta ativo → ameaça em andamento
+  crown_jewel_bonus: 1.5   # device de alto valor (crown jewel) exposto
+  # Veredito por CVE (após ranking, relativo ao topo):
+  #   🔴 corrigir agora : exploit AND (alerta ativo OU exposed_devices alto)
+  #   🟠 janela         : exploit OR exposed_devices alto
+  #   🟢 monitorar      : caso contrário
+  verdict:
+    fix_now: "🔴 corrigir agora"
+    window: "🟠 janela"
+    monitor: "🟢 monitorar"
+
+routing:
+  graph_xdr: [cve_kb, cve_exposure, cve_active_threat, alerts_summary, crown_jewels]
+  mdti: [vulnerabilities, articles, intel_profiles]
+  graph_max_days: 30
+
+# -----------------------------------------------------------------------------
+# Tier 1 — Defender XDR Advanced Hunting (SEMPRE via Graph runHuntingQuery).
+# O renderer (self-collect) executa com `az account get-access-token --resource graph` + POST.
+# -----------------------------------------------------------------------------
+graph_xdr:
+  # Q1 — Catálogo de CVEs Critical/High (KB): CVSS, exploit disponível, descrição, publicação.
+  # NOTA: a KB do Advanced Hunting NÃO tem IsInExploitKit/IsExploitVerified (só IsExploitAvailable);
+  #       esses flags extras vivem na MDE REST API (skill vulnerability-exposure).
+  cve_kb:
+    method: POST
+    url: "https://graph.microsoft.com/v1.0/security/runHuntingQuery"
+    result_key: results
+    columns: [CveId, CvssScore, VulnerabilitySeverityLevel, IsExploitAvailable, PublishedDate, VulnerabilityDescription]
+    body: |
+      {"Query":"DeviceTvmSoftwareVulnerabilitiesKB | where VulnerabilitySeverityLevel in ('Critical','High') | where CvssScore >= {cvss_min} or IsExploitAvailable == 1 | project CveId, CvssScore, VulnerabilitySeverityLevel, IsExploitAvailable, PublishedDate, VulnerabilityDescription = substring(tostring(VulnerabilityDescription), 0, 240) | take 5000"}
+
+  # Q2 — Exposição por CVE (ENRIQUECIDA): devices distintos por CVE + CVSS/exploit/severidade
+  # vindos da KB no MESMO row (join em KQL). Evita o gap de o cve_kb (teto 5000, sem ordenação)
+  # não conter a CVE exposta → CVSS/exploit cairiam no default. Esta é a fonte de ranking.
+  cve_exposure:
+    method: POST
+    url: "https://graph.microsoft.com/v1.0/security/runHuntingQuery"
+    result_key: results
+    columns: [CveId, ExposedDevices, SampleDevices, CvssScore, IsExploitAvailable, VulnerabilitySeverityLevel, PublishedDate, VulnerabilityDescription]
+    body: |
+      {"Query":"let kb = DeviceTvmSoftwareVulnerabilitiesKB | summarize arg_max(CvssScore, IsExploitAvailable, VulnerabilitySeverityLevel, PublishedDate, VulnerabilityDescription) by CveId; DeviceTvmSoftwareVulnerabilities | where VulnerabilitySeverityLevel in ('Critical','High') | summarize ExposedDevices = dcount(DeviceId), SampleDevices = make_set(DeviceName, 8) by CveId | join kind=leftouter kb on CveId | project CveId, ExposedDevices, SampleDevices, CvssScore, IsExploitAvailable, VulnerabilitySeverityLevel, PublishedDate, VulnerabilityDescription = substring(tostring(VulnerabilityDescription), 0, 240) | order by ExposedDevices desc | take 5000"}
+
+  # Q3 — Ameaça ATIVA: por CVE, quantos devices expostos TAMBÉM têm alerta ativo na janela.
+  # Join em KQL (exposição ↔ devices alertados) → correlação direta CVE ↔ ameaça em andamento.
+  cve_active_threat:
+    method: POST
+    url: "https://graph.microsoft.com/v1.0/security/runHuntingQuery"
+    result_key: results
+    columns: [CveId, AlertedDevices, MaxAlertSeverity]
+    body: |
+      {"Query":"let alerted = AlertInfo | where Timestamp >= ago({lookback_days}d) | join kind=inner (AlertEvidence | where isnotempty(DeviceId)) on AlertId | summarize AlertSeverity = max(Severity) by DeviceId; DeviceTvmSoftwareVulnerabilities | where VulnerabilitySeverityLevel in ('Critical','High') | join kind=inner alerted on DeviceId | summarize AlertedDevices = dcount(DeviceId), MaxAlertSeverity = max(AlertSeverity) by CveId | order by AlertedDevices desc | take 2000"}
+
+  # Q4 — Resumo de alertas ativos por severidade (contexto do cabeçalho).
+  alerts_summary:
+    method: POST
+    url: "https://graph.microsoft.com/v1.0/security/runHuntingQuery"
+    result_key: results
+    columns: [Severity, Alerts, Devices]
+    body: |
+      {"Query":"AlertInfo | where Timestamp >= ago({lookback_days}d) | join kind=leftouter (AlertEvidence | where isnotempty(DeviceId) | distinct AlertId, DeviceId) on AlertId | summarize Alerts = dcount(AlertId), Devices = dcount(DeviceId) by Severity"}
+
+  # Q5 — Crown jewels: devices de alto valor exposto (peso extra no ranking).
+  # Aproximação via DeviceInfo.DeviceValue ('High'). column_ifexists evita BadRequest quando a
+  # coluna não existe no schema do tenant → degrada para vazio (crownBonus simplesmente não aplica).
+  crown_jewels:
+    method: POST
+    url: "https://graph.microsoft.com/v1.0/security/runHuntingQuery"
+    result_key: results
+    columns: [DeviceId, DeviceName]
+    body: |
+      {"Query":"DeviceInfo | where Timestamp >= ago(7d) | project DeviceId, DeviceName, DeviceValue = column_ifexists('DeviceValue', '') | where DeviceValue == 'High' | distinct DeviceId, DeviceName | take 2000"}
+
+# -----------------------------------------------------------------------------
+# Tier 2 — MDTI (Microsoft Defender Threat Intelligence). Requer add-on de API premium.
+# Chamado SÓ para as top CVEs (mdti_enrich_top). 402 PaymentRequired / 403 → degrada (mdti_available=False).
+# -----------------------------------------------------------------------------
+mdti:
+  base: "https://graph.microsoft.com/v1.0/security/threatIntelligence"
+  token_resource: "https://graph.microsoft.com"
+  endpoints:
+    # {cve} é substituído por CVE-id em runtime, por CVE do topo.
+    vulnerabilities: "/vulnerabilities/{cve}"
+    # artigos recentes de threat intel (sinal de campanha ativa / dark-web chatter).
+    articles: "/articles?$top=25&$orderby=createdDateTime desc"
+    # perfis de atores (intel profiles) — contexto de adversário.
+    intel_profiles: "/intelProfiles?$top=25"
