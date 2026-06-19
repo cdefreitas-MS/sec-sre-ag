@@ -356,6 +356,29 @@ with cloud-identity coverage (AiTM `T1557`, stolen token `T1550.001`, illicit co
 
 Skills affected: `aitm-dashboard`, `forensic-user-investigation`, `incident-investigation`.
 
+### SharePoint archival — historical retention (no secrets in code)
+
+The `shared/sharepoint_upload.py` script archives a generated report (HTML + MD) to the
+**SOC** SharePoint site at generation time, one folder per skill plus a `YYYY/MM`
+hierarchy. It streams bytes from disk via Microsoft Graph (single PUT < 4 MB, chunked
+upload session ≥ 4 MB), so large self-contained reports (e.g. `advisor-impact` HTML ~3 MB
+with embedded base64) archive cleanly — unlike the SharePoint connector, whose `Create
+file` body caps out on big files. Best-effort: a failed archive never blocks email/Teams.
+
+```bash
+python shared/sharepoint_upload.py upload --site "<SOC-siteId>" --skill advisor-impact --file report.html
+python shared/sharepoint_upload.py upload --site "<SOC-siteId>" --skill advisor-impact --file report.html --dry-run
+```
+
+Auth (first available): `--token` · `--token-file` · env `GRAPH_TOKEN` · ManagedIdentity
+(UAMI). Least privilege: grant the UAMI Graph **`Sites.Selected`** with `write` on the SOC
+site only (not `Sites.ReadWrite.All`). Exit codes: `0` ok · `3` skipped (no `--site`,
+best-effort) · `1` error. Full procedure, folder taxonomy, and connector tool-policy
+(Allow/Ask) in [`shared/sharepoint-archival.md`](shared/sharepoint-archival.md).
+
+Skills affected: all report-producing skills (`advisor-impact`, `threat-pulse`,
+`aitm-dashboard`, `org-posture`, `sentinel-documenter`, …).
+
 ### 4. Data Connector Prerequisites
 
 The skills query tables that are populated by **Microsoft Sentinel data connectors**. Enable the relevant connectors in your Sentinel workspace:
