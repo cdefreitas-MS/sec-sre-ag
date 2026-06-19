@@ -1030,65 +1030,27 @@ def _stacked_bars(matrix, sevs):
     return f"<div class='bars'>{rows}</div>"
 
 def _render_devops_section(devops):
-    """Seção 🐙 DevOps Remediation estilo Power BI: donut de severidade + KPIs + barras por repo + findings."""
+    """Página 🐙 DevOps Remediation (dashboard interativo via JS: KPIs + pizzas + barras por
+    repositório + findings). O shell traz filtros (por repositório e criticidade) + placeholders;
+    o JS (renderDevops) calcula tudo sob filtro."""
     if not devops:
         return ""
-    sevs = devops["sev_order"]
-    # KPI cards (total + severidades) com cor por classe (tema-aware)
-    kcards = (f"<div class='kpi'><div class='n' style='color:#1fab89'>{devops['total']}</div>"
-              f"<div class='l'>🐙 findings</div></div>")
-    for s in sevs:
-        cls = _SEV_CLASS.get(s, "sv-informational")
-        kcards += (f"<div class='kpi'><div class='n {cls}'>{devops['by_severity'].get(s,0)}</div>"
-                   f"<div class='l'>{esc(s)}</div></div>")
-    # donut de severidade + legenda
-    donut = _svg_donut([(s, devops['by_severity'].get(s, 0), _SEV_COLOR.get(s, '#9fb0c8')) for s in sevs])
-    donut_legend = "<div class='legend'>" + "".join(
-        f"<span><i class='dot' style='background:{_SEV_COLOR.get(s,'#9fb0c8')}'></i>{esc(s)} · {devops['by_severity'].get(s,0)}</span>"
-        for s in sevs) + "</div>"
-    cats = " · ".join(f"{esc(k)}: <b>{v}</b>" for k, v in sorted(devops["by_category"].items(), key=lambda kv: kv[1], reverse=True))
-    # barras empilhadas por repositório (ordenado por Critical+High)
-    bars = _stacked_bars(devops["matrix"], sevs)
-    bars_legend = "<div class='legend'>" + "".join(
-        f"<span><i class='dot' style='background:{_SEV_COLOR.get(s,'#9fb0c8')}'></i>{esc(s)}</span>" for s in sevs) + "</div>"
-    # tabela de findings com referência clicável por finding (top por severidade)
-    det = ""
-    tf = devops.get("top_findings") or []
-    LIMIT = 25
-    for f in tf[:LIMIT]:
-        s = f.get("severity", "—")
-        cls = _SEV_CLASS.get(s, "sv-informational")
-        link = f.get("link", "") or ""
-        if link:
-            label = "GitHub ↗" if "github.com" in link else "Portal ↗"
-            link_html = f"<a href='{esc(link)}' target='_blank' style='color:var(--accent);white-space:nowrap'>{label}</a>"
-        else:
-            link_html = "<span class='meta'>—</span>"
-        det += (f"<tr><td class='{cls}' style='font-weight:700;white-space:nowrap'>{esc(s)}</td>"
-                f"<td class='mono'>🐙 {esc(f.get('repo','—'))}</td>"
-                f"<td>{esc(f.get('finding','—'))}</td>"
-                f"<td class='meta' style='white-space:nowrap'>{esc(f.get('category','—'))}</td>"
-                f"<td>{link_html}</td></tr>")
-    more = ""
-    if len(tf) > LIMIT:
-        more = f"<div class='meta' style='margin-top:6px'>… +{len(tf) - LIMIT} findings (priorize Critical→High; abra a referência p/ a lista completa).</div>"
-    det_table = (
-        "<h3 style='margin-top:16px'>🔧 Findings a corrigir <span class='meta'>· por severidade · clique na referência p/ a recomendação</span></h3>"
-        "<table><tr><th>Sev</th><th>Repositório</th><th>Finding</th><th>Categoria</th>"
-        f"<th>Referência</th></tr>{det}</table>{more}") if det else ""
+    filters = (
+        '<div class="filters"><div class="ftop">'
+        '<div class="meta">🔎 Filtros — selecione repositório e/ou criticidade; vazio = tudo. Tudo recalcula conforme a seleção.</div>'
+        '<button class="btn" onclick="clearDevops()">Limpar filtros</button></div>'
+        '<div class="frow" id="devopsfrow"></div></div>')
     return (
-        "<div class='phase'><h3>🐙 DevOps Remediation — findings do GitHub/Defender DevOps "
-        "<span class='meta'>· vulnerabilidades a corrigir (CVE/code/IaC/secret), não postura</span></h3>"
+        "<div class='phase'><h3>🐙 DevOps Remediation "
+        "<span class='meta'>· findings do GitHub/Defender DevOps — CVE/code/IaC/secret a corrigir (não postura)</span></h3>"
+        + filters +
         "<div class='card'>"
-        "<div class='dvgrid'>"
-        f"<div style='text-align:center'>{donut}{donut_legend}</div>"
-        f"<div><div class='kpis'>{kcards}</div>"
-        f"<div class='meta' style='margin-top:10px'>Por categoria: {cats}</div></div>"
-        "</div>"
-        "<h3 style='margin-top:16px'>📊 Por repositório <span class='meta'>· ordenado por Critical+High (maior risco no topo)</span></h3>"
-        f"{bars}{bars_legend}"
-        "<div class='meta' style='margin-top:8px'>dependency CVEs normalmente têm PR do Dependabot pronto p/ merge.</div>"
-        f"{det_table}"
+        "<div class='kpis' id='devopskpis'></div>"
+        "<div class='pgrid' id='devopspies' style='margin-top:14px'></div>"
+        "<h3 style='margin-top:16px'>📊 Por repositório <span class='meta'>· empilhado por criticidade · ordenado por Critical+High</span></h3>"
+        "<div id='devopsbars'></div>"
+        "<h3 style='margin-top:16px'>🔧 Findings a corrigir <span class='meta'>· por criticidade · clique na referência p/ a recomendação</span></h3>"
+        "<div id='devopstable'></div>"
         "</div></div>")
 
 # =============================================================================
@@ -1462,7 +1424,7 @@ def _render_m365_section(ctx):
         "<div class='kpis' id='m365kpis'></div>"
         "<div class='pgrid' id='m365pies' style='margin-top:14px'></div>"
         "<h3 style='margin-top:16px'>📦 Recomendações por produto</h3><div id='m365prod'></div>"
-        "<h3 style='margin-top:16px'>📊 Pontuação vs pontos a ganhar <span class='meta'>· top 12 por oportunidade</span></h3>"
+        "<h3 style='margin-top:16px'>🎯 Onde concentrar esforço <span class='meta'>· top 12 ações por pontos a recuperar (maior → menor)</span></h3>"
         "<div id='m365bars'></div>"
         "<h3 style='margin-top:16px'>🔧 Ações recomendadas <span class='meta'>· ordenadas por pontos a ganhar</span></h3>"
         "<div id='m365table'></div>"
@@ -1494,8 +1456,10 @@ def _exec_summary_html(ctx):
         ov.append(("Advisor", len(ctx["advisor"]), "#7cd0ff"))
     if len(ctx.get("mdc", [])):
         ov.append(("Defender for Cloud", len(ctx["mdc"]), "#c9a7ff"))
+    if m365 and m365.get("total"):
+        ov.append(("Microsoft Secure Score", m365["total"], "#ffd96b"))
     if xdr:
-        ov.append(("Defender XDR", xdr["total"], "#ffd96b"))
+        ov.append(("Defender XDR", xdr["total"], "#9aa7ff"))
     if devops:
         ov.append(("DevOps", devops["total"], "#7ee2a8"))
     pie_block = ""
@@ -1535,7 +1499,14 @@ def _exec_summary_html(ctx):
 _MDC_ORDER = {"critical": 4, "high": 3, "medium": 2, "low": 1, "informational": 0}
 
 def _exec_critical_tables(ctx):
-    """Tabelas de 'recomendações/controles mais críticos' por pilar (estilo Executive Summary do dashboard)."""
+    """Tabelas de 'recomendações/controles mais críticos' por pilar (estilo Executive Summary do dashboard).
+    Cada linha traz link de acesso rápido (Portal/Referência) à recomendação citada."""
+    def _lnk(url, label="Portal ↗"):
+        url = (url or "").strip()
+        if not url:
+            return "<span class='meta'>—</span>"
+        return (f"<a href='{esc(url)}' target='_blank' "
+                f"style='color:var(--accent);white-space:nowrap;text-decoration:none'>{esc(label)}</a>")
     blocks = []
     mdc = ctx.get("mdc", [])
     if mdc:
@@ -1543,15 +1514,27 @@ def _exec_critical_tables(ctx):
         rows = "".join(
             f"<tr><td class='{_SEV_CLASS.get(str(it.get('priority','—')).capitalize(),'sv-informational')}' "
             f"style='font-weight:700;white-space:nowrap'>{esc(str(it.get('priority','—')).capitalize())}</td>"
-            f"<td>{esc(it.get('title','—'))}</td></tr>" for it in top)
-        blocks.append(("🛡️ Defender for Cloud — críticas", "<table><tr><th>Sev</th><th>Recomendação</th></tr>" + rows + "</table>"))
+            f"<td>{esc(it.get('title','—'))}</td>"
+            f"<td style='text-align:right'>{_lnk(it.get('portal_link') or it.get('rec_link'))}</td></tr>" for it in top)
+        blocks.append(("🛡️ Defender for Cloud — críticas", "<table><tr><th>Sev</th><th>Recomendação</th><th>&nbsp;</th></tr>" + rows + "</table>"))
+    m365 = ctx.get("m365")
+    if m365 and m365.get("top"):
+        m_top = sorted([x for x in m365["top"] if x.get("missing", 0) > 0],
+                       key=lambda x: x.get("missing", 0), reverse=True)[:6]
+        rows = "".join(
+            f"<tr><td>{esc(r['name'])}</td><td class='meta' style='white-space:nowrap'>{esc(r.get('category','—'))}</td>"
+            f"<td style='text-align:right;color:#9ae6b4;font-weight:700;white-space:nowrap'>+{round(r.get('missing',0))}</td>"
+            f"<td style='text-align:right'>{_lnk(r.get('link'))}</td></tr>" for r in m_top)
+        if rows:
+            blocks.append(("🏆 Microsoft Secure Score — maior ganho", "<table><tr><th>Ação recomendada</th><th>Categoria</th><th>Pts</th><th>&nbsp;</th></tr>" + rows + "</table>"))
     mcsb = ctx.get("mcsb")
     if mcsb and mcsb.get("failing_controls"):
         fc = mcsb["failing_controls"][:6]
         rows = "".join(
             f"<tr><td class='mono'>{esc(x.get('id',''))}</td><td>{esc(x.get('name',''))}</td>"
-            f"<td style='color:#ff6b6b;font-weight:700;text-align:right'>{x.get('failed',0)}</td></tr>" for x in fc)
-        blocks.append(("📋 MCSB — controles mais falhando", "<table><tr><th>Controle</th><th>Nome</th><th>Falhas</th></tr>" + rows + "</table>"))
+            f"<td style='color:#ff6b6b;font-weight:700;text-align:right'>{x.get('failed',0)}</td>"
+            f"<td style='text-align:right'>{_lnk(x.get('link'), 'Portal ↗') if x.get('link') else '<span class=meta>—</span>'}</td></tr>" for x in fc)
+        blocks.append(("📋 MCSB — controles mais falhando", "<table><tr><th>Controle</th><th>Nome</th><th>Falhas</th><th>&nbsp;</th></tr>" + rows + "</table>"))
     xdr = ctx.get("xdr")
     if xdr and xdr.get("top"):
         if xdr.get("mode") == "actions":
@@ -1568,12 +1551,14 @@ def _exec_critical_tables(ctx):
     if devops and devops.get("top_findings"):
         rows = "".join(
             f"<tr><td class='{_SEV_CLASS.get(f.get('severity','—'),'sv-informational')}' style='font-weight:700;white-space:nowrap'>{esc(f.get('severity','—'))}</td>"
-            f"<td>{esc(f.get('finding','—'))}</td></tr>" for f in devops["top_findings"][:6])
-        blocks.append(("🐙 DevOps — findings críticos", "<table><tr><th>Sev</th><th>Finding</th></tr>" + rows + "</table>"))
+            f"<td>{esc(f.get('finding','—'))}</td>"
+            f"<td style='text-align:right'>{_lnk(f.get('link'), 'GitHub ↗' if 'github.com' in (f.get('link') or '') else 'Portal ↗')}</td></tr>" for f in devops["top_findings"][:6])
+        blocks.append(("🐙 DevOps — findings críticos", "<table><tr><th>Sev</th><th>Finding</th><th>&nbsp;</th></tr>" + rows + "</table>"))
     if not blocks:
         return ""
     cards = "".join(f"<div class='card'><h3 style='margin-top:0;font-size:13px'>{t}</h3>{tbl}</div>" for t, tbl in blocks)
-    return ("<h3 style='margin-top:18px'>Recomendações / controles mais críticos</h3>"
+    return ("<h3 style='margin-top:18px'>Recomendações / controles mais críticos "
+            "<span class='meta'>· clique em Portal ↗ para abrir a recomendação</span></h3>"
             "<div class='critgrid'>" + cards + "</div>")
 
 def _render_mdc_section(ctx):
@@ -1592,7 +1577,7 @@ def _render_mdc_section(ctx):
         "<div class='card'>"
         "<div class='kpis' id='mdckpis'></div>"
         "<div class='pgrid' id='mdcpies' style='margin-top:14px'></div>"
-        "<h3 style='margin-top:16px'>🔧 Recomendações <span class='meta'>· por severidade</span></h3>"
+        "<h3 style='margin-top:16px'>🔧 Recomendações <span class='meta'>· ordenadas por potencial de elevação do Secure Score (maior → menor)</span></h3>"
         "<div id='mdctable'></div>"
         "</div></div>")
 
@@ -1647,6 +1632,8 @@ _REPORT_CSS = """
   table{width:100%;border-collapse:collapse;font-size:13px;background:var(--card);border:1px solid var(--border);border-radius:10px;overflow:hidden}
   th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--border);vertical-align:top}
   th{background:var(--th);font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
+  .plan-table{table-layout:fixed}
+  .plan-table td{overflow-wrap:anywhere;word-break:break-word}
   .mono{font-family:ui-monospace,Consolas,monospace;font-size:12px}
   .casc{color:#e0a800;font-size:12px;margin-top:4px}
   .amp{color:#ff9f6b;font-size:12px;margin-top:3px}
@@ -1747,7 +1734,7 @@ function selectedSubs(){const s=sel("sub");if(s.size)return s;return new Set(Obj
 function aggSecure(subs){let cur=0,max=0,pot=0,has=false;subs.forEach(sid=>{const s=DATA.subs[sid];if(s&&s.ss_max_points){has=true;cur+=s.ss_current_points;max+=s.ss_max_points;pot+=s.ss_potential_points;}});if(!has||max<=0)return null;return {cur:Math.round(1000*cur/max)/10,pot:Math.round(1000*pot/max)/10};}
 function aggMcsb(subs){let p=0,f=0,sk=0,un=0,has=false;subs.forEach(sid=>{const s=DATA.subs[sid];if(s&&s.mcsb){has=true;p+=s.mcsb.passed;f+=s.mcsb.failed;sk+=s.mcsb.skipped;un+=s.mcsb.unsupported;}});if(!has)return null;const a=p+f;return {passed:p,failed:f,skipped:sk,unsupported:un,pct:a>0?Math.round(1000*p/a)/10:null};}
 function rowHtml(it){let cs=it.cost_delta?`<span style="color:#5ed16a">${esc(it.cost_delta)}</span>`:"";let ci=it.cost_increase?`<span style="color:#ff6b6b">${esc(it.cost_increase)}</span>`:"";let cost=(cs&&ci)?cs+"<br/>"+ci:(cs||ci||"—");let ss=it.score_impact_label?`<span style="color:#9ae6b4;font-weight:700">${esc(it.score_impact_label)}</span><div class="meta" style="font-size:11px">${esc(it.score_control)}</div>`:"—";let title=esc(it.title);if(it.portal_link){title=`<a href="${esc(it.portal_link)}" style="color:#e7edf5;text-decoration:none;border-bottom:1px dotted #4a5a72">${title}</a> <a href="${esc(it.portal_link)}" title="Abrir no portal" style="color:#7cd0ff;text-decoration:none">🔗</a>`;}const tags=(it.tactics||[]).concat(it.techniques||[]);let mitre=tags.length?`<div class="mtags">🎯 ${tags.slice(0,4).map(m=>`<span class="mitre">${esc(m)}</span>`).join("")}</div>`:"";let owner=it.owner?`<div class="owner">👤 ${esc(it.owner)}</div>`:"";let casc=it.cascade?`<div class="casc">↳ ${esc(it.cascade)}</div>`:"";let dvo=it.devops_repo?`<div class="devops">🐙 ${esc(it.devops_provider||"DevOps")} · ${esc(it.devops_repo)}</div>`:"";let src=`<span style="color:${it.source==="Advisor"?"#7cd0ff":"#c9a7ff"};font-weight:700">${esc(it.source)}</span>`;let subn=it.subscription_name&&it.subscription_name!=="—"?`<div class="meta" style="font-size:11px">${esc(it.subscription_name)} / ${esc(it.resource_group)}</div>`:"";return `<tr><td>${src}</td><td>${title}${dvo}${mitre}${owner}${casc}</td><td>${esc(it.category)}</td><td>${esc(it.priority)}</td><td>${ss}</td><td class="mono">${esc(it.resource_name)}${subn}</td><td>${cost}</td></tr>`;}
-function renderPlan(items){const by={safe:[],low:[],medium:[],high:[]};items.forEach(it=>{(by[it.risk]||by.low).push(it);});let html="";PHASES.forEach(lvl=>{const rows=by[lvl];if(!rows.length)return;const m=PHMETA[lvl]||{};html+=`<div class="phase"><h3>${esc(m.emoji||"")} ${esc(m.label||lvl)} <span class="meta">· ${esc(m.action||"")} · ${rows.length} item(ns)</span></h3><table><tr><th>Fonte</th><th>Recomendação</th><th>Categoria</th><th>Prioridade</th><th>Impacto SS</th><th>Recurso</th><th>Custo</th></tr>${rows.map(rowHtml).join("")}</table></div>`;});document.getElementById("plan").innerHTML=html||`<div class="card meta">Nenhuma recomendação para os filtros selecionados.</div>`;}
+function renderPlan(items){const by={safe:[],low:[],medium:[],high:[]};items.forEach(it=>{(by[it.risk]||by.low).push(it);});let html="";const cg='<colgroup><col style="width:8%"><col style="width:33%"><col style="width:11%"><col style="width:9%"><col style="width:12%"><col style="width:17%"><col style="width:10%"></colgroup>';PHASES.forEach(lvl=>{const rows=by[lvl];if(!rows.length)return;const m=PHMETA[lvl]||{};html+=`<div class="phase"><h3>${esc(m.emoji||"")} ${esc(m.label||lvl)} <span class="meta">· ${esc(m.action||"")} · ${rows.length} item(ns)</span></h3><table class="plan-table">${cg}<tr><th>Fonte</th><th>Recomendação</th><th>Categoria</th><th>Prioridade</th><th>Impacto SS</th><th>Recurso</th><th>Custo</th></tr>${rows.map(rowHtml).join("")}</table></div>`;});document.getElementById("plan").innerHTML=html||`<div class="card meta">Nenhuma recomendação para os filtros selecionados.</div>`;}
 function renderKpis(items,subs){const c={safe:0,low:0,medium:0,high:0};let sav=0,impl=0,devops=0;items.forEach(it=>{c[it.risk]=(c[it.risk]||0)+1;sav+=it.savings_raw||0;impl+=it.cost_increase_raw||0;if(it.devops_repo)devops++;});const ssA=aggSecure(subs);const mc=aggMcsb(subs);const k=document.getElementById("kpis");let cards=[["#7cd0ff",items.length,"recomendações"],["#5ed16a",c.safe,"🟢 quick wins"],["#ffd96b",c.low+c.medium,"🟡🟠 janela"],["#ff6b6b",c.high,"🔴 aprovação"],["#9fb0c8",ssA?ssA.cur+"%":"n/a","🛡️ SS atual"],["#9ae6b4",ssA?ssA.pot+"%":"n/a","🎯 SS potencial"],["#ff6b6b",impl?"+"+fmtUSD(impl,"/mês"):"—","💰 custo impl."]];if(mc&&mc.pct!=null){const cc=mc.pct>=80?"#5ed16a":(mc.pct>=50?"#ffd96b":"#ff6b6b");cards.push([cc,mc.pct+"%","🛡️ MCSB compliance"]);}if(devops)cards.push(["#7ee2a8",devops,"🐙 DevOps findings"]);k.innerHTML=cards.map(([col,n,l])=>`<div class="kpi"><div class="n" style="color:${col};font-size:${String(n).length>7?"14px":"20px"}">${esc(n)}</div><div class="l">${esc(l)}</div></div>`).join("");document.getElementById("subline").innerHTML=`economia potencial: <b style="color:#5ed16a">${sav?"−"+fmtUSD(sav,"/ano"):"—"}</b> · custo de implementação: <b style="color:#ff6b6b">${impl?"+"+fmtUSD(impl,"/mês"):"—"}</b> · 100% read-only`;const bar=document.getElementById("ssbar");if(ssA){bar.style.display="block";bar.innerHTML=`<div class="meta" style="margin-bottom:4px">🛡️ Secure Score: <b style="color:#9fb0c8">${ssA.cur}%</b> agora → <b style="color:#9ae6b4">${ssA.pot}%</b> se remediar tudo (<b style="color:#9ae6b4">+${Math.round(10*(ssA.pot-ssA.cur))/10} pp</b>)</div><div style="background:var(--inset);border:1px solid var(--border);border-radius:8px;height:14px;overflow:hidden;position:relative"><div style="position:absolute;left:0;top:0;height:100%;width:${ssA.pot}%;background:linear-gradient(90deg,#2d6a4f,#52b788);opacity:.45"></div><div style="position:absolute;left:0;top:0;height:100%;width:${ssA.cur}%;background:linear-gradient(90deg,#7cd0ff,#5ed16a)"></div></div>`;}else{bar.style.display="none";}}
 const MDC_SEV_COLOR={"Critical":"#ff4d4d","High":"#ff6b6b","Medium":"#ffd96b","Low":"#7cd0ff","Informational":"#9fb0c8","Unknown":"#9fb0c8"};
 const MDCDIMS=[["severity","Severidade"],["category","Categoria"],["sub","Subscription"],["rg","Resource Group"]];
@@ -1759,7 +1746,7 @@ function mdcSelDim(dim){return new Set([...document.querySelectorAll('input[data
 function mdcUpdateBtn(dim){var btn=document.querySelector('#mdcfrow .slicer-btn[data-dim="'+dim+'"]');if(!btn)return;var s=mdcSelDim(dim);btn.querySelector(".valtxt").textContent=!s.size?"Todos":(s.size===1?mdcLabel(dim,[...s][0]):s.size+" selecionados");btn.classList.toggle("on",s.size>0);}
 function clearMdc(){document.querySelectorAll("#mdcfrow input[type=checkbox]").forEach(c=>c.checked=false);MDCDIMS.forEach(d=>mdcUpdateBtn(d[0]));applyMdc();}
 function applyMdc(){if(!DATA.mdc)return;var recs=DATA.mdc.recs;MDCDIMS.forEach(([dim])=>{var s=mdcSelDim(dim);if(s.size)recs=recs.filter(it=>s.has(mdcRaw(it,dim)));});renderMdc(recs);}
-function renderMdc(recs){var SEVO=["Critical","High","Medium","Low","Informational","Unknown"];var sev={};recs.forEach(x=>{sev[x.severity]=(sev[x.severity]||0)+1;});var hi=(sev["Critical"]||0)+(sev["High"]||0);var kp=[["#1fab89",recs.length,"recomendações"],["#ff6b6b",hi,"🔴 Critical+High"]];SEVO.forEach(s=>{if(sev[s])kp.push([MDC_SEV_COLOR[s],sev[s],s]);});if(DATA.mdc.ss!=null){kp.push(["#9fb0c8",DATA.mdc.ss+"%","🛡️ Secure Score"]);if(DATA.mdc.ss_pot!=null)kp.push(["#9ae6b4",DATA.mdc.ss_pot+"%","🎯 potencial"]);}document.getElementById("mdckpis").innerHTML=kp.map(a=>'<div class="kpi"><div class="n" style="color:'+a[0]+'">'+esc(a[1])+'</div><div class="l">'+esc(a[2])+'</div></div>').join("");var sevSegs=SEVO.filter(s=>sev[s]).map(s=>[s,sev[s],MDC_SEV_COLOR[s]]);var cat={};recs.forEach(x=>{var c=x.category||"—";cat[c]=(cat[c]||0)+1;});var pal=["#7cd0ff","#7ee2a8","#c9a7ff","#ffd96b","#ff9f6b","#9fb0c8"];var catSegs=Object.keys(cat).filter(c=>c!=="—").sort((a,b)=>cat[b]-cat[a]).slice(0,6).map((c,i)=>[c,cat[c],pal[i]||"#9fb0c8"]);var pies=m365PieCard("Severidade",sevSegs);if(catSegs.length>1)pies+=m365PieCard("Categoria",catSegs);document.getElementById("mdcpies").innerHTML=pies;var ord={Critical:5,High:4,Medium:3,Low:2,Informational:1,Unknown:0};var top=recs.slice().sort((a,b)=>(ord[b.severity]||0)-(ord[a.severity]||0)).slice(0,30);document.getElementById("mdctable").innerHTML='<table><tr><th>Sev</th><th>Recomendação</th><th>Recurso</th><th>Referência</th></tr>'+top.map(x=>{var rf=x.link?'<a href="'+esc(x.link)+'" target="_blank" style="color:var(--accent);white-space:nowrap">Portal ↗</a>':'<span class="meta">—</span>';return '<tr><td style="font-weight:700;white-space:nowrap;color:'+(MDC_SEV_COLOR[x.severity]||"#9fb0c8")+'">'+esc(x.severity)+'</td><td>'+esc(x.title)+'</td><td class="mono">'+esc(x.resource)+'</td><td>'+rf+'</td></tr>';}).join("")+'</table>';}
+function renderMdc(recs){var SEVO=["Critical","High","Medium","Low","Informational","Unknown"];var sev={};recs.forEach(x=>{sev[x.severity]=(sev[x.severity]||0)+1;});var hi=(sev["Critical"]||0)+(sev["High"]||0);var kp=[["#1fab89",recs.length,"recomendações"],["#ff6b6b",hi,"🔴 Critical+High"]];SEVO.forEach(s=>{if(sev[s])kp.push([MDC_SEV_COLOR[s],sev[s],s]);});if(DATA.mdc.ss!=null){kp.push(["#9fb0c8",DATA.mdc.ss+"%","🛡️ Secure Score"]);if(DATA.mdc.ss_pot!=null)kp.push(["#9ae6b4",DATA.mdc.ss_pot+"%","🎯 potencial"]);}document.getElementById("mdckpis").innerHTML=kp.map(a=>'<div class="kpi"><div class="n" style="color:'+a[0]+'">'+esc(a[1])+'</div><div class="l">'+esc(a[2])+'</div></div>').join("");var sevSegs=SEVO.filter(s=>sev[s]).map(s=>[s,sev[s],MDC_SEV_COLOR[s]]);var cat={};recs.forEach(x=>{var c=x.category||"—";cat[c]=(cat[c]||0)+1;});var pal=["#7cd0ff","#7ee2a8","#c9a7ff","#ffd96b","#ff9f6b","#9fb0c8"];var catSegs=Object.keys(cat).filter(c=>c!=="—").sort((a,b)=>cat[b]-cat[a]).slice(0,6).map((c,i)=>[c,cat[c],pal[i]||"#9fb0c8"]);var pies=m365PieCard("Severidade",sevSegs);if(catSegs.length>1)pies+=m365PieCard("Categoria",catSegs);document.getElementById("mdcpies").innerHTML=pies;var ord={Critical:5,High:4,Medium:3,Low:2,Informational:1,Unknown:0};var top=recs.slice().sort((a,b)=>{var ai=(a.ss_impact!=null?a.ss_impact:-1),bi=(b.ss_impact!=null?b.ss_impact:-1);if(bi!==ai)return bi-ai;return (ord[b.severity]||0)-(ord[a.severity]||0);}).slice(0,30);document.getElementById("mdctable").innerHTML='<table><tr><th>Sev</th><th>Recomendação</th><th>Impacto SS</th><th>Recurso</th><th>Referência</th></tr>'+top.map(x=>{var rf=x.link?'<a href="'+esc(x.link)+'" target="_blank" style="color:var(--accent);white-space:nowrap">Portal ↗</a>':'<span class="meta">—</span>';var ss=x.ss_label?'<span style="color:#9ae6b4;font-weight:700;white-space:nowrap">'+esc(x.ss_label)+'</span>'+(x.ss_control?'<div class="meta" style="font-size:11px">'+esc(x.ss_control)+'</div>':''):'<span class="meta">—</span>';return '<tr><td style="font-weight:700;white-space:nowrap;color:'+(MDC_SEV_COLOR[x.severity]||"#9fb0c8")+'">'+esc(x.severity)+'</td><td>'+esc(x.title)+'</td><td>'+ss+'</td><td class="mono">'+esc(x.resource)+'</td><td>'+rf+'</td></tr>';}).join("")+'</table>';}
 function mcsbSubsAll(){return Object.keys(DATA.subs||{}).filter(s=>DATA.subs[s]&&DATA.subs[s].mcsb);}
 function buildMcsbFilters(){var root=document.getElementById("mcsbfrow");if(!root)return;root.className="slicers";var subs=mcsbSubsAll();if(subs.length<2)return;var wrap=document.createElement("div");wrap.className="slicer";var opts=subs.map(s=>'<label><input type="checkbox" data-mcsbdim="sub" value="'+esc(s)+'">'+esc(DATA.subs[s].name||s.slice(0,8))+'</label>').join("");wrap.innerHTML='<button type="button" class="slicer-btn" data-dim="sub"><span class="cap">Subscription</span><span class="valtxt">Todos</span><span class="car">▾</span></button><div class="slicer-pop"><button type="button" class="slicer-clear" data-dim="sub">Limpar</button>'+opts+'</div>';root.appendChild(wrap);root.querySelectorAll(".slicer-btn").forEach(b=>b.addEventListener("click",function(e){e.stopPropagation();var pop=this.nextElementSibling;var op=pop.classList.contains("open");closeAllSlicers();if(!op)pop.classList.add("open");}));root.querySelectorAll(".slicer-pop").forEach(p=>p.addEventListener("click",e=>e.stopPropagation()));root.querySelectorAll('.slicer-pop input[data-mcsbdim]').forEach(cb=>cb.addEventListener("change",function(){mcsbUpdateBtn();applyMcsb();}));root.querySelectorAll(".slicer-clear").forEach(b=>b.addEventListener("click",function(){this.parentNode.querySelectorAll('input[data-mcsbdim]').forEach(x=>x.checked=false);mcsbUpdateBtn();applyMcsb();}));document.addEventListener("click",closeAllSlicers);}
 function mcsbSel(){return new Set([...document.querySelectorAll('input[data-mcsbdim="sub"]:checked')].map(c=>c.value));}
@@ -1788,12 +1775,23 @@ function m365UpdateBtn(dim){var btn=document.querySelector('#m365frow .slicer-bt
 function m365SelDim(dim){return new Set([...document.querySelectorAll('input[data-m365dim="'+dim+'"]:checked')].map(c=>c.value));}
 function clearM365(){document.querySelectorAll("#m365frow input[type=checkbox]").forEach(c=>c.checked=false);M365DIMS.forEach(d=>m365UpdateBtn(d[0]));applyM365();}
 function applyM365(){if(!DATA.m365)return;var recs=DATA.m365.recs;M365DIMS.forEach(([dim])=>{var s=m365SelDim(dim);if(s.size)recs=recs.filter(it=>s.has(m365Val(it,dim)));});renderM365(recs);}
-function renderM365(recs){var d=DATA.m365;var done=recs.filter(x=>x.status==="Concluído").length;var miss=recs.reduce((a,x)=>a+x.missing,0);var nol=recs.filter(x=>!x.licensed).length;var kp=[["#9fb0c8",d.pct+"%","🏆 Secure Score"],["#7cd0ff",recs.length,"recomendações"],["#5ed16a",done,"✅ concluídas"],["#ffb020",recs.length-done,"🟠 a endereçar"],["#9ae6b4","+"+Math.round(miss),"🎯 pontos a ganhar"]];if(nol)kp.push(["#ff6b6b",nol,"⚠️ sem licença"]);document.getElementById("m365kpis").innerHTML=kp.map(a=>'<div class="kpi"><div class="n" style="color:'+a[0]+'">'+esc(a[1])+'</div><div class="l">'+esc(a[2])+'</div></div>').join("");var tal=function(fn){var m={};recs.forEach(x=>{var k=fn(x);m[k]=(m[k]||0)+1;});return m;};var st=tal(x=>x.status),ct=tal(x=>x.category),bk=tal(x=>x.bucket);var sS=Object.keys(st).sort((a,b)=>st[b]-st[a]).map(s=>[s,st[s],M365_STATUS_COLOR[s]||"#9fb0c8"]);var cS=Object.keys(ct).sort((a,b)=>ct[b]-ct[a]).map(c=>[c,ct[c],M365_CAT_COLOR[c]||"#9fb0c8"]);var bS=["Alcançado","Parcial","Oportunidade"].filter(b=>bk[b]).map(b=>[b,bk[b],M365_BUCKET_COLOR[b]]);var pies=m365PieCard("Status",sS)+m365PieCard("Categoria",cS)+m365PieCard("Pontuação",bS);if(recs.some(x=>!x.licensed))pies+=m365PieCard("Licença",[["Licenciado",recs.length-nol,"#5ed16a"],["Sem licença",nol,"#ff6b6b"]]);document.getElementById("m365pies").innerHTML=pies;var pr={};recs.forEach(x=>{var p=pr[x.product]||(pr[x.product]={c:0,t:0,cur:0,mx:0});if(x.status==="Concluído")p.c++;else p.t++;p.cur+=x.score;p.mx+=x.max;});var prows=Object.keys(pr).map(k=>({p:k,c:pr[k].c,t:pr[k].t,pct:pr[k].mx?Math.round(100*pr[k].cur/pr[k].mx):0})).sort((a,b)=>b.t-a.t||b.pct-a.pct).slice(0,15);document.getElementById("m365prod").innerHTML='<table><tr><th>Produto</th><th style="text-align:right">Concluídas</th><th style="text-align:right">A endereçar</th><th style="text-align:right">% atingido</th><th>&nbsp;</th></tr>'+prows.map(p=>'<tr><td>'+esc(p.p)+'</td><td style="text-align:right;color:#5ed16a;font-weight:700">'+p.c+'</td><td style="text-align:right;color:#ffb020;font-weight:700">'+p.t+'</td><td style="text-align:right">'+p.pct+'%</td><td><div class="bartrack" style="height:10px"><span class="seg" style="width:'+p.pct+'%;background:#52b788"></span></div></td></tr>').join("")+'</table>';var srt=recs.slice().sort((a,b)=>b.missing-a.missing||b.max-a.max);var tb=srt.filter(x=>x.max>0).slice(0,12);var mv=Math.max.apply(null,[1].concat(tb.map(x=>x.max)));document.getElementById("m365bars").innerHTML='<div class="bars">'+tb.map(x=>{var sw=100*x.score/mv,mw=100*x.missing/mv;return '<div class="barrow"><div class="barlbl" title="'+esc(x.name)+'">'+esc(x.name)+'</div><div class="bartrack"><span class="seg" style="width:'+sw.toFixed(1)+'%;background:#52b788"></span><span class="seg" style="width:'+mw.toFixed(1)+'%;background:var(--inset);border-left:1px solid var(--border)"></span></div><div class="barval">'+(+x.score)+'/'+(+x.max)+'</div></div>';}).join("")+'</div>';document.getElementById("m365table").innerHTML='<table><tr><th>Ação recomendada</th><th>Categoria</th><th>Produto</th><th>Status</th><th style="text-align:right">Pontuação</th><th style="text-align:right">Máx</th><th style="text-align:right">A ganhar</th><th>Referência</th></tr>'+srt.slice(0,30).map(x=>{var sc=M365_STATUS_COLOR[x.status]||"#9fb0c8";var rf=x.link?'<a href="'+esc(x.link)+'" target="_blank" style="color:var(--accent);white-space:nowrap">Portal ↗</a>':'<span class="meta">—</span>';return '<tr><td>'+esc(x.name)+'</td><td class="meta" style="white-space:nowrap">'+esc(x.category)+'</td><td class="meta" style="white-space:nowrap">'+esc(x.product)+'</td><td style="white-space:nowrap;color:'+sc+';font-weight:700">'+esc(x.status)+'</td><td style="text-align:right">'+(+x.score)+'</td><td style="text-align:right" class="meta">'+(+x.max)+'</td><td style="text-align:right;color:#9ae6b4;font-weight:700">+'+(+x.missing)+'</td><td>'+rf+'</td></tr>';}).join("")+'</table>';}
+function renderM365(recs){var d=DATA.m365;var done=recs.filter(x=>x.status==="Concluído").length;var miss=recs.reduce((a,x)=>a+x.missing,0);var nol=recs.filter(x=>!x.licensed).length;var kp=[["#9fb0c8",d.pct+"%","🏆 Secure Score"],["#7cd0ff",recs.length,"recomendações"],["#5ed16a",done,"✅ concluídas"],["#ffb020",recs.length-done,"🟠 a endereçar"],["#9ae6b4","+"+Math.round(miss),"🎯 pontos a ganhar"]];if(nol)kp.push(["#ff6b6b",nol,"⚠️ sem licença"]);document.getElementById("m365kpis").innerHTML=kp.map(a=>'<div class="kpi"><div class="n" style="color:'+a[0]+'">'+esc(a[1])+'</div><div class="l">'+esc(a[2])+'</div></div>').join("");var tal=function(fn){var m={};recs.forEach(x=>{var k=fn(x);m[k]=(m[k]||0)+1;});return m;};var st=tal(x=>x.status),ct=tal(x=>x.category),bk=tal(x=>x.bucket);var sS=Object.keys(st).sort((a,b)=>st[b]-st[a]).map(s=>[s,st[s],M365_STATUS_COLOR[s]||"#9fb0c8"]);var cS=Object.keys(ct).sort((a,b)=>ct[b]-ct[a]).map(c=>[c,ct[c],M365_CAT_COLOR[c]||"#9fb0c8"]);var bS=["Alcançado","Parcial","Oportunidade"].filter(b=>bk[b]).map(b=>[b,bk[b],M365_BUCKET_COLOR[b]]);var pies=m365PieCard("Status",sS)+m365PieCard("Categoria",cS)+m365PieCard("Pontuação",bS);if(recs.some(x=>!x.licensed))pies+=m365PieCard("Licença",[["Licenciado",recs.length-nol,"#5ed16a"],["Sem licença",nol,"#ff6b6b"]]);document.getElementById("m365pies").innerHTML=pies;var pr={};recs.forEach(x=>{var p=pr[x.product]||(pr[x.product]={c:0,t:0,cur:0,mx:0});if(x.status==="Concluído")p.c++;else p.t++;p.cur+=x.score;p.mx+=x.max;});var prows=Object.keys(pr).map(k=>({p:k,c:pr[k].c,t:pr[k].t,g:Math.round((pr[k].mx-pr[k].cur)*10)/10,pct:pr[k].mx?Math.round(100*pr[k].cur/pr[k].mx):0})).sort((a,b)=>b.g-a.g||b.t-a.t).slice(0,15);document.getElementById("m365prod").innerHTML='<table><tr><th>Produto</th><th style="text-align:right">Concluídas</th><th style="text-align:right">A endereçar</th><th style="text-align:right">A ganhar</th><th style="text-align:right">% atingido</th><th>&nbsp;</th></tr>'+prows.map(p=>'<tr><td>'+esc(p.p)+'</td><td style="text-align:right;color:#5ed16a;font-weight:700">'+p.c+'</td><td style="text-align:right;color:#ffb020;font-weight:700">'+p.t+'</td><td style="text-align:right;color:#9ae6b4;font-weight:700">+'+p.g+'</td><td style="text-align:right">'+p.pct+'%</td><td><div class="bartrack" style="height:10px"><span class="seg" style="width:'+p.pct+'%;background:#52b788"></span></div></td></tr>').join("")+'</table>';var srt=recs.slice().filter(x=>x.missing>0).sort((a,b)=>b.missing-a.missing);var tb=srt.slice(0,12);var mv=Math.max.apply(null,[1].concat(tb.map(x=>x.missing)));document.getElementById("m365bars").innerHTML=tb.length?('<div class="bars">'+tb.map(x=>{var w=100*x.missing/mv;return '<div class="barrow"><div class="barlbl" title="'+esc(x.name)+'">'+esc(x.name)+'</div><div class="bartrack"><span class="seg" style="width:'+w.toFixed(1)+'%;background:linear-gradient(90deg,#f59f00,#ffd96b)"></span></div><div class="barval" style="color:#9ae6b4;font-weight:700;white-space:nowrap">+'+(Math.round(x.missing*10)/10)+' pts</div></div>';}).join("")+'</div>'):'<div class="meta" style="padding:8px 0">Todas as ações pontuáveis já estão concluídas. 🎉</div>';document.getElementById("m365table").innerHTML='<table><tr><th>Ação recomendada</th><th>Categoria</th><th>Produto</th><th>Status</th><th style="text-align:right">Pontuação</th><th style="text-align:right">Máx</th><th style="text-align:right">A ganhar</th><th>Referência</th></tr>'+srt.slice(0,30).map(x=>{var sc=M365_STATUS_COLOR[x.status]||"#9fb0c8";var rf=x.link?'<a href="'+esc(x.link)+'" target="_blank" style="color:var(--accent);white-space:nowrap">Portal ↗</a>':'<span class="meta">—</span>';return '<tr><td>'+esc(x.name)+'</td><td class="meta" style="white-space:nowrap">'+esc(x.category)+'</td><td class="meta" style="white-space:nowrap">'+esc(x.product)+'</td><td style="white-space:nowrap;color:'+sc+';font-weight:700">'+esc(x.status)+'</td><td style="text-align:right">'+(+x.score)+'</td><td style="text-align:right" class="meta">'+(+x.max)+'</td><td style="text-align:right;color:#9ae6b4;font-weight:700">+'+(+x.missing)+'</td><td>'+rf+'</td></tr>';}).join("")+'</table>';}
+const DEVOPSDIMS=[["repo","Repositório"],["severity","Criticidade"],["category","Categoria"]];
+const DEVOPS_SEVO=["Critical","High","Medium","Low","Informational","Unknown"];
+function devopsRaw(it,dim){return it[dim]||"—";}
+function devopsUniq(dim){var set=new Set();DATA.devops.findings.forEach(it=>{var v=devopsRaw(it,dim);if(v&&v!=="—")set.add(v);});var a=[...set];if(dim==="severity")a.sort((x,y)=>DEVOPS_SEVO.indexOf(x)-DEVOPS_SEVO.indexOf(y));else a.sort((x,y)=>String(x).localeCompare(String(y)));return a;}
+function buildDevopsFilters(){var root=document.getElementById("devopsfrow");if(!root)return;root.className="slicers";DEVOPSDIMS.forEach(([dim,name])=>{var vals=devopsUniq(dim);if(vals.length<2)return;var wrap=document.createElement("div");wrap.className="slicer";var opts=vals.map(v=>'<label><input type="checkbox" data-devopsdim="'+dim+'" value="'+esc(v)+'">'+esc(v)+'</label>').join("");wrap.innerHTML='<button type="button" class="slicer-btn" data-dim="'+dim+'"><span class="cap">'+esc(name)+'</span><span class="valtxt">Todos</span><span class="car">▾</span></button><div class="slicer-pop"><button type="button" class="slicer-clear" data-dim="'+dim+'">Limpar</button>'+opts+'</div>';root.appendChild(wrap);});root.querySelectorAll(".slicer-btn").forEach(b=>b.addEventListener("click",function(e){e.stopPropagation();var pop=this.nextElementSibling;var op=pop.classList.contains("open");closeAllSlicers();if(!op)pop.classList.add("open");}));root.querySelectorAll(".slicer-pop").forEach(p=>p.addEventListener("click",e=>e.stopPropagation()));root.querySelectorAll('.slicer-pop input[data-devopsdim]').forEach(cb=>cb.addEventListener("change",function(){devopsUpdateBtn(this.getAttribute("data-devopsdim"));applyDevops();}));root.querySelectorAll(".slicer-clear").forEach(b=>b.addEventListener("click",function(){var dim=this.getAttribute("data-dim");this.parentNode.querySelectorAll('input[data-devopsdim="'+dim+'"]').forEach(x=>x.checked=false);devopsUpdateBtn(dim);applyDevops();}));document.addEventListener("click",closeAllSlicers);}
+function devopsSelDim(dim){return new Set([...document.querySelectorAll('input[data-devopsdim="'+dim+'"]:checked')].map(c=>c.value));}
+function devopsUpdateBtn(dim){var btn=document.querySelector('#devopsfrow .slicer-btn[data-dim="'+dim+'"]');if(!btn)return;var s=devopsSelDim(dim);btn.querySelector(".valtxt").textContent=!s.size?"Todos":(s.size===1?[...s][0]:s.size+" selecionados");btn.classList.toggle("on",s.size>0);}
+function clearDevops(){document.querySelectorAll("#devopsfrow input[type=checkbox]").forEach(c=>c.checked=false);DEVOPSDIMS.forEach(d=>devopsUpdateBtn(d[0]));applyDevops();}
+function applyDevops(){if(!DATA.devops)return;var f=DATA.devops.findings;DEVOPSDIMS.forEach(([dim])=>{var s=devopsSelDim(dim);if(s.size)f=f.filter(it=>s.has(devopsRaw(it,dim)));});renderDevops(f);}
+function renderDevops(f){var sev={};f.forEach(x=>{sev[x.severity]=(sev[x.severity]||0)+1;});var hi=(sev["Critical"]||0)+(sev["High"]||0);var repos={};f.forEach(x=>{repos[x.repo]=(repos[x.repo]||0)+1;});var kp=[["#1fab89",f.length,"🐙 findings"],["#ff6b6b",hi,"🔴 Critical+High"],["#7cd0ff",Object.keys(repos).length,"repositórios"]];DEVOPS_SEVO.forEach(s=>{if(sev[s])kp.push([MDC_SEV_COLOR[s]||"#9fb0c8",sev[s],s]);});document.getElementById("devopskpis").innerHTML=kp.map(a=>'<div class="kpi"><div class="n" style="color:'+a[0]+'">'+esc(a[1])+'</div><div class="l">'+esc(a[2])+'</div></div>').join("");var sevSegs=DEVOPS_SEVO.filter(s=>sev[s]).map(s=>[s,sev[s],MDC_SEV_COLOR[s]||"#9fb0c8"]);var cat={};f.forEach(x=>{var c=x.category||"—";cat[c]=(cat[c]||0)+1;});var pal=["#7cd0ff","#7ee2a8","#c9a7ff","#ffd96b","#ff9f6b","#9fb0c8"];var catSegs=Object.keys(cat).filter(c=>c!=="—").sort((a,b)=>cat[b]-cat[a]).slice(0,6).map((c,i)=>[c,cat[c],pal[i]||"#9fb0c8"]);var pies=m365PieCard("Criticidade",sevSegs);if(catSegs.length>1)pies+=m365PieCard("Categoria",catSegs);document.getElementById("devopspies").innerHTML=pies;var bysev={};f.forEach(x=>{var r=bysev[x.repo]||(bysev[x.repo]={});r[x.severity]=(r[x.severity]||0)+1;});var sevs=DEVOPS_SEVO.filter(s=>sev[s]);var repoRank=Object.keys(bysev).map(r=>({r:r,t:repos[r],hi:(bysev[r]["Critical"]||0)+(bysev[r]["High"]||0)})).sort((a,b)=>b.hi-a.hi||b.t-a.t).slice(0,20);var mvr=Math.max.apply(null,[1].concat(repoRank.map(o=>o.t)));document.getElementById("devopsbars").innerHTML=repoRank.length?('<div class="bars">'+repoRank.map(o=>{var segs=sevs.map(s=>{var c=bysev[o.r][s]||0;return c?'<span class="seg" style="width:'+(100*c/mvr).toFixed(1)+'%;background:'+(MDC_SEV_COLOR[s]||"#9fb0c8")+'" title="'+esc(s)+': '+c+'"></span>':'';}).join("");return '<div class="barrow"><div class="barlbl" title="'+esc(o.r)+'">🐙 '+esc(o.r)+'</div><div class="bartrack">'+segs+'</div><div class="barval">'+o.t+'</div></div>';}).join("")+'</div><div class="legend" style="margin-top:8px">'+sevs.map(s=>'<span><i class="dot" style="background:'+(MDC_SEV_COLOR[s]||"#9fb0c8")+'"></i>'+esc(s)+'</span>').join("")+'</div>'):'<div class="meta">Nenhum finding para os filtros.</div>';var ord={Critical:5,High:4,Medium:3,Low:2,Informational:1,Unknown:0};var top=f.slice().sort((a,b)=>(ord[b.severity]||0)-(ord[a.severity]||0)).slice(0,40);document.getElementById("devopstable").innerHTML='<table><tr><th>Criticidade</th><th>Repositório</th><th>Finding</th><th>Categoria</th><th>Referência</th></tr>'+top.map(x=>{var rf=x.link?'<a href="'+esc(x.link)+'" target="_blank" style="color:var(--accent);white-space:nowrap">'+(x.link.indexOf("github.com")>=0?"GitHub ↗":"Portal ↗")+'</a>':'<span class="meta">—</span>';return '<tr><td style="font-weight:700;white-space:nowrap;color:'+(MDC_SEV_COLOR[x.severity]||"#9fb0c8")+'">'+esc(x.severity)+'</td><td class="mono">🐙 '+esc(x.repo)+'</td><td>'+esc(x.finding)+'</td><td class="meta" style="white-space:nowrap">'+esc(x.category)+'</td><td>'+rf+'</td></tr>';}).join("")+'</table>'+(f.length>40?'<div class="meta" style="margin-top:6px">… +'+(f.length-40)+' findings (priorize Critical→High).</div>':'');}
 (function(){var t="dark";try{t=localStorage.getItem("ai_theme")||"dark";}catch(e){}setTheme(t);})();
 buildFilters();apply();
 if(DATA.m365){buildM365Filters();applyM365();}
 if(DATA.mdc){buildMdcFilters();applyMdc();}
 if(DATA.mcsb){buildMcsbFilters();applyMcsb();}
+if(DATA.devops){buildDevopsFilters();applyDevops();}
 (function(){var h=(location.hash||"").replace("#","");showPage(h&&document.getElementById(h)?h:"home");})();
 """
 
@@ -1865,8 +1863,24 @@ def render_html(ctx, q):
                  "resource": it.get("resource_name") or "—",
                  "link": it.get("portal_link") or it.get("rec_link") or "",
                  "sub": it.get("subscription_id") or "",
-                 "rg": it.get("resource_group") or "—"}
+                 "rg": it.get("resource_group") or "—",
+                 "ss_impact": it.get("score_impact_pct"),
+                 "ss_label": it.get("score_impact_label") or "",
+                 "ss_control": it.get("score_control") or ""}
                 for it in mdc_ctx
+            ],
+        }
+
+    devops_ctx = ctx.get("devops")
+    devops_js = None
+    if devops_ctx and devops_ctx.get("findings"):
+        devops_js = {
+            "sev_order": devops_ctx.get("sev_order", []),
+            "findings": [
+                {"repo": f.get("repo", "—"), "severity": f.get("severity", "—"),
+                 "category": f.get("category", "—"), "finding": f.get("finding", "—"),
+                 "provider": f.get("provider", ""), "link": f.get("link", "") or ""}
+                for f in devops_ctx["findings"]
             ],
         }
 
@@ -1877,6 +1891,7 @@ def render_html(ctx, q):
         "mcsb": mcsb_js,
         "m365": m365_js,
         "mdc": mdc_js,
+        "devops": devops_js,
         "scope_label": ctx.get("scope_label", ""),
         "generated": ctx.get("generated", ""),
     }
