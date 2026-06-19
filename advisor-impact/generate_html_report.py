@@ -472,6 +472,20 @@ def _portal_resource_link(resource_id):
         return ""
     return f"https://portal.azure.com/#@/resource{rid}/overview"
 
+# Links de acesso rápido GARANTIDOS (oficiais) por origem — usados como fallback quando
+# não há deep link específico da recomendação nem resourceId. Garantem que TODA recomendação
+# tenha um link clicável.
+_ADVISOR_PORTAL = "https://aka.ms/azureadvisordashboard"
+_MDC_RECS_PORTAL = "https://portal.azure.com/#view/Microsoft_Azure_Security/SecurityMenuBlade/~/5"
+_M365_SECURESCORE_PORTAL = "https://security.microsoft.com/securescore"
+
+def _fallback_portal_link(source):
+    """Fallback oficial por origem (Advisor → Advisor dashboard; demais → Defender recommendations)."""
+    if "advisor" in (source or "").lower():
+        return _ADVISOR_PORTAL
+    return _MDC_RECS_PORTAL
+
+
 def build_resource_map(inventory):
     rmap = {}
     for r in as_list(inventory):
@@ -496,8 +510,10 @@ def _enrich(item, resource_id, risk, rmap, q, region="eastus2", sub_names=None):
         item["devops_provider"] = dp_provider
         item["devops_repo"] = dp_repo or "(org)"
     # Link oficial da recomendação (MDC fornece em links.azurePortal) tem prioridade;
-    # senão cai p/ deep link determinístico do recurso.
-    item["portal_link"] = item.get("rec_link") or _portal_resource_link(resource_id)
+    # senão cai p/ deep link determinístico do recurso; senão fallback oficial por origem
+    # (garante que TODA recomendação tenha link de acesso rápido).
+    item["portal_link"] = (item.get("rec_link") or _portal_resource_link(resource_id)
+                           or _fallback_portal_link(item.get("source")))
     loc = res.get("location") or region
     amps = []
     if resource_id and not res:
@@ -705,7 +721,7 @@ def parse_mcsb_compliance(standards_data, controls_data, std_name, preferred_nam
             "failed": int(cp.get("failedAssessments", 0) or 0),
             "passed": int(cp.get("passedAssessments", 0) or 0),
             "skipped": int(cp.get("skippedAssessments", 0) or 0),
-            "link": prop(cp, "links.azurePortal", "") or "",
+            "link": prop(cp, "links.azurePortal", "") or _MDC_RECS_PORTAL,
             "subscription_id": sub_id,
         })
     failing.sort(key=lambda x: x["failed"], reverse=True)
@@ -876,11 +892,13 @@ def build_context(q, raw, params):
     # Pilar DevOps Remediation — findings granulares (subassessments) do Defender DevOps
     devops = analyze_devops_findings(raw.get("devops_findings"), sub_names)
 
-    # Pilar XDR — recomendações do Defender XDR/TVM (dataset opcional, prefetch)
-    xdr = analyze_xdr_recommendations(raw.get("xdr_recommendations"), sub_names)
+    # Pilar XDR — UNIFICADO na aba Microsoft Secure Score (mesma fonte: secureScoreControlProfiles).
+    # Mantido None para não duplicar card/aba; o dashboard m365 abaixo consome o mesmo dataset.
+    xdr = None
 
-    # Microsoft Secure Score (M365/Entra) — dataset opcional (prefetch via Graph)
-    m365 = analyze_m365_secure_score(raw.get("m365_secure_score") or raw.get("secure_score_m365"))
+    # Microsoft Secure Score (M365/Entra) — dataset opcional (prefetch via Graph). Inclui os
+    # Recommended Actions que antes ficavam na aba "Defender XDR" (mesma origem secureScoreControlProfiles).
+    m365 = analyze_m365_dashboard(raw.get("m365_secure_score") or raw.get("secure_score_m365"), raw.get("xdr_recommendations"))
 
     # Mapa POR SUBSCRIPTION (p/ recalcular SS + MCSB sob filtro de subscription no JS)
     subs = {}
@@ -1295,6 +1313,161 @@ def analyze_m365_secure_score(data):
     return {"pct": round(100.0 * cur / mx, 1), "current": round(cur, 1),
             "max": round(mx, 1), "controls": len(p.get("controlScores") or [])}
 
+# ----- Dashboard Microsoft Secure Score (estilo ESA, página dedicada) ---------
+# Junta secureScores.controlScores (score ATUAL por controle) com
+# secureScoreControlProfiles (título/categoria/produto/maxScore/estado).
+_M365_STATE_MAP = {
+    "default": "A endereçar", "toaddress": "A endereçar", "reviewed": "Em revisão",
+    "planned": "Planejado", "ignored": "Risco aceito", "riskaccepted": "Risco aceito",
+    "thirdparty": "Mitigação alternativa", "resolved": "Concluído", "completed": "Concluído",
+}
+_M365_STATUS_COLOR = {
+    "Concluído": "#5ed16a", "A endereçar": "#ffb020", "Planejado": "#7cd0ff",
+    "Em revisão": "#9aa7ff", "Risco aceito": "#c9a7ff", "Mitigação alternativa": "#f48fb1",
+}
+_M365_CAT_COLOR = {"Identity": "#7cd0ff", "Device": "#7ee2a8", "Apps": "#c9a7ff", "Data": "#ffd96b",
+                   "Account": "#7cd0ff", "Infrastructure": "#ff9f6b", "—": "#9fb0c8"}
+_M365_BUCKET_COLOR = {"Alcançado": "#5ed16a", "Parcial": "#ffd96b", "Oportunidade": "#ff6b6b"}
+
+
+def analyze_m365_dashboard(m365_raw, profiles_raw):
+    """Dashboard Microsoft Secure Score (estilo ESA): por-recomendação com status/categoria/
+    produto/pontuação/impacto/licença. Usa secureScores p/ o score atual; também renderiza
+    só com secureScoreControlProfiles (degrada: score atual = 0 onde não houver join)."""
+    base = analyze_m365_secure_score(m365_raw)
+    rows = as_list(m365_raw)
+    head = rows[0] if rows and isinstance(rows[0], dict) else {}
+    hp = head.get("properties") if isinstance(head.get("properties"), dict) else head
+    cscores = {}
+    for cs in (hp.get("controlScores") or []):
+        if not isinstance(cs, dict):
+            continue
+        key = str(cs.get("controlName") or cs.get("name") or "").strip().lower()
+        if not key:
+            continue
+        try:
+            sc = float(cs.get("score") or 0)
+        except (TypeError, ValueError):
+            sc = 0.0
+        cscores[key] = {"score": sc, "category": cs.get("controlCategory") or "",
+                        "applicable": cs.get("IsApplicable", cs.get("isApplicable", None))}
+    profs = [r for r in as_list(profiles_raw) if isinstance(r, dict)]
+    if not profs:
+        return base  # só o card simples (sem página de dashboard)
+
+    def field(r, *keys):
+        p = r.get("properties") if isinstance(r.get("properties"), dict) else {}
+        for k in keys:
+            if r.get(k) not in (None, ""):
+                return r.get(k)
+            if p.get(k) not in (None, ""):
+                return p.get(k)
+        return None
+
+    recs = []
+    for r in profs:
+        if bool(field(r, "deprecated")):
+            continue
+        cid = str(field(r, "id", "controlName", "name") or "").strip()
+        title = str(field(r, "title", "displayName", "controlName", "id") or "—")
+        cat = str(field(r, "controlCategory", "category") or "")
+        product = str(field(r, "service", "actionType") or "—")
+        try:
+            maxs = float(field(r, "maxScore", "max") or 0)
+        except (TypeError, ValueError):
+            maxs = 0.0
+        csu = field(r, "controlStateUpdates")
+        state_raw = ""
+        if isinstance(csu, list) and csu and isinstance(csu[-1], dict):
+            state_raw = str(csu[-1].get("state") or "")
+        cs = cscores.get(cid.lower(), {})
+        cur = cs.get("score", 0.0)
+        if not cat or cat == "—":
+            cat = cs.get("category") or "—"
+        if maxs > 0 and cur >= maxs - 1e-9:
+            status = "Concluído"
+        else:
+            status = _M365_STATE_MAP.get(re.sub(r"\s+", "", state_raw).lower(), "A endereçar")
+        if maxs <= 0 or cur <= 0:
+            bucket = "Oportunidade"
+        elif cur >= maxs - 1e-9:
+            bucket = "Alcançado"
+        else:
+            bucket = "Parcial"
+        appl = cs.get("applicable", None)
+        recs.append({
+            "name": title, "category": cat or "—", "product": product or "—",
+            "score": round(cur, 1), "max": round(maxs, 1), "missing": round(max(maxs - cur, 0.0), 1),
+            "status": status, "bucket": bucket, "licensed": (appl is not False),
+            "link": str(field(r, "actionUrl", "remediationUrl", "link") or "") or _M365_SECURESCORE_PORTAL,
+        })
+    if not recs:
+        return base
+
+    def tally(key):
+        d = {}
+        for x in recs:
+            d[x[key]] = d.get(x[key], 0) + 1
+        return d
+
+    prod = {}
+    for x in recs:
+        pp = prod.setdefault(x["product"], {"completed": 0, "to_address": 0, "cur": 0.0, "max": 0.0})
+        pp["completed" if x["status"] == "Concluído" else "to_address"] += 1
+        pp["cur"] += x["score"]
+        pp["max"] += x["max"]
+    by_product = sorted(
+        [{"product": k, "completed": v["completed"], "to_address": v["to_address"],
+          "pct": round(100.0 * v["cur"] / v["max"]) if v["max"] else 0,
+          "gain": round(v["max"] - v["cur"], 1)} for k, v in prod.items()],
+        key=lambda r: (r["to_address"], r["gain"]), reverse=True)
+    no_license = sum(1 for x in recs if not x["licensed"])
+    completed = sum(1 for x in recs if x["status"] == "Concluído")
+    if base:
+        out = dict(base)
+    else:
+        cur = round(sum(x["score"] for x in recs), 1)
+        mx = round(sum(x["max"] for x in recs), 1)
+        out = {"pct": round(100.0 * cur / mx, 1) if mx else 0.0,
+               "current": cur, "max": mx, "controls": len(cscores)}
+    out.update({
+        "dashboard": True, "total": len(recs), "completed": completed,
+        "to_address": len(recs) - completed, "no_license": no_license,
+        "missing_total": round(sum(x["missing"] for x in recs)),
+        "by_status": tally("status"), "by_category": tally("category"), "by_bucket": tally("bucket"),
+        "by_product": by_product,
+        "license_segs": ([("Licenciado", len(recs) - no_license, "#5ed16a"),
+                          ("Sem licença", no_license, "#ff6b6b")] if no_license else None),
+        "top": sorted(recs, key=lambda x: (x["missing"], x["max"]), reverse=True),
+    })
+    return out
+
+
+def _render_m365_section(ctx):
+    """Página 🏆 Microsoft Secure Score (dashboard estilo ESA, interativo via JS).
+    O shell traz filtros + placeholders; o JS (renderM365) calcula KPIs/pizzas/tabelas sob filtro."""
+    m = ctx.get("m365")
+    if not m or not m.get("dashboard"):
+        return ""
+    filters = (
+        '<div class="filters"><div class="ftop">'
+        '<div class="meta">🔎 Filtros — marque para refinar; vazio = tudo. Tudo recalcula conforme a seleção.</div>'
+        '<button class="btn" onclick="clearM365()">Limpar filtros</button></div>'
+        '<div class="frow" id="m365frow"></div></div>')
+    return (
+        "<div class='phase'><h3>🏆 Microsoft Secure Score "
+        "<span class='meta'>· Entra ID + Microsoft 365 · Recommended Actions (security.microsoft.com/securescore)</span></h3>"
+        + filters +
+        "<div class='card'>"
+        "<div class='kpis' id='m365kpis'></div>"
+        "<div class='pgrid' id='m365pies' style='margin-top:14px'></div>"
+        "<h3 style='margin-top:16px'>📦 Recomendações por produto</h3><div id='m365prod'></div>"
+        "<h3 style='margin-top:16px'>📊 Pontuação vs pontos a ganhar <span class='meta'>· top 12 por oportunidade</span></h3>"
+        "<div id='m365bars'></div>"
+        "<h3 style='margin-top:16px'>🔧 Ações recomendadas <span class='meta'>· ordenadas por pontos a ganhar</span></h3>"
+        "<div id='m365table'></div>"
+        "</div></div>")
+
 def _score_card(icon, title, big, big_sub, rows, onclick="", pie=""):
     """Card de score estilo Power BI: ícone + título + número grande + pizza + sub-métricas. rows=[(label,value,color)]."""
     click = (" onclick=\"" + onclick + "\" style=\"cursor:pointer\"") if onclick else ""
@@ -1404,50 +1577,48 @@ def _exec_critical_tables(ctx):
             "<div class='critgrid'>" + cards + "</div>")
 
 def _render_mdc_section(ctx):
-    """Página 🛡️ Defender for Cloud estilo Power BI: pizza de severidade + KPIs + tabela de recomendações."""
-    mdc = ctx.get("mdc", [])
-    if not mdc:
+    """Página Defender for Cloud (dashboard interativo via JS: KPIs + pizzas + tabela + dropdowns)."""
+    if not ctx.get("mdc"):
         return ""
-    ss, ss_pot = ctx.get("secure_score"), ctx.get("secure_score_potential")
-    by_sev = {}
-    for it in mdc:
-        s = str(it.get("priority", "—")).capitalize()
-        by_sev[s] = by_sev.get(s, 0) + 1
-    sevs = [s for s in ["Critical", "High", "Medium", "Low", "Informational"] if by_sev.get(s)]
-    pie = _svg_pie([(s, by_sev.get(s, 0), _SEV_COLOR.get(s, '#9fb0c8')) for s in sevs], 160)
-    legend = "<div class='legend'>" + "".join(
-        f"<span><i class='dot' style='background:{_SEV_COLOR.get(s,'#9fb0c8')}'></i>{esc(s)} · {by_sev.get(s,0)}</span>"
-        for s in sevs) + "</div>"
-    kc = (f"<div class='kpi'><div class='n' style='color:#1fab89'>{len(mdc)}</div><div class='l'>recomendações</div></div>")
-    for s in sevs:
-        kc += f"<div class='kpi'><div class='n {_SEV_CLASS.get(s,'sv-informational')}'>{by_sev.get(s,0)}</div><div class='l'>{esc(s)}</div></div>"
-    if ss is not None:
-        kc += f"<div class='kpi'><div class='n' style='color:#9fb0c8'>{ss}%</div><div class='l'>🛡️ Secure Score</div></div>"
-        if ss_pot is not None:
-            kc += f"<div class='kpi'><div class='n' style='color:#9ae6b4'>{ss_pot}%</div><div class='l'>🎯 potencial</div></div>"
-    top = sorted(mdc, key=lambda it: _MDC_ORDER.get(str(it.get("priority", "")).lower(), -1), reverse=True)[:25]
-    det = ""
-    for it in top:
-        s = str(it.get("priority", "—")).capitalize()
-        link = it.get("portal_link", "") or ""
-        link_html = (f"<a href='{esc(link)}' target='_blank' style='color:var(--accent);white-space:nowrap'>Portal ↗</a>"
-                     if link else "<span class='meta'>—</span>")
-        det += (f"<tr><td class='{_SEV_CLASS.get(s,'sv-informational')}' style='font-weight:700;white-space:nowrap'>{esc(s)}</td>"
-                f"<td>{esc(it.get('title','—'))}</td>"
-                f"<td class='mono'>{esc(it.get('resource_name','—'))}</td>"
-                f"<td>{link_html}</td></tr>")
+    filters = (
+        '<div class="filters"><div class="ftop">'
+        '<div class="meta">🔎 Filtros — selecione para refinar; vazio = tudo. Tudo recalcula conforme a seleção.</div>'
+        '<button class="btn" onclick="clearMdc()">Limpar filtros</button></div>'
+        '<div class="frow" id="mdcfrow"></div></div>')
     return (
         "<div class='phase'><h3><img class='plogo-h' src='" + _DFC_LOGO_URI + "' alt=''>Defender for Cloud — Secure Score "
         "<span class='meta'>· security assessments (postura de nuvem)</span></h3>"
+        + filters +
         "<div class='card'>"
-        "<div class='dvgrid'>"
-        f"<div style='text-align:center'>{pie}{legend}</div>"
-        f"<div><div class='kpis'>{kc}</div></div>"
-        "</div>"
+        "<div class='kpis' id='mdckpis'></div>"
+        "<div class='pgrid' id='mdcpies' style='margin-top:14px'></div>"
         "<h3 style='margin-top:16px'>🔧 Recomendações <span class='meta'>· por severidade</span></h3>"
-        "<table><tr><th>Sev</th><th>Recomendação</th><th>Recurso</th><th>Referência</th></tr>"
-        f"{det}</table>"
+        "<div id='mdctable'></div>"
         "</div></div>")
+
+
+def _render_mcsb_section(ctx):
+    """Página Microsoft Cloud Security Benchmark (dashboard interativo via JS, filtro por Subscription)."""
+    mcsb = ctx.get("mcsb")
+    if not mcsb:
+        return ""
+    std = esc(mcsb.get("standard_name", ""))
+    filters = (
+        '<div class="filters"><div class="ftop">'
+        '<div class="meta">🔎 Filtro — escolha a(s) subscription(s); vazio = todas. Recalcula a conformidade.</div>'
+        '<button class="btn" onclick="clearMcsb()">Limpar filtros</button></div>'
+        '<div class="frow" id="mcsbfrow"></div></div>')
+    return (
+        "<div class='phase'><h3>📋 Microsoft Cloud Security Benchmark "
+        "<span class='meta'>· standard: " + std + " (postura de compliance)</span></h3>"
+        + filters +
+        "<div class='card'>"
+        "<div class='kpis' id='mcsbkpis'></div>"
+        "<div class='pgrid' id='mcsbpies' style='margin-top:14px'></div>"
+        "<h3 style='margin-top:16px'>🔧 Controles em falha <span class='meta'>· por nº de avaliações falhando</span></h3>"
+        "<div id='mcsbtable'></div>"
+        "</div></div>")
+
 
 # CSS + JS do relatório interativo (string normal, SEM f-string → não precisa escapar {}).
 _REPORT_CSS = """
@@ -1541,6 +1712,22 @@ _REPORT_CSS = """
   .scrow{display:flex;justify-content:space-between;align-items:center;font-size:13px;padding:3px 0}
   .scrow span{color:var(--muted)}
   .critgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px;margin-top:8px}
+  .pgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px}
+  .piecard{background:var(--inset);border:1px solid var(--border);border-radius:12px;padding:14px 12px;text-align:center}
+  .pctitle{font-size:12px;font-weight:700;color:var(--muted);margin-bottom:8px;text-transform:uppercase;letter-spacing:.03em}
+  .m365slicers,.slicers{display:flex;flex-wrap:wrap;gap:10px}
+  .slicer{position:relative}
+  .slicer-btn{display:inline-flex;align-items:center;gap:7px;background:var(--inset);border:1px solid var(--border);color:var(--fg);border-radius:9px;padding:8px 12px;font-size:12px;cursor:pointer;min-width:160px}
+  .slicer-btn:hover,.slicer-btn.on{border-color:var(--accent)}
+  .slicer-btn .cap{color:var(--muted);font-weight:700}
+  .slicer-btn .valtxt{flex:1;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:130px}
+  .slicer-btn .car{color:var(--muted);font-size:10px}
+  .slicer-pop{position:absolute;z-index:30;top:calc(100% + 4px);left:0;min-width:210px;max-height:250px;overflow:auto;background:var(--card);border:1px solid var(--border);border-radius:10px;box-shadow:0 8px 24px var(--shadow);padding:6px;display:none}
+  .slicer-pop.open{display:block}
+  .slicer-pop label{display:flex;align-items:center;gap:8px;font-size:12px;padding:5px 8px;border-radius:6px;cursor:pointer;white-space:nowrap}
+  .slicer-pop label:hover{background:var(--inset)}
+  .slicer-pop input{accent-color:var(--accent)}
+  .slicer-clear{display:block;width:100%;text-align:left;background:transparent;border:none;border-bottom:1px solid var(--border);color:var(--accent);font-size:11px;padding:4px 8px;margin-bottom:4px;cursor:pointer}
   @media(max-width:680px){.kpis{grid-template-columns:repeat(3,1fr)}.barrow{grid-template-columns:110px 1fr 34px}}
 """
 
@@ -1552,7 +1739,8 @@ function esc(s){return String(s==null?"":s).replace(/[&<>"']/g,c=>({"&":"&amp;",
 function val(it,dim){if(dim==="sub")return it.subscription_id;if(dim==="rg")return it.resource_group;if(dim==="source")return it.source;if(dim==="category")return it.category;if(dim==="risk")return it.risk;if(dim==="severity")return it.priority;if(dim==="repo")return it.devops_repo||"";return "";}
 function label(dim,v){if(dim==="sub"){const s=DATA.subs[v];return (s&&s.name)?s.name:(v?v.slice(0,8):"—");}if(dim==="risk"){return (PHMETA[v]?PHMETA[v].emoji+" "+PHMETA[v].label:v);}return v;}
 function uniq(dim){const set=new Set();DATA.items.forEach(it=>{const v=val(it,dim);if(v&&v!=="—")set.add(v);});if(dim==="sub"){Object.keys(DATA.subs||{}).forEach(s=>set.add(s));}return [...set].sort((a,b)=>label(dim,a).localeCompare(label(dim,b)));}
-function buildFilters(){const root=document.getElementById("frow");DIMS.forEach(([dim,name])=>{const vals=uniq(dim);if(!vals.length)return;const box=document.createElement("div");box.className="fbox";let opts="";vals.forEach(v=>{opts+=`<label title="${esc(label(dim,v))}"><input type="checkbox" data-dim="${dim}" value="${esc(v)}">${esc(label(dim,v))}</label>`;});box.innerHTML=`<div class="flabel"><span>${esc(name)}</span><span class="meta">${vals.length}</span></div><div class="fopts">${opts}</div>`;root.appendChild(box);});root.querySelectorAll("input[type=checkbox]").forEach(cb=>cb.addEventListener("change",apply));}
+function buildFilters(){const root=document.getElementById("frow");root.className="slicers";DIMS.forEach(([dim,name])=>{const vals=uniq(dim);if(!vals.length)return;const wrap=document.createElement("div");wrap.className="slicer";let opts="";vals.forEach(v=>{opts+=`<label><input type="checkbox" data-dim="${dim}" value="${esc(v)}">${esc(label(dim,v))}</label>`;});wrap.innerHTML=`<button type="button" class="slicer-btn" data-dim="${dim}"><span class="cap">${esc(name)}</span><span class="valtxt">Todos</span><span class="car">▾</span></button><div class="slicer-pop"><button type="button" class="slicer-clear" data-dim="${dim}">Limpar</button>${opts}</div>`;root.appendChild(wrap);});root.querySelectorAll(".slicer-btn").forEach(b=>b.addEventListener("click",function(e){e.stopPropagation();var pop=this.nextElementSibling;var op=pop.classList.contains("open");closeAllSlicers();if(!op)pop.classList.add("open");}));root.querySelectorAll(".slicer-pop").forEach(p=>p.addEventListener("click",e=>e.stopPropagation()));root.querySelectorAll('.slicer-pop input[data-dim]').forEach(cb=>cb.addEventListener("change",function(){planUpdateBtn(this.getAttribute("data-dim"));apply();}));root.querySelectorAll(".slicer-clear").forEach(b=>b.addEventListener("click",function(){var dim=this.getAttribute("data-dim");this.parentNode.querySelectorAll('input[data-dim="'+dim+'"]').forEach(x=>x.checked=false);planUpdateBtn(dim);apply();}));document.addEventListener("click",closeAllSlicers);}
+function planUpdateBtn(dim){var btn=document.querySelector('#frow .slicer-btn[data-dim="'+dim+'"]');if(!btn)return;var s=sel(dim);btn.querySelector(".valtxt").textContent=!s.size?"Todos":(s.size===1?label(dim,[...s][0]):s.size+" selecionados");btn.classList.toggle("on",s.size>0);}
 function sel(dim){return new Set([...document.querySelectorAll(`input[data-dim="${dim}"]:checked`)].map(c=>c.value));}
 function fmtUSD(n,suf){if(!n)return "—";return "US$ "+Math.round(n).toLocaleString("pt-BR")+suf;}
 function selectedSubs(){const s=sel("sub");if(s.size)return s;return new Set(Object.keys(DATA.subs||{}));}
@@ -1561,16 +1749,51 @@ function aggMcsb(subs){let p=0,f=0,sk=0,un=0,has=false;subs.forEach(sid=>{const 
 function rowHtml(it){let cs=it.cost_delta?`<span style="color:#5ed16a">${esc(it.cost_delta)}</span>`:"";let ci=it.cost_increase?`<span style="color:#ff6b6b">${esc(it.cost_increase)}</span>`:"";let cost=(cs&&ci)?cs+"<br/>"+ci:(cs||ci||"—");let ss=it.score_impact_label?`<span style="color:#9ae6b4;font-weight:700">${esc(it.score_impact_label)}</span><div class="meta" style="font-size:11px">${esc(it.score_control)}</div>`:"—";let title=esc(it.title);if(it.portal_link){title=`<a href="${esc(it.portal_link)}" style="color:#e7edf5;text-decoration:none;border-bottom:1px dotted #4a5a72">${title}</a> <a href="${esc(it.portal_link)}" title="Abrir no portal" style="color:#7cd0ff;text-decoration:none">🔗</a>`;}const tags=(it.tactics||[]).concat(it.techniques||[]);let mitre=tags.length?`<div class="mtags">🎯 ${tags.slice(0,4).map(m=>`<span class="mitre">${esc(m)}</span>`).join("")}</div>`:"";let owner=it.owner?`<div class="owner">👤 ${esc(it.owner)}</div>`:"";let casc=it.cascade?`<div class="casc">↳ ${esc(it.cascade)}</div>`:"";let dvo=it.devops_repo?`<div class="devops">🐙 ${esc(it.devops_provider||"DevOps")} · ${esc(it.devops_repo)}</div>`:"";let src=`<span style="color:${it.source==="Advisor"?"#7cd0ff":"#c9a7ff"};font-weight:700">${esc(it.source)}</span>`;let subn=it.subscription_name&&it.subscription_name!=="—"?`<div class="meta" style="font-size:11px">${esc(it.subscription_name)} / ${esc(it.resource_group)}</div>`:"";return `<tr><td>${src}</td><td>${title}${dvo}${mitre}${owner}${casc}</td><td>${esc(it.category)}</td><td>${esc(it.priority)}</td><td>${ss}</td><td class="mono">${esc(it.resource_name)}${subn}</td><td>${cost}</td></tr>`;}
 function renderPlan(items){const by={safe:[],low:[],medium:[],high:[]};items.forEach(it=>{(by[it.risk]||by.low).push(it);});let html="";PHASES.forEach(lvl=>{const rows=by[lvl];if(!rows.length)return;const m=PHMETA[lvl]||{};html+=`<div class="phase"><h3>${esc(m.emoji||"")} ${esc(m.label||lvl)} <span class="meta">· ${esc(m.action||"")} · ${rows.length} item(ns)</span></h3><table><tr><th>Fonte</th><th>Recomendação</th><th>Categoria</th><th>Prioridade</th><th>Impacto SS</th><th>Recurso</th><th>Custo</th></tr>${rows.map(rowHtml).join("")}</table></div>`;});document.getElementById("plan").innerHTML=html||`<div class="card meta">Nenhuma recomendação para os filtros selecionados.</div>`;}
 function renderKpis(items,subs){const c={safe:0,low:0,medium:0,high:0};let sav=0,impl=0,devops=0;items.forEach(it=>{c[it.risk]=(c[it.risk]||0)+1;sav+=it.savings_raw||0;impl+=it.cost_increase_raw||0;if(it.devops_repo)devops++;});const ssA=aggSecure(subs);const mc=aggMcsb(subs);const k=document.getElementById("kpis");let cards=[["#7cd0ff",items.length,"recomendações"],["#5ed16a",c.safe,"🟢 quick wins"],["#ffd96b",c.low+c.medium,"🟡🟠 janela"],["#ff6b6b",c.high,"🔴 aprovação"],["#9fb0c8",ssA?ssA.cur+"%":"n/a","🛡️ SS atual"],["#9ae6b4",ssA?ssA.pot+"%":"n/a","🎯 SS potencial"],["#ff6b6b",impl?"+"+fmtUSD(impl,"/mês"):"—","💰 custo impl."]];if(mc&&mc.pct!=null){const cc=mc.pct>=80?"#5ed16a":(mc.pct>=50?"#ffd96b":"#ff6b6b");cards.push([cc,mc.pct+"%","🛡️ MCSB compliance"]);}if(devops)cards.push(["#7ee2a8",devops,"🐙 DevOps findings"]);k.innerHTML=cards.map(([col,n,l])=>`<div class="kpi"><div class="n" style="color:${col};font-size:${String(n).length>7?"14px":"20px"}">${esc(n)}</div><div class="l">${esc(l)}</div></div>`).join("");document.getElementById("subline").innerHTML=`economia potencial: <b style="color:#5ed16a">${sav?"−"+fmtUSD(sav,"/ano"):"—"}</b> · custo de implementação: <b style="color:#ff6b6b">${impl?"+"+fmtUSD(impl,"/mês"):"—"}</b> · 100% read-only`;const bar=document.getElementById("ssbar");if(ssA){bar.style.display="block";bar.innerHTML=`<div class="meta" style="margin-bottom:4px">🛡️ Secure Score: <b style="color:#9fb0c8">${ssA.cur}%</b> agora → <b style="color:#9ae6b4">${ssA.pot}%</b> se remediar tudo (<b style="color:#9ae6b4">+${Math.round(10*(ssA.pot-ssA.cur))/10} pp</b>)</div><div style="background:var(--inset);border:1px solid var(--border);border-radius:8px;height:14px;overflow:hidden;position:relative"><div style="position:absolute;left:0;top:0;height:100%;width:${ssA.pot}%;background:linear-gradient(90deg,#2d6a4f,#52b788);opacity:.45"></div><div style="position:absolute;left:0;top:0;height:100%;width:${ssA.cur}%;background:linear-gradient(90deg,#7cd0ff,#5ed16a)"></div></div>`;}else{bar.style.display="none";}}
-function renderMcsb(subs){const el=document.getElementById("mcsb");const mc=aggMcsb(subs);if(!mc){el.innerHTML="";return;}const cc=(mc.pct||0)>=80?"#5ed16a":((mc.pct||0)>=50?"#ffd96b":"#ff6b6b");const fc=(DATA.mcsb&&DATA.mcsb.failing_controls||[]).filter(x=>!sel("sub").size||subs.has(x.subscription_id)).slice(0,15);let ft="";if(fc.length){ft=`<table style="margin-top:10px"><tr><th>Controle</th><th>Nome</th><th>Falhando</th><th>OK</th></tr>${fc.map(x=>{let nm=esc(x.name);if(x.link)nm=`<a href="${esc(x.link)}" style="color:#e7edf5;text-decoration:none;border-bottom:1px dotted #4a5a72">${nm}</a>`;return `<tr><td class="mono">${esc(x.id)}</td><td>${nm}</td><td style="color:#ff6b6b;font-weight:700">${x.failed}</td><td style="color:#5ed16a">${x.passed}</td></tr>`;}).join("")}</table>`;}el.innerHTML=`<div class="phase"><h3>🛡️ Postura de Compliance — Microsoft Cloud Security Benchmark <span class="meta">· standard: ${esc(DATA.mcsb?DATA.mcsb.standard_name:"")}</span></h3><div class="card"><div style="display:flex;gap:18px;flex-wrap:wrap;align-items:center"><div><span style="font-size:28px;font-weight:800;color:${cc}">${mc.pct!=null?mc.pct+"%":"n/a"}</span><div class="meta">controles em conformidade</div></div><div class="meta">✅ ${mc.passed} passed · ❌ ${mc.failed} failed · ⏭️ ${mc.skipped} skipped · ⚪ ${mc.unsupported} unsupported</div></div><div style="background:var(--inset);border:1px solid var(--border);border-radius:8px;height:12px;overflow:hidden;margin-top:10px"><div style="height:100%;width:${mc.pct||0}%;background:linear-gradient(90deg,${cc},#52b788)"></div></div>${ft}</div></div>`;}
-function apply(){let items=DATA.items;DIMS.forEach(([dim])=>{const s=sel(dim);if(s.size)items=items.filter(it=>s.has(val(it,dim)));});const subs=selectedSubs();renderKpis(items,subs);renderPlan(items);renderMcsb(subs);}
-function clearAll(){document.querySelectorAll("#frow input[type=checkbox]").forEach(c=>c.checked=false);apply();}
+const MDC_SEV_COLOR={"Critical":"#ff4d4d","High":"#ff6b6b","Medium":"#ffd96b","Low":"#7cd0ff","Informational":"#9fb0c8","Unknown":"#9fb0c8"};
+const MDCDIMS=[["severity","Severidade"],["category","Categoria"],["sub","Subscription"],["rg","Resource Group"]];
+function mdcRaw(it,dim){return dim==="sub"?(it.sub||""):(it[dim]||"—");}
+function mdcLabel(dim,v){if(dim==="sub"){var s=DATA.subs[v];return (s&&s.name)?s.name:(v?v.slice(0,8):"—");}return v;}
+function mdcUniq(dim){var set=new Set();DATA.mdc.recs.forEach(it=>{var v=mdcRaw(it,dim);if(v&&v!=="—")set.add(v);});return [...set].sort((a,b)=>String(mdcLabel(dim,a)).localeCompare(String(mdcLabel(dim,b))));}
+function buildMdcFilters(){var root=document.getElementById("mdcfrow");if(!root)return;root.className="slicers";MDCDIMS.forEach(([dim,name])=>{var vals=mdcUniq(dim);if(vals.length<2)return;var wrap=document.createElement("div");wrap.className="slicer";var opts=vals.map(v=>'<label><input type="checkbox" data-mdcdim="'+dim+'" value="'+esc(v)+'">'+esc(mdcLabel(dim,v))+'</label>').join("");wrap.innerHTML='<button type="button" class="slicer-btn" data-dim="'+dim+'"><span class="cap">'+esc(name)+'</span><span class="valtxt">Todos</span><span class="car">▾</span></button><div class="slicer-pop"><button type="button" class="slicer-clear" data-dim="'+dim+'">Limpar</button>'+opts+'</div>';root.appendChild(wrap);});root.querySelectorAll(".slicer-btn").forEach(b=>b.addEventListener("click",function(e){e.stopPropagation();var pop=this.nextElementSibling;var op=pop.classList.contains("open");closeAllSlicers();if(!op)pop.classList.add("open");}));root.querySelectorAll(".slicer-pop").forEach(p=>p.addEventListener("click",e=>e.stopPropagation()));root.querySelectorAll('.slicer-pop input[data-mdcdim]').forEach(cb=>cb.addEventListener("change",function(){mdcUpdateBtn(this.getAttribute("data-mdcdim"));applyMdc();}));root.querySelectorAll(".slicer-clear").forEach(b=>b.addEventListener("click",function(){var dim=this.getAttribute("data-dim");this.parentNode.querySelectorAll('input[data-mdcdim="'+dim+'"]').forEach(x=>x.checked=false);mdcUpdateBtn(dim);applyMdc();}));document.addEventListener("click",closeAllSlicers);}
+function mdcSelDim(dim){return new Set([...document.querySelectorAll('input[data-mdcdim="'+dim+'"]:checked')].map(c=>c.value));}
+function mdcUpdateBtn(dim){var btn=document.querySelector('#mdcfrow .slicer-btn[data-dim="'+dim+'"]');if(!btn)return;var s=mdcSelDim(dim);btn.querySelector(".valtxt").textContent=!s.size?"Todos":(s.size===1?mdcLabel(dim,[...s][0]):s.size+" selecionados");btn.classList.toggle("on",s.size>0);}
+function clearMdc(){document.querySelectorAll("#mdcfrow input[type=checkbox]").forEach(c=>c.checked=false);MDCDIMS.forEach(d=>mdcUpdateBtn(d[0]));applyMdc();}
+function applyMdc(){if(!DATA.mdc)return;var recs=DATA.mdc.recs;MDCDIMS.forEach(([dim])=>{var s=mdcSelDim(dim);if(s.size)recs=recs.filter(it=>s.has(mdcRaw(it,dim)));});renderMdc(recs);}
+function renderMdc(recs){var SEVO=["Critical","High","Medium","Low","Informational","Unknown"];var sev={};recs.forEach(x=>{sev[x.severity]=(sev[x.severity]||0)+1;});var hi=(sev["Critical"]||0)+(sev["High"]||0);var kp=[["#1fab89",recs.length,"recomendações"],["#ff6b6b",hi,"🔴 Critical+High"]];SEVO.forEach(s=>{if(sev[s])kp.push([MDC_SEV_COLOR[s],sev[s],s]);});if(DATA.mdc.ss!=null){kp.push(["#9fb0c8",DATA.mdc.ss+"%","🛡️ Secure Score"]);if(DATA.mdc.ss_pot!=null)kp.push(["#9ae6b4",DATA.mdc.ss_pot+"%","🎯 potencial"]);}document.getElementById("mdckpis").innerHTML=kp.map(a=>'<div class="kpi"><div class="n" style="color:'+a[0]+'">'+esc(a[1])+'</div><div class="l">'+esc(a[2])+'</div></div>').join("");var sevSegs=SEVO.filter(s=>sev[s]).map(s=>[s,sev[s],MDC_SEV_COLOR[s]]);var cat={};recs.forEach(x=>{var c=x.category||"—";cat[c]=(cat[c]||0)+1;});var pal=["#7cd0ff","#7ee2a8","#c9a7ff","#ffd96b","#ff9f6b","#9fb0c8"];var catSegs=Object.keys(cat).filter(c=>c!=="—").sort((a,b)=>cat[b]-cat[a]).slice(0,6).map((c,i)=>[c,cat[c],pal[i]||"#9fb0c8"]);var pies=m365PieCard("Severidade",sevSegs);if(catSegs.length>1)pies+=m365PieCard("Categoria",catSegs);document.getElementById("mdcpies").innerHTML=pies;var ord={Critical:5,High:4,Medium:3,Low:2,Informational:1,Unknown:0};var top=recs.slice().sort((a,b)=>(ord[b.severity]||0)-(ord[a.severity]||0)).slice(0,30);document.getElementById("mdctable").innerHTML='<table><tr><th>Sev</th><th>Recomendação</th><th>Recurso</th><th>Referência</th></tr>'+top.map(x=>{var rf=x.link?'<a href="'+esc(x.link)+'" target="_blank" style="color:var(--accent);white-space:nowrap">Portal ↗</a>':'<span class="meta">—</span>';return '<tr><td style="font-weight:700;white-space:nowrap;color:'+(MDC_SEV_COLOR[x.severity]||"#9fb0c8")+'">'+esc(x.severity)+'</td><td>'+esc(x.title)+'</td><td class="mono">'+esc(x.resource)+'</td><td>'+rf+'</td></tr>';}).join("")+'</table>';}
+function mcsbSubsAll(){return Object.keys(DATA.subs||{}).filter(s=>DATA.subs[s]&&DATA.subs[s].mcsb);}
+function buildMcsbFilters(){var root=document.getElementById("mcsbfrow");if(!root)return;root.className="slicers";var subs=mcsbSubsAll();if(subs.length<2)return;var wrap=document.createElement("div");wrap.className="slicer";var opts=subs.map(s=>'<label><input type="checkbox" data-mcsbdim="sub" value="'+esc(s)+'">'+esc(DATA.subs[s].name||s.slice(0,8))+'</label>').join("");wrap.innerHTML='<button type="button" class="slicer-btn" data-dim="sub"><span class="cap">Subscription</span><span class="valtxt">Todos</span><span class="car">▾</span></button><div class="slicer-pop"><button type="button" class="slicer-clear" data-dim="sub">Limpar</button>'+opts+'</div>';root.appendChild(wrap);root.querySelectorAll(".slicer-btn").forEach(b=>b.addEventListener("click",function(e){e.stopPropagation();var pop=this.nextElementSibling;var op=pop.classList.contains("open");closeAllSlicers();if(!op)pop.classList.add("open");}));root.querySelectorAll(".slicer-pop").forEach(p=>p.addEventListener("click",e=>e.stopPropagation()));root.querySelectorAll('.slicer-pop input[data-mcsbdim]').forEach(cb=>cb.addEventListener("change",function(){mcsbUpdateBtn();applyMcsb();}));root.querySelectorAll(".slicer-clear").forEach(b=>b.addEventListener("click",function(){this.parentNode.querySelectorAll('input[data-mcsbdim]').forEach(x=>x.checked=false);mcsbUpdateBtn();applyMcsb();}));document.addEventListener("click",closeAllSlicers);}
+function mcsbSel(){return new Set([...document.querySelectorAll('input[data-mcsbdim="sub"]:checked')].map(c=>c.value));}
+function mcsbUpdateBtn(){var btn=document.querySelector('#mcsbfrow .slicer-btn[data-dim="sub"]');if(!btn)return;var s=mcsbSel();btn.querySelector(".valtxt").textContent=!s.size?"Todos":(s.size===1?(DATA.subs[[...s][0]]&&DATA.subs[[...s][0]].name||"1"):s.size+" selecionados");btn.classList.toggle("on",s.size>0);}
+function clearMcsb(){document.querySelectorAll("#mcsbfrow input[type=checkbox]").forEach(c=>c.checked=false);mcsbUpdateBtn();applyMcsb();}
+function applyMcsb(){if(!DATA.mcsb)return;var s=mcsbSel();var subs=s.size?s:new Set(mcsbSubsAll());renderMcsbDash(subs);}
+function renderMcsbDash(subs){var p=0,f=0,sk=0,un=0;subs.forEach(sid=>{var m=DATA.subs[sid]&&DATA.subs[sid].mcsb;if(m){p+=m.passed;f+=m.failed;sk+=m.skipped;un+=m.unsupported;}});var pct=(p+f)>0?Math.round(1000*p/(p+f))/10:null;var cc=(pct||0)>=80?"#5ed16a":((pct||0)>=50?"#ffd96b":"#ff6b6b");var kp=[[cc,(pct!=null?pct+"%":"n/a"),"📋 conformidade"],["#5ed16a",p,"✅ passed"],["#ff6b6b",f,"❌ failed"],["#ffd96b",sk,"⏭️ skipped"],["#aeb8c7",un,"⚪ unsupported"]];document.getElementById("mcsbkpis").innerHTML=kp.map(a=>'<div class="kpi"><div class="n" style="color:'+a[0]+'">'+esc(a[1])+'</div><div class="l">'+esc(a[2])+'</div></div>').join("");var segs=[["Passed",p,"#5ed16a"],["Failed",f,"#ff6b6b"],["Skipped",sk,"#ffd96b"],["Unsupported",un,"#aeb8c7"]];document.getElementById("mcsbpies").innerHTML=m365PieCard("Conformidade",segs);var hasSel=mcsbSel().size>0;var fc=(DATA.mcsb.failing_controls||[]).filter(x=>!hasSel||subs.has(x.subscription_id)).slice(0,20);document.getElementById("mcsbtable").innerHTML='<table><tr><th>Controle</th><th>Nome</th><th style="text-align:right">Falhando</th><th style="text-align:right">OK</th></tr>'+fc.map(x=>{var nm=esc(x.name);if(x.link)nm='<a href="'+esc(x.link)+'" target="_blank" style="color:var(--fg);text-decoration:none;border-bottom:1px dotted #4a5a72">'+nm+'</a>';return '<tr><td class="mono">'+esc(x.id)+'</td><td>'+nm+'</td><td style="text-align:right;color:#ff6b6b;font-weight:700">'+x.failed+'</td><td style="text-align:right;color:#5ed16a">'+x.passed+'</td></tr>';}).join("")+'</table>';}
+function apply(){let items=DATA.items;DIMS.forEach(([dim])=>{const s=sel(dim);if(s.size)items=items.filter(it=>s.has(val(it,dim)));});const subs=selectedSubs();renderKpis(items,subs);renderPlan(items);}
+function clearAll(){document.querySelectorAll("#frow input[type=checkbox]").forEach(c=>c.checked=false);DIMS.forEach(d=>planUpdateBtn(d[0]));apply();}
 function setTheme(t){document.documentElement.setAttribute("data-theme",t);try{localStorage.setItem("ai_theme",t);}catch(e){}var b=document.getElementById("themebtn");if(b)b.textContent=(t==="light"?"🌙 Tema escuro":"☀️ Tema claro");}
 function toggleTheme(){var c=document.documentElement.getAttribute("data-theme")||"dark";setTheme(c==="light"?"dark":"light");}
 function showPage(id){document.querySelectorAll(".page").forEach(function(p){p.style.display="none";});var el=document.getElementById(id);if(el)el.style.display="block";document.querySelectorAll(".navbtn").forEach(function(b){b.classList.toggle("active",b.getAttribute("data-page")===id);});try{location.hash=id;}catch(e){}window.scrollTo(0,0);}
 function goHome(){showPage("home");}
-function gotoSource(src){document.querySelectorAll("#frow input[type=checkbox]").forEach(function(c){c.checked=false;});if(src){var box=document.querySelector('#frow input[data-dim="source"][value="'+src.replace(/"/g,'\\\\"')+'"]');if(box)box.checked=true;}apply();showPage("page-plan");}
+function gotoSource(src){document.querySelectorAll("#frow input[type=checkbox]").forEach(function(c){c.checked=false;});if(src){var box=document.querySelector('#frow input[data-dim="source"][value="'+src.replace(/"/g,'\\\\"')+'"]');if(box)box.checked=true;}DIMS.forEach(d=>planUpdateBtn(d[0]));apply();showPage("page-plan");}
+const M365_STATUS_COLOR={"Concluído":"#5ed16a","A endereçar":"#ffb020","Planejado":"#7cd0ff","Em revisão":"#9aa7ff","Risco aceito":"#c9a7ff","Mitigação alternativa":"#f48fb1"};
+const M365_CAT_COLOR={"Identity":"#7cd0ff","Device":"#7ee2a8","Apps":"#c9a7ff","Data":"#ffd96b","Account":"#7cd0ff","Infrastructure":"#ff9f6b","—":"#9fb0c8"};
+const M365_BUCKET_COLOR={"Alcançado":"#5ed16a","Parcial":"#ffd96b","Oportunidade":"#ff6b6b"};
+const M365DIMS=[["status","Status"],["category","Categoria"],["product","Produto"],["bucket","Pontuação"],["license","Licença"]];
+function m365Val(it,dim){return dim==="license"?(it.licensed?"Licenciado":"Sem licença"):it[dim];}
+function m365Pie(segs,size){size=size||150;var nz=segs.filter(s=>s[1]>0);if(!nz.length)return "";var total=nz.reduce((a,s)=>a+s[1],0)||1;var cx=size/2,cy=size/2,r=size/2-1;if(nz.length===1)return '<svg viewBox="0 0 '+size+' '+size+'" width="'+size+'" height="'+size+'" class="pie"><circle cx="'+cx+'" cy="'+cy+'" r="'+r+'" fill="'+nz[0][2]+'"/></svg>';var ang=-90,p="";nz.forEach(s=>{var f=s[1]/total,a0=ang*Math.PI/180;ang+=f*360;var a1=ang*Math.PI/180,x0=cx+r*Math.cos(a0),y0=cy+r*Math.sin(a0),x1=cx+r*Math.cos(a1),y1=cy+r*Math.sin(a1),lg=f>0.5?1:0;p+='<path d="M'+cx+','+cy+' L'+x0.toFixed(2)+','+y0.toFixed(2)+' A'+r+','+r+' 0 '+lg+' 1 '+x1.toFixed(2)+','+y1.toFixed(2)+' Z" fill="'+s[2]+'"/>';});return '<svg viewBox="0 0 '+size+' '+size+'" width="'+size+'" height="'+size+'" class="pie">'+p+'</svg>';}
+function m365PieCard(title,segs){var nz=segs.filter(s=>s[1]);var lg=nz.map(s=>'<span><i class="dot" style="background:'+s[2]+'"></i>'+esc(s[0])+' · '+s[1]+'</span>').join("");return '<div class="piecard"><div class="pctitle">'+esc(title)+'</div>'+m365Pie(nz)+'<div class="legend">'+lg+'</div></div>';}
+function m365Uniq(dim){var set=new Set();DATA.m365.recs.forEach(it=>{var v=m365Val(it,dim);if(v&&v!=="—")set.add(v);});return [...set].sort();}
+function buildM365Filters(){var root=document.getElementById("m365frow");if(!root)return;root.className="m365slicers";M365DIMS.forEach(([dim,name])=>{var vals=m365Uniq(dim);if(!vals.length)return;var wrap=document.createElement("div");wrap.className="slicer";var opts=vals.map(v=>'<label><input type="checkbox" data-m365dim="'+dim+'" value="'+esc(v)+'">'+esc(v)+'</label>').join("");wrap.innerHTML='<button type="button" class="slicer-btn" data-dim="'+dim+'"><span class="cap">'+esc(name)+'</span><span class="valtxt">Todos</span><span class="car">▾</span></button><div class="slicer-pop"><button type="button" class="slicer-clear" data-dim="'+dim+'">Limpar</button>'+opts+'</div>';root.appendChild(wrap);});root.querySelectorAll(".slicer-btn").forEach(b=>b.addEventListener("click",function(e){e.stopPropagation();var pop=this.nextElementSibling;var op=pop.classList.contains("open");closeAllSlicers();if(!op)pop.classList.add("open");}));root.querySelectorAll(".slicer-pop").forEach(p=>p.addEventListener("click",e=>e.stopPropagation()));root.querySelectorAll('.slicer-pop input[data-m365dim]').forEach(cb=>cb.addEventListener("change",function(){m365UpdateBtn(this.getAttribute("data-m365dim"));applyM365();}));root.querySelectorAll(".slicer-clear").forEach(b=>b.addEventListener("click",function(){var dim=this.getAttribute("data-dim");this.parentNode.querySelectorAll('input[data-m365dim="'+dim+'"]').forEach(x=>x.checked=false);m365UpdateBtn(dim);applyM365();}));document.addEventListener("click",closeAllSlicers);}
+function closeAllSlicers(){document.querySelectorAll(".slicer-pop.open").forEach(p=>p.classList.remove("open"));}
+function m365UpdateBtn(dim){var btn=document.querySelector('#m365frow .slicer-btn[data-dim="'+dim+'"]');if(!btn)return;var s=m365SelDim(dim);btn.querySelector(".valtxt").textContent=!s.size?"Todos":(s.size===1?[...s][0]:s.size+" selecionados");btn.classList.toggle("on",s.size>0);}
+function m365SelDim(dim){return new Set([...document.querySelectorAll('input[data-m365dim="'+dim+'"]:checked')].map(c=>c.value));}
+function clearM365(){document.querySelectorAll("#m365frow input[type=checkbox]").forEach(c=>c.checked=false);M365DIMS.forEach(d=>m365UpdateBtn(d[0]));applyM365();}
+function applyM365(){if(!DATA.m365)return;var recs=DATA.m365.recs;M365DIMS.forEach(([dim])=>{var s=m365SelDim(dim);if(s.size)recs=recs.filter(it=>s.has(m365Val(it,dim)));});renderM365(recs);}
+function renderM365(recs){var d=DATA.m365;var done=recs.filter(x=>x.status==="Concluído").length;var miss=recs.reduce((a,x)=>a+x.missing,0);var nol=recs.filter(x=>!x.licensed).length;var kp=[["#9fb0c8",d.pct+"%","🏆 Secure Score"],["#7cd0ff",recs.length,"recomendações"],["#5ed16a",done,"✅ concluídas"],["#ffb020",recs.length-done,"🟠 a endereçar"],["#9ae6b4","+"+Math.round(miss),"🎯 pontos a ganhar"]];if(nol)kp.push(["#ff6b6b",nol,"⚠️ sem licença"]);document.getElementById("m365kpis").innerHTML=kp.map(a=>'<div class="kpi"><div class="n" style="color:'+a[0]+'">'+esc(a[1])+'</div><div class="l">'+esc(a[2])+'</div></div>').join("");var tal=function(fn){var m={};recs.forEach(x=>{var k=fn(x);m[k]=(m[k]||0)+1;});return m;};var st=tal(x=>x.status),ct=tal(x=>x.category),bk=tal(x=>x.bucket);var sS=Object.keys(st).sort((a,b)=>st[b]-st[a]).map(s=>[s,st[s],M365_STATUS_COLOR[s]||"#9fb0c8"]);var cS=Object.keys(ct).sort((a,b)=>ct[b]-ct[a]).map(c=>[c,ct[c],M365_CAT_COLOR[c]||"#9fb0c8"]);var bS=["Alcançado","Parcial","Oportunidade"].filter(b=>bk[b]).map(b=>[b,bk[b],M365_BUCKET_COLOR[b]]);var pies=m365PieCard("Status",sS)+m365PieCard("Categoria",cS)+m365PieCard("Pontuação",bS);if(recs.some(x=>!x.licensed))pies+=m365PieCard("Licença",[["Licenciado",recs.length-nol,"#5ed16a"],["Sem licença",nol,"#ff6b6b"]]);document.getElementById("m365pies").innerHTML=pies;var pr={};recs.forEach(x=>{var p=pr[x.product]||(pr[x.product]={c:0,t:0,cur:0,mx:0});if(x.status==="Concluído")p.c++;else p.t++;p.cur+=x.score;p.mx+=x.max;});var prows=Object.keys(pr).map(k=>({p:k,c:pr[k].c,t:pr[k].t,pct:pr[k].mx?Math.round(100*pr[k].cur/pr[k].mx):0})).sort((a,b)=>b.t-a.t||b.pct-a.pct).slice(0,15);document.getElementById("m365prod").innerHTML='<table><tr><th>Produto</th><th style="text-align:right">Concluídas</th><th style="text-align:right">A endereçar</th><th style="text-align:right">% atingido</th><th>&nbsp;</th></tr>'+prows.map(p=>'<tr><td>'+esc(p.p)+'</td><td style="text-align:right;color:#5ed16a;font-weight:700">'+p.c+'</td><td style="text-align:right;color:#ffb020;font-weight:700">'+p.t+'</td><td style="text-align:right">'+p.pct+'%</td><td><div class="bartrack" style="height:10px"><span class="seg" style="width:'+p.pct+'%;background:#52b788"></span></div></td></tr>').join("")+'</table>';var srt=recs.slice().sort((a,b)=>b.missing-a.missing||b.max-a.max);var tb=srt.filter(x=>x.max>0).slice(0,12);var mv=Math.max.apply(null,[1].concat(tb.map(x=>x.max)));document.getElementById("m365bars").innerHTML='<div class="bars">'+tb.map(x=>{var sw=100*x.score/mv,mw=100*x.missing/mv;return '<div class="barrow"><div class="barlbl" title="'+esc(x.name)+'">'+esc(x.name)+'</div><div class="bartrack"><span class="seg" style="width:'+sw.toFixed(1)+'%;background:#52b788"></span><span class="seg" style="width:'+mw.toFixed(1)+'%;background:var(--inset);border-left:1px solid var(--border)"></span></div><div class="barval">'+(+x.score)+'/'+(+x.max)+'</div></div>';}).join("")+'</div>';document.getElementById("m365table").innerHTML='<table><tr><th>Ação recomendada</th><th>Categoria</th><th>Produto</th><th>Status</th><th style="text-align:right">Pontuação</th><th style="text-align:right">Máx</th><th style="text-align:right">A ganhar</th><th>Referência</th></tr>'+srt.slice(0,30).map(x=>{var sc=M365_STATUS_COLOR[x.status]||"#9fb0c8";var rf=x.link?'<a href="'+esc(x.link)+'" target="_blank" style="color:var(--accent);white-space:nowrap">Portal ↗</a>':'<span class="meta">—</span>';return '<tr><td>'+esc(x.name)+'</td><td class="meta" style="white-space:nowrap">'+esc(x.category)+'</td><td class="meta" style="white-space:nowrap">'+esc(x.product)+'</td><td style="white-space:nowrap;color:'+sc+';font-weight:700">'+esc(x.status)+'</td><td style="text-align:right">'+(+x.score)+'</td><td style="text-align:right" class="meta">'+(+x.max)+'</td><td style="text-align:right;color:#9ae6b4;font-weight:700">+'+(+x.missing)+'</td><td>'+rf+'</td></tr>';}).join("")+'</table>';}
 (function(){var t="dark";try{t=localStorage.getItem("ai_theme")||"dark";}catch(e){}setTheme(t);})();
 buildFilters();apply();
+if(DATA.m365){buildM365Filters();applyM365();}
+if(DATA.mdc){buildMdcFilters();applyMdc();}
+if(DATA.mcsb){buildMcsbFilters();applyMcsb();}
 (function(){var h=(location.hash||"").replace("#","");showPage(h&&document.getElementById(h)?h:"home");})();
 """
 
@@ -1616,11 +1839,44 @@ def render_html(ctx, q):
             ],
         }
 
+    m365_ctx = ctx.get("m365")
+    m365_js = None
+    if m365_ctx and m365_ctx.get("dashboard"):
+        m365_js = {
+            "pct": m365_ctx["pct"],
+            "recs": [
+                {"name": x["name"], "category": x["category"], "product": x["product"],
+                 "status": x["status"], "bucket": x["bucket"], "score": x["score"],
+                 "max": x["max"], "missing": x["missing"], "licensed": bool(x["licensed"]),
+                 "link": x.get("link", "")}
+                for x in (m365_ctx.get("top") or [])
+            ],
+        }
+
+    mdc_ctx = ctx.get("mdc") or []
+    mdc_js = None
+    if mdc_ctx:
+        mdc_js = {
+            "ss": ctx.get("secure_score"), "ss_pot": ctx.get("secure_score_potential"),
+            "recs": [
+                {"title": it.get("title") or "—",
+                 "severity": str(it.get("priority", "—")).capitalize(),
+                 "category": it.get("category") or "—",
+                 "resource": it.get("resource_name") or "—",
+                 "link": it.get("portal_link") or it.get("rec_link") or "",
+                 "sub": it.get("subscription_id") or "",
+                 "rg": it.get("resource_group") or "—"}
+                for it in mdc_ctx
+            ],
+        }
+
     data = {
         "items": [slim(it) for it in ctx["items"]],
         "subs": ctx.get("subs", {}),
         "phases_meta": phases_meta,
         "mcsb": mcsb_js,
+        "m365": m365_js,
+        "mdc": mdc_js,
         "scope_label": ctx.get("scope_label", ""),
         "generated": ctx.get("generated", ""),
     }
@@ -1651,12 +1907,12 @@ def render_html(ctx, q):
 
     # ---- barra superior (sempre visível) ----
     nav_extra = "<button class=\"navbtn\" data-page=\"page-exec\" onclick=\"showPage('page-exec')\">📊 Resumo Executivo</button>"
+    if m365 and m365.get("dashboard"):
+        nav_extra += "<button class=\"navbtn\" data-page=\"page-m365\" onclick=\"showPage('page-m365')\">🏆 Microsoft Secure Score</button>"
     if n_adv:
         nav_extra += "<button class=\"navbtn\" data-page=\"page-plan\" onclick=\"gotoSource('Advisor')\">📘 Advisor</button>"
     if n_mdc:
         nav_extra += "<button class=\"navbtn\" data-page=\"page-mdc\" onclick=\"showPage('page-mdc')\">🛡️ Defender for Cloud</button>"
-    if xdr_total:
-        nav_extra += "<button class=\"navbtn\" data-page=\"page-xdr\" onclick=\"showPage('page-xdr')\">🛡️ Defender XDR</button>"
     if mcsb_pct is not None:
         nav_extra += "<button class=\"navbtn\" data-page=\"page-mcsb\" onclick=\"showPage('page-mcsb')\">📋 MCSB</button>"
     if devops_total:
@@ -1678,11 +1934,12 @@ def render_html(ctx, q):
     if m365:
         m_pie = _svg_pie([("Obtidos", m365['current'], "#5ed16a"),
                           ("Restantes", max(m365['max'] - m365['current'], 0), "#aeb8c7")])
+        m_click = "showPage('page-m365')" if m365.get('dashboard') else "showPage('page-exec')"
         score_cards += _score_card("🏆", "Microsoft Secure Score", f"{m365['pct']}%", "Entra ID + Microsoft 365",
             [("Pontos atuais", m365['current'], "var(--accent)"),
              ("Pontos máximos", m365['max'], "var(--muted)"),
              ("Controles avaliados", m365['controls'], "var(--muted)")],
-            "showPage('page-exec')", m_pie)
+            m_click, m_pie)
     if ss is not None:
         d_pie = _svg_pie([(s, mdc_by_sev.get(s, 0), _SEV_COLOR.get(s, '#9fb0c8')) for s in _SEVS])
         score_cards += _score_card("<img class='plogo' src='" + _DFC_LOGO_URI + "' alt=''>", "Defender for Cloud — Secure Score", f"{ss}%", "postura de nuvem",
@@ -1691,19 +1948,6 @@ def render_html(ctx, q):
              ("Recomendações", n_mdc, "var(--fg)"),
              ("Severidade alta", n_high_mdc, "#ff6b6b")],
             "showPage('page-mdc')", d_pie)
-    if xdr:
-        x_pie = _svg_pie([(g, v, c) for g, v, c in xdr['groups']])
-        if xdr.get('mode') == 'actions':
-            sub = "Recommended Actions · Microsoft Secure Score"
-            x_rows = [(g, v, "var(--fg)") for g, v, c in xdr['groups'][:3]]
-            x_rows.append(("Pontos de melhoria", xdr.get('points_total', 0), "#5ed16a"))
-        else:
-            sub = "recomendações · Vuln Mgmt / Exposure"
-            x_rows = [("Critical", xdr['by_severity'].get('Critical', 0), "#ff4d4d"),
-                      ("High", xdr['by_severity'].get('High', 0), "#ff6b6b"),
-                      ("Exploit público", xdr.get('exploit_total', 0), "#ff6b6b"),
-                      ("Máquinas expostas", xdr.get('exposed_total', 0), "#ffd96b")]
-        score_cards += _score_card("<img class='plogo' src='" + _XDR_LOGO_URI + "' alt=''>", "Defender XDR", xdr['total'], sub, x_rows, "showPage('page-xdr')", x_pie)
     if mcsb:
         c_pie = _svg_pie([("Passed", mcsb.get('passed', 0), "#5ed16a"),
                           ("Failed", mcsb.get('failed', 0), "#ff6b6b"),
@@ -1746,27 +1990,27 @@ def render_html(ctx, q):
         '<button class="btn back" onclick="goHome()">← Início</button>'
         + _render_mdc_section(ctx) + '</div>') if ctx.get("mdc") else ''
 
+    page_m365 = (
+        '<div id="page-m365" class="page" style="display:none">'
+        '<button class="btn back" onclick="goHome()">← Início</button>'
+        + _render_m365_section(ctx) + '</div>') if (m365 and m365.get("dashboard")) else ''
+
     filters = (
         '<div class="filters"><div class="ftop"><div class="meta">🔎 Filtros — marque para refinar; '
-        'vazio = tudo. Secure Score e MCSB recalculam pelo filtro de Subscription.</div>'
+        'vazio = tudo. O Secure Score recalcula pelo filtro de Subscription.</div>'
         '<button class="btn" onclick="clearAll()">Limpar filtros</button></div>'
         '<div class="frow" id="frow"></div></div>')
     devops_html = _render_devops_section(ctx.get("devops"))
-    xdr_html = _render_xdr_section(ctx.get("xdr"))
 
     page_plan = (
         '<div id="page-plan" class="page" style="display:none">'
         '<button class="btn back" onclick="goHome()">← Início</button>'
         '<h2>🧭 Plano de Remediação <span class="meta">· Advisor + Defender for Cloud · por fase de risco de aplicar</span></h2>'
         + filters + '<div id="plan"></div></div>')
-    page_xdr = (
-        '<div id="page-xdr" class="page" style="display:none">'
-        '<button class="btn back" onclick="goHome()">← Início</button>'
-        + xdr_html + '</div>') if xdr_html else ''
     page_mcsb = (
         '<div id="page-mcsb" class="page" style="display:none">'
         '<button class="btn back" onclick="goHome()">← Início</button>'
-        '<div id="mcsb"></div></div>')
+        + _render_mcsb_section(ctx) + '</div>') if ctx.get("mcsb") else ''
     page_devops = (
         '<div id="page-devops" class="page" style="display:none">'
         '<button class="btn back" onclick="goHome()">← Início</button>'
@@ -1777,7 +2021,7 @@ def render_html(ctx, q):
               '(não criticidade). Custos via Azure Retail Prices API · Compliance via MCSB '
               '(inspirado no <a href="https://github.com/microsoft/ESA" style="color:var(--accent)">microsoft/ESA</a>).</div>')
 
-    body = topbar + home + page_exec + page_mdc + page_plan + page_xdr + page_mcsb + page_devops + footer + '</div>'
+    body = topbar + home + page_exec + page_mdc + page_m365 + page_plan + page_mcsb + page_devops + footer + '</div>'
     script = '<script>const DATA=' + data_json + ';\n' + _REPORT_JS + '</script>'
     return head + body + script + '</body></html>'
 
@@ -1890,6 +2134,51 @@ def render_md(ctx, q):
 # =============================================================================
 # main
 # =============================================================================
+def _validate_links(ctx):
+    """Valida cobertura de links: TODA recomendação deve ter link clicável e, de preferência,
+    o deep link DIRETO da recomendação. Classifica direct/resource/generic/missing e imprime no stderr."""
+    generic = {_ADVISOR_PORTAL, _MDC_RECS_PORTAL, _M365_SECURESCORE_PORTAL}
+
+    def classify(link):
+        if not link:
+            return "missing"
+        if link in generic:
+            return "generic"
+        if "/#@/resource/" in link and link.endswith("/overview"):
+            return "resource"
+        return "direct"
+
+    def tally(links):
+        c = {"direct": 0, "resource": 0, "generic": 0, "missing": 0}
+        for l in links:
+            c[classify(l)] += 1
+        return c
+
+    sections = {
+        "Plano (Advisor+Defender)": [it.get("portal_link", "") for it in ctx.get("items", [])],
+        "Microsoft Secure Score": [x.get("link", "") for x in ((ctx.get("m365") or {}).get("top") or [])],
+        "MCSB": [fc.get("link", "") for fc in ((ctx.get("mcsb") or {}).get("failing_controls") or [])],
+    }
+    total = 0
+    missing = 0
+    sys.stderr.write("🔗 Validação de links (acesso rápido à recomendação):\n")
+    for name, links in sections.items():
+        if not links:
+            continue
+        c = tally(links)
+        n = len(links)
+        total += n
+        missing += c["missing"]
+        sys.stderr.write(f"   · {name}: {n} recs — {c['direct']} diretos · {c['resource']} recurso · "
+                         f"{c['generic']} genérico · {c['missing']} SEM LINK\n")
+    devops = (ctx.get("devops") or {}).get("total")
+    if devops:
+        sys.stderr.write(f"   · DevOps: {devops} findings — link sempre presente (portal ou aba Security do repo)\n")
+    status = "✅ todas as recomendações têm link" if missing == 0 else f"⚠️ {missing} recomendação(ões) SEM link"
+    sys.stderr.write(f"   {status} (total {total})\n")
+    return missing
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="advisor-impact — Advisor + Defender for Cloud remediation planner.")
     ap.add_argument("--from-json", dest="from_json")
@@ -1950,6 +2239,7 @@ def main(argv=None):
             json.dump(raw, f, ensure_ascii=False, indent=2)
 
     ctx = build_context(q, raw, params)
+    _validate_links(ctx)
     stamp = dt.datetime.now().strftime("%Y%m%d-%H%M")
     base = f"advisor-impact-{stamp}"
     if args.format in ("html", "both"):
