@@ -472,6 +472,20 @@ def _portal_resource_link(resource_id):
         return ""
     return f"https://portal.azure.com/#@/resource{rid}/overview"
 
+# Links de acesso rápido GARANTIDOS (oficiais) por origem — usados como fallback quando
+# não há deep link específico da recomendação nem resourceId. Garantem que TODA recomendação
+# tenha um link clicável.
+_ADVISOR_PORTAL = "https://aka.ms/azureadvisordashboard"
+_MDC_RECS_PORTAL = "https://portal.azure.com/#view/Microsoft_Azure_Security/SecurityMenuBlade/~/5"
+_M365_SECURESCORE_PORTAL = "https://security.microsoft.com/securescore"
+
+def _fallback_portal_link(source):
+    """Fallback oficial por origem (Advisor → Advisor dashboard; demais → Defender recommendations)."""
+    if "advisor" in (source or "").lower():
+        return _ADVISOR_PORTAL
+    return _MDC_RECS_PORTAL
+
+
 def build_resource_map(inventory):
     rmap = {}
     for r in as_list(inventory):
@@ -496,8 +510,10 @@ def _enrich(item, resource_id, risk, rmap, q, region="eastus2", sub_names=None):
         item["devops_provider"] = dp_provider
         item["devops_repo"] = dp_repo or "(org)"
     # Link oficial da recomendação (MDC fornece em links.azurePortal) tem prioridade;
-    # senão cai p/ deep link determinístico do recurso.
-    item["portal_link"] = item.get("rec_link") or _portal_resource_link(resource_id)
+    # senão cai p/ deep link determinístico do recurso; senão fallback oficial por origem
+    # (garante que TODA recomendação tenha link de acesso rápido).
+    item["portal_link"] = (item.get("rec_link") or _portal_resource_link(resource_id)
+                           or _fallback_portal_link(item.get("source")))
     loc = res.get("location") or region
     amps = []
     if resource_id and not res:
@@ -705,7 +721,7 @@ def parse_mcsb_compliance(standards_data, controls_data, std_name, preferred_nam
             "failed": int(cp.get("failedAssessments", 0) or 0),
             "passed": int(cp.get("passedAssessments", 0) or 0),
             "skipped": int(cp.get("skippedAssessments", 0) or 0),
-            "link": prop(cp, "links.azurePortal", "") or "",
+            "link": prop(cp, "links.azurePortal", "") or _MDC_RECS_PORTAL,
             "subscription_id": sub_id,
         })
     failing.sort(key=lambda x: x["failed"], reverse=True)
@@ -1383,7 +1399,7 @@ def analyze_m365_dashboard(m365_raw, profiles_raw):
             "name": title, "category": cat or "—", "product": product or "—",
             "score": round(cur, 1), "max": round(maxs, 1), "missing": round(max(maxs - cur, 0.0), 1),
             "status": status, "bucket": bucket, "licensed": (appl is not False),
-            "link": str(field(r, "actionUrl", "remediationUrl", "link") or ""),
+            "link": str(field(r, "actionUrl", "remediationUrl", "link") or "") or _M365_SECURESCORE_PORTAL,
         })
     if not recs:
         return base
@@ -2118,6 +2134,51 @@ def render_md(ctx, q):
 # =============================================================================
 # main
 # =============================================================================
+def _validate_links(ctx):
+    """Valida cobertura de links: TODA recomendação deve ter link clicável e, de preferência,
+    o deep link DIRETO da recomendação. Classifica direct/resource/generic/missing e imprime no stderr."""
+    generic = {_ADVISOR_PORTAL, _MDC_RECS_PORTAL, _M365_SECURESCORE_PORTAL}
+
+    def classify(link):
+        if not link:
+            return "missing"
+        if link in generic:
+            return "generic"
+        if "/#@/resource/" in link and link.endswith("/overview"):
+            return "resource"
+        return "direct"
+
+    def tally(links):
+        c = {"direct": 0, "resource": 0, "generic": 0, "missing": 0}
+        for l in links:
+            c[classify(l)] += 1
+        return c
+
+    sections = {
+        "Plano (Advisor+Defender)": [it.get("portal_link", "") for it in ctx.get("items", [])],
+        "Microsoft Secure Score": [x.get("link", "") for x in ((ctx.get("m365") or {}).get("top") or [])],
+        "MCSB": [fc.get("link", "") for fc in ((ctx.get("mcsb") or {}).get("failing_controls") or [])],
+    }
+    total = 0
+    missing = 0
+    sys.stderr.write("🔗 Validação de links (acesso rápido à recomendação):\n")
+    for name, links in sections.items():
+        if not links:
+            continue
+        c = tally(links)
+        n = len(links)
+        total += n
+        missing += c["missing"]
+        sys.stderr.write(f"   · {name}: {n} recs — {c['direct']} diretos · {c['resource']} recurso · "
+                         f"{c['generic']} genérico · {c['missing']} SEM LINK\n")
+    devops = (ctx.get("devops") or {}).get("total")
+    if devops:
+        sys.stderr.write(f"   · DevOps: {devops} findings — link sempre presente (portal ou aba Security do repo)\n")
+    status = "✅ todas as recomendações têm link" if missing == 0 else f"⚠️ {missing} recomendação(ões) SEM link"
+    sys.stderr.write(f"   {status} (total {total})\n")
+    return missing
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="advisor-impact — Advisor + Defender for Cloud remediation planner.")
     ap.add_argument("--from-json", dest="from_json")
@@ -2178,6 +2239,7 @@ def main(argv=None):
             json.dump(raw, f, ensure_ascii=False, indent=2)
 
     ctx = build_context(q, raw, params)
+    _validate_links(ctx)
     stamp = dt.datetime.now().strftime("%Y%m%d-%H%M")
     base = f"advisor-impact-{stamp}"
     if args.format in ("html", "both"):
