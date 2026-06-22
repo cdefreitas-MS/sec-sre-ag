@@ -364,9 +364,13 @@ Before executing any script resolved via the File Resolution cascade, the agent 
 4. Generate prioritized recommendations with drill-down skill references
 5. **Render the report immediately inline** — Dashboard Summary, Detailed Findings, Cross-Query Correlations, and 🎯 Recommended Actions
 6. **After the report is rendered**, append the `📂 Recommended Drill-Downs` section. Skip when all verdicts are ✅.
-7. **File output (only if explicitly requested):**
+7. **File output & delivery (only if explicitly requested):**
    - **Markdown:** Save the rendered report to `reports/threat-pulse/Threat_Pulse_<YYYYMMDD_HHMMSS>.md`
-   - **HTML:** First save as markdown (step above), then run: `python3 tmp/threat-pulse/generate_html_report.py "reports/threat-pulse/Threat_Pulse_<ts>.md" --output-dir reports/threat-pulse/`
+   - **HTML:** First save as markdown (step above), then run: `python3 <SKILL_DIR>/generate_html_report.py "reports/threat-pulse/Threat_Pulse_<ts>.md" --output-dir reports/threat-pulse/` (prints the HTML path).
+   - **Archive + notify** (on `"envia"`, `"email"`, `"arquiva"`, `"deliver"`): follow the [canonical delivery sequence](../../shared/sharepoint-archival.md#canonical-delivery-sequence-archive--link--notify) — archive to SharePoint **first**, capture the `webUrl`, then notify with the link:
+     1. `python shared/sharepoint_upload.py upload --site "<SOC siteId>" --skill threat-pulse --file reports/threat-pulse/Threat_Pulse_<ts>.html` (and the `.md`). Capture `webUrl` from stdout; skip/error → `webUrl=null`, continue.
+     2. **send-email-report** (dual recipients): subject `🛰️ Threat Pulse — <top verdict> (<date>)`. The Pulse HTML is compact (< 3 MB) → **attach the HTML and** add `🗄️ Arquivo (SharePoint): <webUrl>` when present.
+     3. **send-teams-notification**: Adaptive Card (top verdict + incident-backlog headline) + **Open report (SharePoint)** action → `webUrl` when present.
 
 ---
 
@@ -800,20 +804,22 @@ When the user explicitly requests an HTML report (`"genera HTML"`, `"export HTML
 1. **Save the inline report as markdown** to `reports/threat-pulse/Threat_Pulse_<YYYYMMDD_HHMMSS>.md`
 2. **Run the HTML generator:**
    ```bash
-   python3 tmp/threat-pulse/generate_html_report.py \
+   python3 <SKILL_DIR>/generate_html_report.py \
        "reports/threat-pulse/Threat_Pulse_<ts>.md" \
        --output-dir reports/threat-pulse/
    ```
-3. **Report the result** — provide the path to the generated HTML file and its size.
+3. **Report the result** — provide the path printed by the script and its size.
 
-The script reads the markdown report, parses sections (Executive Summary, Dashboard Summary, Detailed Findings, etc.) and tables, applies verdict badges (🔴🟠🟡✅🔵❓), and produces a self-contained dark-themed HTML file with:
-- Fixed header bar with risk level indicator
-- Verdict KPI cards (counts per verdict type)
-- Collapsible H3 subsections for drill-down details
-- Responsive table styling with portal link preservation
-- Print-friendly CSS
+The script is a **dependency-free markdown→HTML renderer** (Python stdlib only — no `markdown`/`jinja2`, so it runs in the constrained sandbox). It reads the saved markdown report and emits a self-contained dark-themed HTML file consistent with the SOC report suite, covering:
+- Gradient header bar (Threat Pulse · 8 domains · 14 queries · generation timestamp)
+- GFM pipe tables (Dashboard Summary, Detailed Findings) with verdict emoji preserved (🔴🟠🟡✅🔵❓)
+- Headings, ordered/unordered lists, blockquotes, fenced/inline code, links (portal URLs preserved), bold/italic, horizontal rules
 
 > ⚠️ The script must be resolved via the [File Resolution cascade](#file-resolution-coderefs-first--on-skill-activation) before use.
+
+### Archive + deliver (on request)
+
+To persist and distribute the report, follow the [canonical delivery sequence](../../shared/sharepoint-archival.md#canonical-delivery-sequence-archive--link--notify): **archive the HTML (+ MD) to SharePoint first** (`python shared/sharepoint_upload.py upload --site "<SOC siteId>" --skill threat-pulse --file <html>`), capture the `webUrl`, then `send-email-report` (attach HTML + link, < 3 MB) and `send-teams-notification` (**Open report** CTA → `webUrl`). Best-effort: a failed archive (`webUrl=null`) never blocks email/Teams.
 
 ---
 
