@@ -41,6 +41,15 @@ to recipients** (the archive is the canonical copy; email/Teams point at it):
 > browser (no download); the attachment (or, for link-only, the file in that folder) is the
 > report itself.
 
+> 🔴 **Link-target guardrail (email body link AND Teams `Abrir no SharePoint` action):**
+> the report link MUST be the SharePoint URL captured from `sharepoint_upload.py` **stdout**
+> (`folderUrl` / `webUrl`) — always a `https://<tenant>.sharepoint.com/...` address.
+> **NEVER** use any of these as the report link: a `teams.microsoft.com/l/message/...`
+> permalink, the posted-message link returned by the Workflows flow, the Power Automate
+> **webhook URL**, or `chat`/`channel` deep links. Those point back into Teams, not at the
+> report. If `folderUrl`/`webUrl` is `null`, omit the link entirely — do not substitute a
+> Teams link.
+
 ### Size-aware attach policy (email)
 
 | Report class | On-disk HTML | Attach? | Always include link? |
