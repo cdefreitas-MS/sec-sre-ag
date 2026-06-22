@@ -108,16 +108,18 @@ python3 <SKILL_DIR>/generate_html_report.py --from-json tmp/soc-executive-brief/
 ### Step 3 — Read the result
 The script prints `SOC Score N/100 (verdict) · Threat x · Identity y · MITRE z` and the **next action**, then writes HTML + MD.
 
-### Step 4 — Deliver (hand off, read-only)
-- **send-email-report**: subject `🛡️ SOC Executive Brief: {verdict} · {score}/100 ({date})`, attach the HTML.
-- **send-teams-notification**: Adaptive Card with SOC Score, verdict, the 3 panel sub-scores, and the next action.
+### Step 4 — Deliver (archive → link → notify, read-only)
+Follow the [canonical delivery sequence](../../shared/sharepoint-archival.md#canonical-delivery-sequence-archive--link--notify):
+- **SharePoint (first)**: `python shared/sharepoint_upload.py upload --site "<SOC siteId>" --skill soc-executive-brief --file <html>` (and the `.md`). Capture the `webUrl` from stdout; skip/error → `webUrl=null`, continue.
+- **send-email-report**: subject `🛡️ SOC Executive Brief: {verdict} · {score}/100 ({date})`. Small report (< 3 MB) → **attach the HTML and** add the link line `🗄️ Arquivo (SharePoint): <webUrl>` when present.
+- **send-teams-notification**: Adaptive Card with SOC Score, verdict, the 3 panel sub-scores, and the next action + **Open report (SharePoint)** action → `webUrl` when present.
 
 ### Step 5 — Chat summary
 ```
 🛡️ SOC EXECUTIVE BRIEF — {score}/100 · {🟢 FORTE | 🟡 MODERADA | 🔴 FRACA}
    🔥 Threat {t} · 🔐 Identity {i} · 🎯 MITRE {m}
    ▶ Próxima ação: {next_action}
-   📧 Email + 💬 Teams enviados
+   📧 Email + 💬 Teams + 🗄️ SharePoint
 ```
 
 ---

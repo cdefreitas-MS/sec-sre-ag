@@ -75,10 +75,11 @@ Ranking pela fórmula acima; veredito por CVE; postura geral (CRÍTICA/ELEVADA/C
 cards "Top ameaças" (tags 🔥 exploit / ⚠️ alerta ativo / 👑 crown jewel) +
 tabela de CVEs priorizadas + chips de alertas ativos por severidade.
 
-### Step 6 — Deliver (triple) + archive
-1. **send-email-report**: título "🎯 Threat ↔ Vulnerability Correlation — {date}", cor por postura, anexa HTML.
-2. **send-teams-notification**: Adaptive Card com postura + Top 3 ameaças (corrigir-agora primeiro).
-3. **SharePoint**: `python shared/sharepoint_upload.py upload --site "<SOC siteId>" --skill threat-correlation --file <html>` (e o `.md`).
+### Step 6 — Deliver (archive → link → notify)
+Segue a [sequência canônica de entrega](../../shared/sharepoint-archival.md#canonical-delivery-sequence-archive--link--notify):
+1. **SharePoint (primeiro)**: `python shared/sharepoint_upload.py upload --site "<SOC siteId>" --skill threat-correlation --file <html>` (e o `.md`). Captura o `webUrl` do stdout (`{"ok":true,"webUrl":…}`); se pular/falhar (exit 3/1) → `webUrl=null`, segue mesmo assim.
+2. **send-email-report**: título "🎯 Threat ↔ Vulnerability Correlation — {date}", cor por postura. HTML compacto (< 3 MB) → **anexa HTML + linha de link** `🗄️ Arquivo (SharePoint): <webUrl>` quando houver.
+3. **send-teams-notification**: Adaptive Card com postura + Top 3 ameaças (corrigir-agora primeiro) + ação **Open report (SharePoint)** → `webUrl` quando houver.
 
 ### Step 7 — Chat summary
 ```
@@ -119,6 +120,6 @@ python generate_html_report.py --no-mdti          # pular Tier 2 explicitamente
 - ✅ **READ-ONLY**. Recomenda, nunca remedia.
 - ✅ **SEMPRE** ranqueia por exposição × CVSS × exploit × **alerta ativo** × ativo crítico — ameaça ativa em ativo vulnerável vence CVSS cru.
 - ✅ **SEMPRE** degrada gracioso sem MDTI premium (Tier 1 é o motor real).
-- ✅ **SEMPRE** entrega tripla (email + Teams) + arquiva no SharePoint (HTML grande → Graph chunked via `shared/sharepoint_upload.py`).
+- ✅ **SEMPRE** arquiva no SharePoint **primeiro** (HTML grande → Graph chunked via `shared/sharepoint_upload.py`), captura o `webUrl` e o inclui no email + Teams; entrega tripla (email + Teams + link SharePoint).
 - ⛔ **NUNCA** deixa token em disco — `rm -f` após uso.
 - ⛔ **NUNCA** tenta operações git.

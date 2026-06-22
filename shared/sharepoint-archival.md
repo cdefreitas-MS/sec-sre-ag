@@ -15,6 +15,43 @@ SOC (site) › Documents › SOC Reports/
 > semantic search (curated runbooks/summaries). SharePoint is the *historical archive* of
 > point-in-time reports. Don't dump every report into Knowledge — it pollutes retrieval.
 
+## Canonical delivery sequence (archive → link → notify)
+
+🔴 **All report-producing skills MUST follow this order so the SharePoint link is surfaced
+to recipients** (the archive is the canonical copy; email/Teams point at it):
+
+1. **Archive FIRST — SharePoint.** After the renderer writes the HTML (+ MD), upload them
+   with `shared/sharepoint_upload.py` (see [wiring](#graph-util--wiring)). The CLI prints
+   `{"ok": true, "webUrl": "<link>"}` to **stdout** on success → **capture that `webUrl`**.
+   - Best-effort: on exit code `3` (no `--site`) or `1` (error) there is **no `webUrl`** →
+     set `webUrl = null`, omit the link line, and **continue** (never block email/Teams).
+2. **Email — `send-email-report`.** Apply the **size-aware attach policy** below, and when
+   `webUrl` is present add a link line to the body:
+   `🗄️ Arquivo (SharePoint): <webUrl>`.
+3. **Teams — `send-teams-notification`.** When `webUrl` is present, add an **`Open report`
+   (SharePoint)** action/CTA pointing at `webUrl` (in addition to any portal CTA).
+
+### Size-aware attach policy (email)
+
+| Report class | On-disk HTML | Attach? | Always include link? |
+|--------------|--------------|---------|----------------------|
+| **Small** (Pulse MD, soc-executive-brief, sentinel-documenter) | < 3 MB | ✅ Attach HTML **and** link | ✅ |
+| **Large / self-contained** (advisor-impact — embedded base64 ~3 MB) | ≥ 3 MB | ⛔ **Link-only** (no attachment) | ✅ |
+| **Sensitive** (incident-level PII/entity detail, e.g. incident-triage) | any size | ⛔ **Link-only** (data minimization) | ✅ |
+
+**Rules:**
+- The **SharePoint link is always the canonical reference** — include it whenever `webUrl`
+  is present, in **both** email body and Teams card.
+- **Attach the HTML only** when the file is **< 3 MB** *and* the report is **not** classified
+  Sensitive. A large self-contained HTML (advisor-impact) routinely exceeds the connector
+  attachment limit and bloats mailboxes → **link-only by classification**.
+- A full SOC report emailed as an attachment can be freely forwarded; a SharePoint link
+  respects site ACLs and leaves an access trail → **link-only is the safer default for
+  Sensitive reports.**
+- If `webUrl` is `null` (archive skipped/failed) **and** the report is link-only class,
+  fall back to attaching the HTML if it is < 3 MB; otherwise note in the body that the
+  report is available on disk and state why the archive was skipped. Never silently drop it.
+
 ## Two upload paths
 
 | Path | Use for | Why |
