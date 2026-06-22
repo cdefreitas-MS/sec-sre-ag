@@ -111,7 +111,7 @@ It locates `shared/` by walking up from its own directory. If a utility is absen
 ## Output & Delivery
 
 - HTML (dark, email-ready) + Markdown (repo). Subject prefix `[SOC Triage]`.
-- Follow the [canonical delivery sequence](../../shared/sharepoint-archival.md#canonical-delivery-sequence-archive--link--notify): **archive to SharePoint first** (`python shared/sharepoint_upload.py upload --site "<SOC siteId>" --skill incident-triage --file <html>` + `.md`; capture `webUrl`), then `send-email-report` (dual recipients) + `send-teams-notification`.
+- Follow the [canonical delivery sequence](../../shared/sharepoint-archival.md#canonical-delivery-sequence-archive--link--notify): **archive to SharePoint first** (`python shared/sharepoint_upload.py upload --site "<config: sharepoint.site_id>" --skill incident-triage --file <html>` + `.md`; capture `webUrl`), then `send-email-report` (dual recipients) + `send-teams-notification`.
 - **Sensitive → link-only:** incident triage carries incident-level entity/PII detail → **do not attach the HTML**; put the SharePoint link in the email body (`🗄️ Relatório (SharePoint): <webUrl>`) and an **Open report** CTA in the Teams card. (Data minimization: a link respects site ACLs; an attachment can be forwarded freely.)
 
 ## Rules

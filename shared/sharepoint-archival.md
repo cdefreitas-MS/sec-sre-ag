@@ -72,22 +72,44 @@ python shared/sharepoint_upload.py upload --site "<SOC-siteId>" --skill advisor-
 python shared/sharepoint_upload.py upload --site "<SOC-siteId>" --skill advisor-impact --file report.md
 ```
 
-- `--site` accepts a Graph `siteId` (`host,guid,guid`) **or** a `host:/sites/SOC` path.
-- Auth (first available): `--token` · `--token-file` · env `GRAPH_TOKEN` · ManagedIdentityCredential (UAMI).
+- `--site` accepts a Graph `siteId` (`host,guid,guid`) **or** a `host:/sites/SOC` path. **Its value is read from `config.json` → `sharepoint.site_id`** (see [Site id from config.json](#site-id-from-configjson)); if absent, the script is called **without** `--site` and exits `3` (skipped, best-effort).
+- Auth (first available): `--token` · `--token-file` · env `GRAPH_TOKEN` · `ManagedIdentityCredential` → the agent's **system-assigned MI** (the *archiver* identity that holds `Sites.Selected` + site write — NOT the UAMI used for the security Graph calls).
 - `--dry-run` prints the intended path/method with no token/network (offline test).
 - Exit codes: `0` ok · `3` skipped (no `--site`, best-effort) · `1` error (log + continue delivery).
 - Parent folders (`<skill>/<YYYY>/<MM>`) are created automatically by Graph path-addressing.
 
+### Site id from config.json
+
+The `--site` value comes from the runtime `config.json` so it is set once, not hardcoded per skill:
+
+```json
+"sharepoint": {
+  "site_id": "<host,siteGuid,webGuid>   OR   <host>:/sites/SOC",
+  "container": "SOC Reports"
+}
+```
+
+Discover the `site_id` once (admin, read-only):
+
+```http
+GET https://graph.microsoft.com/v1.0/sites/{tenant}.sharepoint.com:/sites/SOC   # → .id
+```
+
+If `sharepoint.site_id` is absent the archive step is skipped (exit `3`) and delivery proceeds with the attachment only — never blocked.
+
 ### Least privilege (one-time admin)
 
-The UAMI needs Graph **`Sites.Selected`** with `write` granted **only on the SOC site** —
-not `Sites.ReadWrite.All` / `Sites.FullControl.All`.
+The **archiver identity** — the agent's **system-assigned managed identity** ("SRE Agent SP"),
+which is what `ManagedIdentityCredential()` resolves to — needs Graph **`Sites.Selected`** with
+`write` granted **only on the SOC site** (not `Sites.ReadWrite.All` / `Sites.FullControl.All`).
+The UAMI that runs the security Graph calls is a *different* identity and intentionally does
+**not** hold this grant (it has `Sites.Read.All` only).
 
 ```http
 GET  https://graph.microsoft.com/v1.0/sites/{tenant}.sharepoint.com:/sites/SOC      # → siteId
 POST https://graph.microsoft.com/v1.0/sites/{SOC-siteId}/permissions
 { "roles": ["write"],
-  "grantedToIdentities": [{ "application": { "id": "<UAMI-app-id>", "displayName": "SRE Agent UAMI" } }] }
+  "grantedToIdentities": [{ "application": { "id": "<archiver-MI-app-id>", "displayName": "SRE Agent SP" } }] }
 ```
 
 ## Connector tool policy (for scheduled / autonomous runs)
