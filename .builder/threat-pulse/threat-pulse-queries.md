@@ -9,8 +9,9 @@
 |------|---------|----------------|-------|
 | **Tier 1 — Direct LA** | Q1, Q2, Q3, Q4, Q5, Q6, Q7, Q8, Q9, Q10 | `monitor-client_monitor_workspace_log_query` (Azure Monitor MCP) | Execute directly, present results |
 | **Tier 2 — AH Copy/Paste** | Q11, Q12 | User copies query to Advanced Hunting portal | Tables only available in AH (ExposureGraphNodes, DeviceTvm*) |
+| **Tier 3 — Graph REST** | Q13 | `RunAzCliReadCommands` → `az rest` GET `security/alerts_v2` (MCAS/MDI/IRM). If unavailable/403 → ❓ No Data | Microsoft Graph (connector-independent) |
 
-**Parallelization:** Run all Tier 1 queries in parallel (no dependencies). Present Tier 2 queries to the user simultaneously.
+**Parallelization:** Run all Tier 1 queries in parallel (no dependencies). Present Tier 2 queries to the user simultaneously. Q13 (Graph) runs in parallel with Tier 1.
 
 ---
 
@@ -714,6 +715,69 @@ IdentityInfo
 | summarize arg_max(TimeGenerated, AccountObjectId, AccountDisplayName) by AccountUpn
 | project AccountUpn, AccountObjectId, AccountDisplayName
 ```
+
+---
+
+## Query 13: M365 Defender/Purview Alert Coverage (MCAS · MDI · IRM)
+
+**Execution:** Tier 3 — Graph REST via `RunAzCliReadCommands` (`az rest`)
+**Source:** Microsoft Graph `security/alerts_v2` (NOT Log Analytics — connector-independent)
+**Permission:** `SecurityAlert.Read.All` (granted to the UAMI)
+
+> **Why Graph, not KQL:** MCAS/MDI/IRM alerts only land in the LA `SecurityAlert` table if each
+> product's Sentinel connector is streaming. `security/alerts_v2` returns them directly from the
+> unified alerts API regardless of connector state — so MDI and IRM are covered even when not wired
+> into Sentinel. This is the ONE Graph-sourced query in the Pulse; everything else stays KQL/LA.
+
+**Call (ONE request per `serviceSource` — do NOT combine; do NOT use `$orderby`):**
+```bash
+# Repeat for each product value below. Keep them SEPARATE so one product's failure
+# (e.g. IRM 400 in a tenant without Purview IRM) does not break the others.
+az rest --method GET --url "https://graph.microsoft.com/v1.0/security/alerts_v2?\$top=100&\$filter=serviceSource eq 'microsoftDefenderForCloudApps'" --headers "Content-Type=application/json"
+az rest --method GET --url "https://graph.microsoft.com/v1.0/security/alerts_v2?\$top=100&\$filter=serviceSource eq 'microsoftDefenderForIdentity'" --headers "Content-Type=application/json"
+az rest --method GET --url "https://graph.microsoft.com/v1.0/security/alerts_v2?\$top=100&\$filter=serviceSource eq 'microsoftPurviewInsiderRiskManagement'" --headers "Content-Type=application/json"
+```
+
+> **⚠️ Validated live 2026-06-22 — two hard rules learned the hard way:**
+> 1. **NEVER add `$orderby=createdDateTime desc`** to `alerts_v2` — it makes the call hang past the
+>    300s client timeout. Sort by `createdDateTime` **client-side** in post-processing instead.
+> 2. **NEVER combine the three `serviceSource` values with `or`** — `microsoftPurviewInsiderRiskManagement`
+>    returns **400 BadRequest** in tenants without Purview Insider Risk, which kills the whole combined
+>    call (taking MCAS+MDI down with it). One call per product isolates the failure.
+>
+> **Shell-escaping:** URL in double quotes, escape each OData `$` as `\$`, keep the `serviceSource`
+> value in single quotes (literal inside the double-quoted URL — same pattern as the MDE Device ID
+> lookup below).
+
+**Post-processing (the response is JSON `value[]`, not a table):**
+1. Merge the `value[]` arrays from the 3 calls. Keep only ACTIVE alerts → drop `status == "resolved"`.
+   Sort by `createdDateTime` **descending client-side** (since `$orderby` is forbidden — see above).
+2. Group by `serviceSource` → product label: `microsoftDefenderForCloudApps`=☁️ Cloud Apps,
+   `microsoftDefenderForIdentity`=🪪 Identity, `microsoftPurviewInsiderRiskManagement`=🕵️ Insider Risk.
+3. Per product: count active + breakdown by `severity` (high/medium/low/informational) + top 3 `title`.
+4. Aggregate `mitreTechniques[]` across all → top techniques. Each alert carries `alertWebUrl`
+   (portal deep link) and `category`.
+
+**Fields per alert:** `id`, `title`, `severity`, `status`, `category`, `createdDateTime`,
+`serviceSource`, `mitreTechniques[]`, `alertWebUrl`, `description`.
+
+**Purpose:** Cross-product active-alert coverage for the three Defender/Purview products the other
+domains don't surface as product alerts (Q9 is MCAS *events* via `CloudAppEvents`; Q3 is Identity
+Protection). Answers *"which products are actively alerting right now?"* — SaaS anomalies / impossible
+travel / mass download (MCAS), on-prem AD lateral movement / credential theft (MDI), data
+exfiltration / departing-employee risk (IRM).
+
+**Verdict logic:**
+- 🔴 Escalate: any active **high/critical** in **MDI** or **IRM** (lateral movement / exfiltration), OR 3+ high/critical across the three products.
+- 🟠 Investigate: any active high/critical in MCAS, OR ≥1 active IRM alert (exfil signal is always relevant), OR ≥1 high active in any product.
+- 🟡 Monitor: only medium/low active alerts.
+- ✅ Clear: call SUCCEEDED and returned 0 active alerts across all three products.
+- ❓ No Data: `RunAzCliReadCommands` unavailable, or 403 (missing `SecurityAlert.Read.All`), or the call failed. A **per-product 400 BadRequest** (e.g. IRM in a tenant without Purview Insider Risk) marks **that product** as ❓ not-available but does NOT fail MCAS/MDI. (A successful call returning 0 rows = covered-and-clear → ✅, not ❓.)
+
+**Drill-down routing:**
+- MCAS compromised user / impossible travel → `user-investigation` (`Investigate <UPN>`).
+- MDI lateral movement / credential theft → `computer-investigation` / `user-investigation`.
+- IRM data exfiltration → `user-investigation` (`Investigate <UPN> — insider data exfiltration`).
 
 ---
 
