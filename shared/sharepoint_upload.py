@@ -214,7 +214,14 @@ def main(argv=None):
         print(f"   → {out['method'].upper()} upload de {out['size']} bytes em "
               f"{out['item_path']}", file=sys.stderr)
     else:
-        print(json.dumps({"ok": True, "webUrl": out}, ensure_ascii=False))
+        # folderUrl = parent library folder (opens in browser; a file webUrl forces an
+        # .html download in SharePoint). Email/Teams link at the folder when the report is
+        # attached, so clicking it opens SharePoint instead of re-downloading the HTML.
+        folder_url = (out.rsplit("/", 1)[0]
+                      if isinstance(out, str) and out.startswith("http") and "/" in out
+                      else None)
+        print(json.dumps({"ok": True, "webUrl": out, "folderUrl": folder_url},
+                         ensure_ascii=False))
     return 0
 
 

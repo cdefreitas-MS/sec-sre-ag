@@ -368,9 +368,9 @@ Before executing any script resolved via the File Resolution cascade, the agent 
    - **Markdown:** Save the rendered report to `reports/threat-pulse/Threat_Pulse_<YYYYMMDD_HHMMSS>.md`
    - **HTML:** First save as markdown (step above), then run: `python3 <SKILL_DIR>/generate_html_report.py "reports/threat-pulse/Threat_Pulse_<ts>.md" --output-dir reports/threat-pulse/` (prints the HTML path).
    - **Archive + notify** (on `"envia"`, `"email"`, `"arquiva"`, `"deliver"`): follow the [canonical delivery sequence](../../shared/sharepoint-archival.md#canonical-delivery-sequence-archive--link--notify) — archive to SharePoint **first**, capture the `webUrl`, then notify with the link:
-     1. `python shared/sharepoint_upload.py upload --site "<config: sharepoint.site_id>" --skill threat-pulse --file reports/threat-pulse/Threat_Pulse_<ts>.html` (and the `.md`). Capture `webUrl` from stdout; skip/error → `webUrl=null`, continue.
-     2. **send-email-report** (dual recipients): subject `🛰️ Threat Pulse — <top verdict> (<date>)`. The Pulse HTML is compact (< 3 MB) → **attach the HTML and** add `🗄️ Arquivo (SharePoint): <webUrl>` when present.
-     3. **send-teams-notification**: Adaptive Card (top verdict + incident-backlog headline) + **Open report (SharePoint)** action → `webUrl` when present.
+     1. `python shared/sharepoint_upload.py upload --site "<config: sharepoint.site_id>" --skill threat-pulse --file reports/threat-pulse/Threat_Pulse_<ts>.html` (and the `.md`). Capture `webUrl` + `folderUrl` from stdout; skip/error → `webUrl=null`, continue.
+     2. **send-email-report** (dual recipients): subject `🛰️ Threat Pulse — <top verdict> (<date>)`. The Pulse HTML is compact (< 3 MB) → **attach the HTML**; since the attachment is the read copy, the body link should **open SharePoint (no download)** → `📂 Abrir no SharePoint: <folderUrl>` when present. ⚠️ Do **not** link the file `webUrl` — `.html` forces a download.
+     3. **send-teams-notification**: Adaptive Card (top verdict + incident-backlog headline) + **Abrir no SharePoint** action → `folderUrl` when present.
 
 ---
 
@@ -819,7 +819,7 @@ The script is a **dependency-free markdown→HTML renderer** (Python stdlib only
 
 ### Archive + deliver (on request)
 
-To persist and distribute the report, follow the [canonical delivery sequence](../../shared/sharepoint-archival.md#canonical-delivery-sequence-archive--link--notify): **archive the HTML (+ MD) to SharePoint first** (`python shared/sharepoint_upload.py upload --site "<config: sharepoint.site_id>" --skill threat-pulse --file <html>`), capture the `webUrl`, then `send-email-report` (attach HTML + link, < 3 MB) and `send-teams-notification` (**Open report** CTA → `webUrl`). Best-effort: a failed archive (`webUrl=null`) never blocks email/Teams.
+To persist and distribute the report, follow the [canonical delivery sequence](../../shared/sharepoint-archival.md#canonical-delivery-sequence-archive--link--notify): **archive the HTML (+ MD) to SharePoint first** (`python shared/sharepoint_upload.py upload --site "<config: sharepoint.site_id>" --skill threat-pulse --file <html>`), capture the `webUrl` + `folderUrl`, then `send-email-report` (attach HTML + `📂 Abrir no SharePoint: folderUrl` link, < 3 MB) and `send-teams-notification` (**Abrir no SharePoint** CTA → `folderUrl`). Best-effort: a failed archive (`webUrl=null`) never blocks email/Teams.
 
 ---
 

@@ -77,9 +77,9 @@ tabela de CVEs priorizadas + chips de alertas ativos por severidade.
 
 ### Step 6 — Deliver (archive → link → notify)
 Segue a [sequência canônica de entrega](../../shared/sharepoint-archival.md#canonical-delivery-sequence-archive--link--notify):
-1. **SharePoint (primeiro)**: `python shared/sharepoint_upload.py upload --site "<config: sharepoint.site_id>" --skill threat-correlation --file <html>` (e o `.md`). Captura o `webUrl` do stdout (`{"ok":true,"webUrl":…}`); se pular/falhar (exit 3/1) → `webUrl=null`, segue mesmo assim.
-2. **send-email-report**: título "🎯 Threat ↔ Vulnerability Correlation — {date}", cor por postura. HTML compacto (< 3 MB) → **anexa HTML + linha de link** `🗄️ Arquivo (SharePoint): <webUrl>` quando houver.
-3. **send-teams-notification**: Adaptive Card com postura + Top 3 ameaças (corrigir-agora primeiro) + ação **Open report (SharePoint)** → `webUrl` quando houver.
+1. **SharePoint (primeiro)**: `python shared/sharepoint_upload.py upload --site "<config: sharepoint.site_id>" --skill threat-correlation --file <html>` (e o `.md`). Captura o `webUrl` + `folderUrl` do stdout; se pular/falhar (exit 3/1) → `webUrl=null`, segue mesmo assim.
+2. **send-email-report**: título "🎯 Threat ↔ Vulnerability Correlation — {date}", cor por postura. HTML compacto (< 3 MB) → **anexa HTML** + linha de link `📂 Abrir no SharePoint: <folderUrl>` quando houver (abre a biblioteca; NÃO linkar o arquivo `webUrl` — `.html` baixa).
+3. **send-teams-notification**: Adaptive Card com postura + Top 3 ameaças (corrigir-agora primeiro) + ação **Abrir no SharePoint** → `folderUrl` quando houver.
 
 ### Step 7 — Chat summary
 ```
