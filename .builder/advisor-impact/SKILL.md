@@ -229,7 +229,7 @@ The script applies a **43-pattern risk baseline** from `queries.yaml`:
 This skill produces **HTML + MD artifacts**. Deliver them via the existing delivery skills (do **not** re-implement transport), following the [canonical delivery sequence](../../shared/sharepoint-archival.md#canonical-delivery-sequence-archive--link--notify):
 
 **Archive FIRST — SharePoint (canonical copy):**
-- `python shared/sharepoint_upload.py upload --site "<SOC siteId>" --skill advisor-impact --file advisor-impact-<ts>.html` (and the `.md`). Capture the `webUrl` from stdout (`{"ok":true,"webUrl":…}`); on skip/error (exit 3/1) → `webUrl=null`, continue.
+- `python shared/sharepoint_upload.py upload --site "<config: sharepoint.site_id>" --skill advisor-impact --file advisor-impact-<ts>.html` (and the `.md`). Capture the `webUrl` from stdout (`{"ok":true,"webUrl":…}`); on skip/error (exit 3/1) → `webUrl=null`, continue.
 
 **Email (dual recipients) — via `send-email-report`:**
 - Recipients: send to **both** `default_recipients` from `config.json` (e.g. `admin@<tenant>.onmicrosoft.com` **and** `caiofreitas@microsoft.com`) in a single `toRecipients` list. ⚠️ Known regression: don't drop to a single recipient.

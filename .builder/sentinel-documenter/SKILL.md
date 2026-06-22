@@ -151,7 +151,7 @@ The script prints `Documenter Score N/100 (verdict) · C/W/I · k não avaliados
 
 ### Step 4 — Deliver (archive → link → notify, read-only)
 Follow the [canonical delivery sequence](../../shared/sharepoint-archival.md#canonical-delivery-sequence-archive--link--notify):
-- **SharePoint (first)**: `python shared/sharepoint_upload.py upload --site "<SOC siteId>" --skill sentinel-documenter --file <html>` (and the `.md`). Capture the `webUrl`; skip/error → `webUrl=null`, continue.
+- **SharePoint (first)**: `python shared/sharepoint_upload.py upload --site "<config: sharepoint.site_id>" --skill sentinel-documenter --file <html>` (and the `.md`). Capture the `webUrl`; skip/error → `webUrl=null`, continue.
 - **send-email-report**: subject "🛡️ Sentinel Documenter: {verdict} · score {n}/100 ({date})". Small report (< 3 MB) → **attach the HTML and** add `🗄️ Arquivo (SharePoint): <webUrl>` when present.
 - **send-teams-notification**: Adaptive Card with score, verdict, #Critical/#Warning, weakest category + **Open report (SharePoint)** → `webUrl` when present.
 
