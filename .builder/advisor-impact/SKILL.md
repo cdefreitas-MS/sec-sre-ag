@@ -224,19 +224,22 @@ The script applies a **43-pattern risk baseline** from `queries.yaml`:
 - **Savings:** extracts `savingsAmount`/`annualSavingsAmount` from Advisor (Cost) and totals USD/year.
 - **Implementation cost:** for recommendations matching a cost-increase pattern (geo-replication, private endpoint, NAT gateway, firewall, DDoS, WAF, Log Analytics…), queries the **Azure Retail Prices API** (public) and estimates USD/month, with fixed fallbacks if the meter isn't returned.
 
-### Step 6 — Delivery (triple delivery: dual email + Teams)
+### Step 6 — Delivery (archive → link → notify)
 
-This skill produces **HTML + MD artifacts**. To deliver them, reuse the existing delivery skills (do **not** re-implement transport):
+This skill produces **HTML + MD artifacts**. Deliver them via the existing delivery skills (do **not** re-implement transport), following the [canonical delivery sequence](../../shared/sharepoint-archival.md#canonical-delivery-sequence-archive--link--notify):
+
+**Archive FIRST — SharePoint (canonical copy):**
+- `python shared/sharepoint_upload.py upload --site "<SOC siteId>" --skill advisor-impact --file advisor-impact-<ts>.html` (and the `.md`). Capture the `webUrl` from stdout (`{"ok":true,"webUrl":…}`); on skip/error (exit 3/1) → `webUrl=null`, continue.
 
 **Email (dual recipients) — via `send-email-report`:**
 - Recipients: send to **both** `default_recipients` from `config.json` (e.g. `admin@<tenant>.onmicrosoft.com` **and** `caiofreitas@microsoft.com`) in a single `toRecipients` list. ⚠️ Known regression: don't drop to a single recipient.
 - Subject: `"🧭 Plano de Remediação — Advisor + Defender for Cloud — <scope> (<date>)"` where `<scope>` = `tenant` / `N subscriptions` / `RG <name>`.
-- Attachment: the generated **HTML** file (`advisor-impact-<ts>.html`).
+- **Link-only (no attachment):** advisor-impact's self-contained HTML (embedded base64, ~3 MB) is **link-only by classification** — do **not** attach it. Put the SharePoint link in the body: `🗄️ Relatório (SharePoint): <webUrl>`. (Fallback only if `webUrl=null` **and** the file is < 3 MB: attach it.)
 - Body (tenant-wide): KPI line — `recommendations | 🟢 quick wins | 🟡🟠 window | 🔴 approval | 🛡️ SS current→potential | 🛡️ MCSB % | 💰 impl. cost`. Use the same numbers printed by the script.
 
 **Teams Adaptive Card — via `send-teams-notification`:**
 - Badge: `🟢 N quick wins · 🔴 M high-risk · 🛡️ SS X%→Y% · MCSB Z%` across `<scope>`.
-- CTA: link to Azure Portal → Defender for Cloud → Recommendations.
+- CTA: **Open report (SharePoint)** → `webUrl` (when present), plus a link to Azure Portal → Defender for Cloud → Recommendations.
 - The Power Automate webhook URL comes from `config.json` (hardening pending: move to Key Vault).
 
 **Agent prompt pattern (tenant-wide + triple delivery):**

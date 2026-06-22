@@ -149,9 +149,11 @@ python3 <SKILL_DIR>/generate_html_report.py --from-json tmp/sentinel-documenter/
 ### Step 3 — Read the result
 The script prints `Documenter Score N/100 (verdict) · C/W/I · k não avaliados` and writes the HTML + MD. Read the MD for the findings/cost to summarize.
 
-### Step 4 — Deliver (hand off, read-only)
-- **send-email-report**: subject "🛡️ Sentinel Documenter: {verdict} · score {n}/100 ({date})", attach the HTML.
-- **send-teams-notification**: Adaptive Card with score, verdict, #Critical/#Warning, weakest category.
+### Step 4 — Deliver (archive → link → notify, read-only)
+Follow the [canonical delivery sequence](../../shared/sharepoint-archival.md#canonical-delivery-sequence-archive--link--notify):
+- **SharePoint (first)**: `python shared/sharepoint_upload.py upload --site "<SOC siteId>" --skill sentinel-documenter --file <html>` (and the `.md`). Capture the `webUrl`; skip/error → `webUrl=null`, continue.
+- **send-email-report**: subject "🛡️ Sentinel Documenter: {verdict} · score {n}/100 ({date})". Small report (< 3 MB) → **attach the HTML and** add `🗄️ Arquivo (SharePoint): <webUrl>` when present.
+- **send-teams-notification**: Adaptive Card with score, verdict, #Critical/#Warning, weakest category + **Open report (SharePoint)** → `webUrl` when present.
 
 ### Step 5 — Chat summary
 ```
