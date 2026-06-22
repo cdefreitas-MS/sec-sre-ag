@@ -9,7 +9,7 @@
 |------|---------|----------------|-------|
 | **Tier 1 — Direct LA** | Q1, Q2, Q3, Q4, Q5, Q6, Q7, Q8, Q9, Q10 | `monitor-client_monitor_workspace_log_query` (Azure Monitor MCP) | Execute directly, present results |
 | **Tier 2 — AH Copy/Paste** | Q11, Q12 | User copies query to Advanced Hunting portal | Tables only available in AH (ExposureGraphNodes, DeviceTvm*) |
-| **Tier 3 — Graph REST** | Q13 | `RunAzCliReadCommands` → `az rest` GET `security/alerts_v2` (MCAS/MDI/IRM). If unavailable/403 → ❓ No Data | Microsoft Graph (connector-independent) |
+| **Tier 3 — Graph REST** | Q13, Q14 | `RunAzCliReadCommands` → `az rest` GET `security/alerts_v2` (Q13) + `security/identities/healthIssues` (Q14). If unavailable/403 → ❓ No Data | Microsoft Graph (connector-independent) |
 
 **Parallelization:** Run all Tier 1 queries in parallel (no dependencies). Present Tier 2 queries to the user simultaneously. Q13 (Graph) runs in parallel with Tier 1.
 
@@ -778,6 +778,50 @@ exfiltration / departing-employee risk (IRM).
 - MCAS compromised user / impossible travel → `user-investigation` (`Investigate <UPN>`).
 - MDI lateral movement / credential theft → `computer-investigation` / `user-investigation`.
 - IRM data exfiltration → `user-investigation` (`Investigate <UPN> — insider data exfiltration`).
+
+---
+
+## Query 14: MDI Sensor Health — Detection Coverage Assurance
+
+**Execution:** Tier 3 — Graph REST via `RunAzCliReadCommands` (`az rest`)
+**Source:** Microsoft Graph `security/identities/healthIssues` (Defender for Identity)
+**Permission:** `SecurityIdentitiesHealth.Read.All` (grant to the UAMI if not present)
+
+> **Why it's in the Pulse (pairs with Q13):** this is a **coverage / blind-spot** signal, not an alert.
+> Q13 shows the MDI *alerts*; Q14 shows whether the MDI *sensors* are healthy enough to GENERATE
+> those alerts. A down / disconnected / outdated sensor = an on-prem AD **detection blind spot** — a
+> silent gap an attacker can hide in. Belongs to the same M365 Coverage domain as Q13.
+
+**Call (no `$orderby` — same alerts_v2 lesson; sort client-side):**
+```bash
+az rest --method GET --url "https://graph.microsoft.com/v1.0/security/identities/healthIssues" --headers "Content-Type=application/json"
+```
+
+> If `/v1.0` returns 404 or empty, retry on `/beta/security/identities/healthIssues` (the API shipped
+> as beta). 403 = `SecurityIdentitiesHealth.Read.All` not granted → ❓ No Data. A 200 with 0 open
+> issues while MDI is deployed = ✅ sensors healthy.
+
+**Post-processing (JSON `value[]`):**
+1. Keep only OPEN issues → `status == "open"` (drop closed/suppressed). Sort by `severity` client-side.
+2. Group by `severity` (high/medium/low) and `healthIssueType` (global vs sensor).
+3. For each: `displayName`, affected `sensorDNSNames[]` / `domainNames[]`, and the first `recommendations[]` line.
+
+**Fields per issue:** `id`, `displayName`, `severity`, `status`, `healthIssueType`, `createdDateTime`,
+`sensorDNSNames[]`, `domainNames[]`, `recommendations[]`, `recommendedActionCommands[]`.
+
+**Purpose:** Detection-coverage assurance for Defender for Identity. Answers *"can my MDI even see an
+attack right now?"* — surfaces down/disconnected sensors, outdated sensor versions, misconfigured
+domains, and directory-service / gMSA issues that blind on-prem AD detection.
+
+**Verdict logic:**
+- 🔴 Escalate: any **high**-severity open issue (sensor down / not reporting = active blind spot).
+- 🟠 Investigate: any **medium**-severity open issue (degraded coverage).
+- 🟡 Monitor: only low / informational open issues.
+- ✅ Clear: call SUCCEEDED with 0 open issues (sensors healthy).
+- ❓ No Data: 403 (missing `SecurityIdentitiesHealth.Read.All`), 404 (MDI not deployed / endpoint on `/beta`), or the call failed.
+
+**Drill-down routing:**
+- High/medium sensor issue → `identity-posture` (`Run identity posture report`) and hand to the AD/MDI ops owner to restore the sensor.
 
 ---
 

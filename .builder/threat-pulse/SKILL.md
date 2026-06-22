@@ -2,7 +2,7 @@
 name: threat-pulse
 description: >
   Recommended starting point for new users and daily SOC operations. 15-minute broad security
-  scan across 8 domains (incidents, identity, NHI, endpoint, email, admin/cloud, exposure, M365 alert coverage)
+  scan across 8 domains (incidents, identity, NHI, endpoint, email, admin/cloud, exposure, M365 coverage & MDI sensor health)
   producing a Threat Pulse Dashboard with drill-down recommendations to specialized skills.
   Trigger on getting-started questions like "where do I start", "what can you do",
   "help me investigate", "threat pulse", "run a scan", "security overview".
@@ -16,7 +16,7 @@ description: >
 
 ## Purpose
 
-The Threat Pulse skill is a rapid, broad-spectrum security scan designed for the "if you only had 15 minutes" scenario. It executes 13 queries across 8 security domains, producing a prioritized dashboard of findings with drill-down recommendations to specialized investigation skills.
+The Threat Pulse skill is a rapid, broad-spectrum security scan designed for the "if you only had 15 minutes" scenario. It executes 14 queries across 8 security domains, producing a prioritized dashboard of findings with drill-down recommendations to specialized investigation skills.
 
 **What this skill covers:**
 
@@ -29,9 +29,9 @@ The Threat Pulse skill is a rapid, broad-spectrum security scan designed for the
 | 📧 **Email Threats** | Phishing/spam/malware breakdown. Were any phishing emails delivered? |
 | 🔑 **Admin & Cloud Ops** | Mailbox rules, OAuth consents, transport rules, mailbox permission changes. MCAS-flagged compromised sign-ins. Human-initiated CA policy changes. High-impact admin operations. |
 | 🛡️ **Exposure** | Critical assets internet-facing with RCE? Exploitable CVEs (CVSS ≥ 8) across the fleet? |
-| 🛰️ **M365 Alert Coverage** | Which Defender/Purview products are actively alerting beyond the other domains — Defender for Cloud Apps (SaaS anomalies), Defender for Identity (on-prem AD lateral movement / credential theft), Purview Insider Risk (data exfiltration / departing employees)? |
+| 🛰️ **M365 Coverage** | Which Defender/Purview products are actively alerting beyond the other domains — Defender for Cloud Apps (SaaS anomalies), Defender for Identity (on-prem AD lateral movement / credential theft), Purview Insider Risk (data exfiltration / departing employees)? **And are the MDI sensors healthy enough to detect** — any on-prem AD detection blind spots? |
 
-**Data sources:** `SecurityIncident`, `SecurityAlert`, `IdentityInfo`, `AADUserRiskEvents`, `SigninLogs`, `AADNonInteractiveUserSignInLogs`, `DeviceProcessEvents`, `DeviceLogonEvents`, `DeviceInfo`, `ExposureGraphNodes`, `AADServicePrincipalSignInLogs`, `EmailEvents`, `CloudAppEvents`, `AuditLogs`, `DeviceTvmSoftwareVulnerabilities`, `DeviceTvmSoftwareVulnerabilitiesKB`, plus Microsoft Graph `security/alerts_v2` (MCAS/MDI/IRM — Q13, via `RunAzCliReadCommands`)
+**Data sources:** `SecurityIncident`, `SecurityAlert`, `IdentityInfo`, `AADUserRiskEvents`, `SigninLogs`, `AADNonInteractiveUserSignInLogs`, `DeviceProcessEvents`, `DeviceLogonEvents`, `DeviceInfo`, `ExposureGraphNodes`, `AADServicePrincipalSignInLogs`, `EmailEvents`, `CloudAppEvents`, `AuditLogs`, `DeviceTvmSoftwareVulnerabilities`, `DeviceTvmSoftwareVulnerabilitiesKB`, plus Microsoft Graph `security/alerts_v2` (MCAS/MDI/IRM — Q13) and `security/identities/healthIssues` (MDI sensor health — Q14), via `RunAzCliReadCommands`
 
 **Portal URL patterns** are defined in the [Defender XDR Portal Links](#defender-xdr-portal-links--all-entity-types) table. Append `tid=<tenant_id>` (from `config.json` or agent settings) to ALL `security.microsoft.com` URLs.
 
@@ -182,7 +182,7 @@ Before executing any script resolved via the File Resolution cascade, the agent 
 |------|---------|----------------|--------|
 | **Tier 1 — Direct LA** | Q1–Q10 | `monitor-client_monitor_workspace_log_query` | All LA-native or XDR-synced tables |
 | **Tier 2 — AH Copy/Paste** | Q11, Q12 | Present query to user → user runs in [Advanced Hunting](https://security.microsoft.com/v2/advanced-hunting) → pastes results back | `ExposureGraphNodes`, `DeviceTvmSoftwareVulnerabilities`, `DeviceTvmSoftwareVulnerabilitiesKB` |
-| **Tier 3 — Graph REST** | Q13 | `RunAzCliReadCommands` → `az rest` GET `security/alerts_v2` (MCAS/MDI/IRM). If the tool is unavailable or returns 403 → mark Q13 ❓ No Data | Microsoft Graph `security/alerts_v2` (connector-independent) |
+| **Tier 3 — Graph REST** | Q13, Q14 | `RunAzCliReadCommands` → `az rest` GET `security/alerts_v2` (MCAS/MDI/IRM, Q13) + `security/identities/healthIssues` (MDI sensor health, Q14). If the tool is unavailable or returns 403 → mark that query ❓ No Data | Microsoft Graph (connector-independent) |
 
 **⛔ MANDATORY:** All KQL queries are pre-validated in [threat-pulse-queries.md](threat-pulse-queries.md). Do NOT write ad-hoc KQL — read the query from the file and execute it as-is with parameter substitution only.
 
@@ -244,7 +244,7 @@ Before executing any script resolved via the File Resolution cascade, the agent 
     - **(b) The loop re-presents itself automatically.** After EVERY completed drill-down, return to Phase 4 step 2 and call `vscode_askQuestions` again with the updated pool. The only exits are `Skip` or an empty pool.
     - **(c) Quick Pick Call Contract is mechanical.** Run the [Pre-Flight Checklist](#-pre-flight-checklist) and print the Pool Receipt before every call.
 
-11. **⛔ MANDATORY: Read queries from file** — All 13 queries are in [threat-pulse-queries.md](threat-pulse-queries.md). `read_file` the query file BEFORE executing any queries. Do NOT write ad-hoc KQL or rely on memory.
+11. **⛔ MANDATORY: Read queries from file** — All 14 queries are in [threat-pulse-queries.md](threat-pulse-queries.md). `read_file` the query file BEFORE executing any queries. Do NOT write ad-hoc KQL or rely on memory.
 
 12. **⛔ MANDATORY: Cache management** — Query results are saved to `output/threat-pulse/` during execution. Cache reuse follows strict rules:
 
@@ -306,7 +306,7 @@ Before executing any script resolved via the File Resolution cascade, the agent 
    Workspace: \<WorkspaceName\> (\<WorkspaceId\>)
    Lookback: \<N\>d
 
-   Executing 13 queries across 8 domains:
+   Executing 14 queries across 8 domains:
 
    🔴 Incidents — Open incidents + 7d closed summary (Q1, Q2)
    🔐 Identity — Identity risk posture, risk event enrichment, auth spray (Q3, Q4)
@@ -315,11 +315,11 @@ Before executing any script resolved via the File Resolution cascade, the agent 
    📧 Email — Inbound threat snapshot (Q8)
    🔑 Admin & Cloud — Cloud app ops, privileged operations (Q9, Q10)
    🛡️ Exposure — Critical assets, exploitable CVEs (Q11, Q12)
-   🛰️ M365 Coverage — MCAS/MDI/IRM active alerts (Q13)
+   🛰️ M365 Coverage — MCAS/MDI/IRM active alerts + MDI sensor health (Q13, Q14)
 
    Direct execution: 10 queries via Log Analytics (parallel)
    User-assisted: 2 queries via Advanced Hunting (Q11, Q12)
-   Graph: 1 query via az rest (Q13)
+   Graph: 2 queries via az rest (Q13, Q14)
    Estimated time: ~3–5 minutes
 
 ### Phase 1: Execute Tier 1 Queries (Q1–Q10) — Parallel
@@ -341,7 +341,7 @@ Before executing any script resolved via the File Resolution cascade, the agent 
 
 **For Q5 (SPN Drift):** Set the `hours` parameter to at least `2328` (97 days × 24 hours) to cover the 97-day lookback.
 
-**Q13 (Graph, Tier 3 — run in parallel with Tier 1):** Execute via `RunAzCliReadCommands` (`az rest` → `security/alerts_v2`, see [threat-pulse-queries.md](threat-pulse-queries.md) Query 13). Parse the JSON `value[]`, group active alerts by `serviceSource` (MCAS/MDI/IRM). If `RunAzCliReadCommands` is unavailable or returns 403, mark Q13 ❓ No Data and continue — never block the report on it.
+**Q13 (Graph, Tier 3 — run in parallel with Tier 1):** Execute via `RunAzCliReadCommands` (`az rest` → `security/alerts_v2`, see [threat-pulse-queries.md](threat-pulse-queries.md) Query 13). Parse the JSON `value[]`, group active alerts by `serviceSource` (MCAS/MDI/IRM). If `RunAzCliReadCommands` is unavailable or returns 403, mark Q13 ❓ No Data and continue — never block the report on it. **Q14 (Graph, Tier 3):** likewise `az rest` → `security/identities/healthIssues` (MDI sensor health, Query 14); group OPEN issues by severity; 403/404 → mark Q14 ❓ No Data.
 
 ### Phase 2: Present Tier 2 Queries (Q11, Q12) — User-Assisted
 
@@ -357,7 +357,7 @@ Before executing any script resolved via the File Resolution cascade, the agent 
 
 ### Phase 3: Post-Processing & Report
 
-0. **Save query results to cache** — Aggregate all Q1–Q13 results into `output/threat-pulse/tp_results_<YYYYMMDD_HHMMSS>.json` as a JSON object with keys: `scan_timestamp` (ISO8601), `workspace_id`, `workspace_name`, `lookback_days`, and `queries` (dict of Q1–Q13, each with `status` = ok/error/no_data, `row_count`, and `results` array). Use `encoding="utf-8"` and `ensure_ascii=False`. Create the `output/threat-pulse/` directory if it doesn't exist.
+0. **Save query results to cache** — Aggregate all Q1–Q14 results into `output/threat-pulse/tp_results_<YYYYMMDD_HHMMSS>.json` as a JSON object with keys: `scan_timestamp` (ISO8601), `workspace_id`, `workspace_name`, `lookback_days`, and `queries` (dict of Q1–Q14, each with `status` = ok/error/no_data, `row_count`, and `results` array). Use `encoding="utf-8"` and `ensure_ascii=False`. Create the `output/threat-pulse/` directory if it doesn't exist.
 1. Interpret device drift scores from Q6 results (see [Post-Processing](#post-processing))
 2. Run cross-query correlation checks (see rule 6)
 3. Assign verdicts to each domain (🔴 Escalate / 🟠 Investigate / 🟡 Monitor / ✅ Clear)
@@ -407,6 +407,7 @@ Before executing any script resolved via the File Resolution cascade, the agent 
 | Q11 | Any `IsVerifiedExposed == true` | `computer-investigation` | `Investigate device <hostname>` |
 | Q11–Q12 | Device in findings | `computer-investigation` | `Investigate device <hostname>` |
 | Q13 | MCAS/MDI/IRM active alert | `user-investigation` / `computer-investigation` | `Investigate <UPN>` or `Investigate device <hostname>` |
+| Q14 | MDI sensor unhealthy (detection blind-spot) | `identity-posture` | `Run identity posture report` (and restore the MDI sensor) |
 
 > **Skills not available in this environment** (e.g., `scope-drift-detection`, `email-threat-posture`, `authentication-tracing`, `ca-policy-investigation`, `app-registration-posture`, `exposure-investigation`, `mitre-coverage-report`): Route to `kql-query-authoring` with specific context and entities. The agent will use KQL Search MCP for schema validation and generate targeted queries.
 
@@ -704,7 +705,7 @@ After all queries complete, check these patterns and escalate when found:
 <2–4 sentences synthesizing findings. State final risk posture.>
 
 ## Dashboard Summary
-<13-row table (Q1–Q13) — columns: #, Domain, Status (verdict emoji), Key Finding (1-line).>
+<14-row table (Q1–Q14) — columns: #, Domain, Status (verdict emoji), Key Finding (1-line).>
 
 ## Detailed Findings
 <One section per query — EVERY query gets a section. Q2 always renders after Q1 even when Q1 is ✅.>
@@ -778,7 +779,7 @@ After all queries complete, check these patterns and escalate when found:
 
 ## Quality Checklist
 
-- [ ] All 13 queries executed (10 direct LA + 2 AH + 1 Graph, or ❓ if unavailable)
+- [ ] All 14 queries executed (10 direct LA + 2 AH + 2 Graph, or ❓ if unavailable)
 - [ ] Every query has a verdict row — no omissions
 - [ ] ✅ verdicts cite table + "0 results"; 🔴/🟠 cite specific evidence
 - [ ] All incidents have clickable XDR portal URLs
