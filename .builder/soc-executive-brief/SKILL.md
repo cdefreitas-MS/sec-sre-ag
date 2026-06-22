@@ -110,9 +110,9 @@ The script prints `SOC Score N/100 (verdict) · Threat x · Identity y · MITRE 
 
 ### Step 4 — Deliver (archive → link → notify, read-only)
 Follow the [canonical delivery sequence](../../shared/sharepoint-archival.md#canonical-delivery-sequence-archive--link--notify):
-- **SharePoint (first)**: `python shared/sharepoint_upload.py upload --site "<config: sharepoint.site_id>" --skill soc-executive-brief --file <html>` (and the `.md`). Capture the `webUrl` from stdout; skip/error → `webUrl=null`, continue.
-- **send-email-report**: subject `🛡️ SOC Executive Brief: {verdict} · {score}/100 ({date})`. Small report (< 3 MB) → **attach the HTML and** add the link line `🗄️ Arquivo (SharePoint): <webUrl>` when present.
-- **send-teams-notification**: Adaptive Card with SOC Score, verdict, the 3 panel sub-scores, and the next action + **Open report (SharePoint)** action → `webUrl` when present.
+- **SharePoint (first)**: `python shared/sharepoint_upload.py upload --site "<config: sharepoint.site_id>" --skill soc-executive-brief --file <html>` (and the `.md`). Capture `webUrl` + `folderUrl` from stdout; skip/error → `webUrl=null`, continue.
+- **send-email-report**: subject `🛡️ SOC Executive Brief: {verdict} · {score}/100 ({date})`. Small report (< 3 MB) → **attach the HTML and** add the link line `📂 Abrir no SharePoint: <folderUrl>` when present (opens the library; don't link the file `webUrl` — `.html` downloads).
+- **send-teams-notification**: Adaptive Card with SOC Score, verdict, the 3 panel sub-scores, and the next action + **Abrir no SharePoint** action → `folderUrl` when present.
 
 ### Step 5 — Chat summary
 ```

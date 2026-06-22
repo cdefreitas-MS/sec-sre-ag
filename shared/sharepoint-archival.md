@@ -22,14 +22,24 @@ to recipients** (the archive is the canonical copy; email/Teams point at it):
 
 1. **Archive FIRST — SharePoint.** After the renderer writes the HTML (+ MD), upload them
    with `shared/sharepoint_upload.py` (see [wiring](#graph-util--wiring)). The CLI prints
-   `{"ok": true, "webUrl": "<link>"}` to **stdout** on success → **capture that `webUrl`**.
+   `{"ok": true, "webUrl": "<file>", "folderUrl": "<parent folder>"}` to **stdout** on
+   success → **capture both `webUrl` (the file) and `folderUrl` (the library folder)**.
    - Best-effort: on exit code `3` (no `--site`) or `1` (error) there is **no `webUrl`** →
      set `webUrl = null`, omit the link line, and **continue** (never block email/Teams).
-2. **Email — `send-email-report`.** Apply the **size-aware attach policy** below, and when
-   `webUrl` is present add a link line to the body:
-   `🗄️ Arquivo (SharePoint): <webUrl>`.
-3. **Teams — `send-teams-notification`.** When `webUrl` is present, add an **`Open report`
-   (SharePoint)** action/CTA pointing at `webUrl` (in addition to any portal CTA).
+2. **Email — `send-email-report`.** Apply the **size-aware attach policy** below.
+   - **When the HTML is attached** (small class) → the body link should **open SharePoint
+     without re-downloading the report**: link the **`folderUrl`** (`📂 Abrir no SharePoint`).
+     ⚠️ Do **not** link the file `webUrl` here — SharePoint forces a **download** for `.html`
+     files, which is redundant since the attachment is already the read copy.
+   - **When link-only** (no attachment) → link the file **`webUrl`** (it's the only copy).
+3. **Teams — `send-teams-notification`.** Add an **`Abrir no SharePoint`** action/CTA:
+   use **`folderUrl`** when the email attached the HTML (opens the library, no download),
+   else the file **`webUrl`** (link-only). Keep any portal CTA.
+
+> **Why the folder link:** SharePoint Online does not render `.html` inline — opening a
+> file `webUrl` triggers a download. The `folderUrl` opens the document library in the
+> browser (no download); the attachment (or, for link-only, the file in that folder) is the
+> report itself.
 
 ### Size-aware attach policy (email)
 
