@@ -370,7 +370,7 @@ Before executing any script resolved via the File Resolution cascade, the agent 
    - **Archive + notify** (on `"envia"`, `"email"`, `"arquiva"`, `"deliver"`): follow the [canonical delivery sequence](../../shared/sharepoint-archival.md#canonical-delivery-sequence-archive--link--notify) — archive to SharePoint **first**, capture the `webUrl`, then notify with the link:
      1. `python shared/sharepoint_upload.py upload --site "<config: sharepoint.site_id>" --skill threat-pulse --file reports/threat-pulse/Threat_Pulse_<ts>.html` (and the `.md`). Capture `webUrl` + `folderUrl` from stdout; skip/error → `webUrl=null`, continue.
      2. **send-email-report** (dual recipients): subject `🛰️ Threat Pulse — <top verdict> (<date>)`. The Pulse HTML is compact (< 3 MB) → **attach the HTML**; since the attachment is the read copy, the body link should **open SharePoint (no download)** → `📂 Abrir no SharePoint: <folderUrl>` when present. ⚠️ Do **not** link the file `webUrl` — `.html` forces a download.
-     3. **send-teams-notification**: Adaptive Card (top verdict + incident-backlog headline) + **Abrir no SharePoint** action → `folderUrl` when present.
+     3. **send-teams-notification**: Adaptive Card (top verdict + incident-backlog headline) + **Abrir no SharePoint** action → the SharePoint `folderUrl` when present (a `https://<tenant>.sharepoint.com/...` URL captured from `sharepoint_upload.py` stdout). 🔴 NEVER point this action (or the email link) at a `teams.microsoft.com/l/message/...` permalink, the posted-message link, or the webhook URL — it must be the SharePoint address.
 
 ---
 
@@ -819,7 +819,7 @@ The script is a **dependency-free markdown→HTML renderer** (Python stdlib only
 
 ### Archive + deliver (on request)
 
-To persist and distribute the report, follow the [canonical delivery sequence](../../shared/sharepoint-archival.md#canonical-delivery-sequence-archive--link--notify): **archive the HTML (+ MD) to SharePoint first** (`python shared/sharepoint_upload.py upload --site "<config: sharepoint.site_id>" --skill threat-pulse --file <html>`), capture the `webUrl` + `folderUrl`, then `send-email-report` (attach HTML + `📂 Abrir no SharePoint: folderUrl` link, < 3 MB) and `send-teams-notification` (**Abrir no SharePoint** CTA → `folderUrl`). Best-effort: a failed archive (`webUrl=null`) never blocks email/Teams.
+To persist and distribute the report, follow the [canonical delivery sequence](../../shared/sharepoint-archival.md#canonical-delivery-sequence-archive--link--notify): **archive the HTML (+ MD) to SharePoint first** (`python shared/sharepoint_upload.py upload --site "<config: sharepoint.site_id>" --skill threat-pulse --file <html>`), capture the `webUrl` + `folderUrl`, then `send-email-report` (attach HTML + `📂 Abrir no SharePoint: folderUrl` link, < 3 MB) and `send-teams-notification` (**Abrir no SharePoint** CTA → `folderUrl`). 🔴 The email link and the Teams action MUST be the SharePoint `folderUrl` (a `sharepoint.com` URL) — never a `teams.microsoft.com` / webhook / posted-message link. Best-effort: a failed archive (`webUrl=null`) never blocks email/Teams.
 
 ---
 
