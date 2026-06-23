@@ -108,6 +108,10 @@ This is the **operational depth** of the **org-posture** 🤖 *NHI / Agent Ident
 | `graph_sp` | `/v1.0/servicePrincipals(appId='00000003-0000-0000-c000-000000000000')?$select=id,appRoles&$expand=appRoleAssignedTo` | `Application.Read.All` |
 | `service_principals` | `/v1.0/servicePrincipals?$top=999&$select=id,appId,displayName,servicePrincipalType,accountEnabled` | `Application.Read.All` |
 
+> ⚠️ **Paginate `service_principals`.** Tenants often have **>999** service principals. Follow `@odata.nextLink` until exhausted and **merge every page** into one `{"value":[...]}`. A partial catalog leaves granted apps unresolved (shown by objectId, weaker AppId-based activity join → inflated dormant/excess counts). The self-collect renderer (`run_graph_paged`) paginates automatically; in Mode B the agent must follow the link.
+>
+> 📦 **Deterministic assembly.** Write **each** of the 4 datasets to its own file as collected, then merge into one `results.json` with exactly those 4 top-level keys — don't rely on whichever dataset happened to be returned inline vs auto-saved to disk.
+
 Assemble into `results.json`:
 ```json
 {

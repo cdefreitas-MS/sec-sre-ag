@@ -106,6 +106,24 @@ def run_graph(spec):
     return json.loads(res.stdout or "{}")
 
 
+def run_graph_paged(spec):
+    """GET a Graph resource; if it's a collection with @odata.nextLink, follow ALL pages
+    and return a single {"value": [...all...]}. Single-object resources pass through."""
+    resp = run_graph(spec)
+    if isinstance(resp, dict) and isinstance(resp.get("value"), list):
+        value = list(resp["value"])
+        nxt = resp.get("@odata.nextLink")
+        pages = 0
+        while nxt and pages < 50:
+            page = run_graph(nxt)
+            value.extend(page.get("value", []))
+            nxt = page.get("@odata.nextLink")
+            pages += 1
+        resp["value"] = value
+        resp.pop("@odata.nextLink", None)
+    return resp
+
+
 def collect(args, q):
     params = dict(q.get("parameters", {}))
     params["days"] = args.days or params.get("days", 30)
@@ -117,9 +135,10 @@ def collect(args, q):
         except Exception as e:
             print(f"  ! KQL '{name}' failed: {e}", file=sys.stderr)
             data[name] = []
-    for name in ("graph_sp", "service_principals"):
+    # graph_sp = single object (with expanded appRoleAssignedTo); service_principals = paged collection.
+    for name, fn in (("graph_sp", run_graph), ("service_principals", run_graph_paged)):
         try:
-            data[name] = run_graph(q["graph"][name])
+            data[name] = fn(q["graph"][name])
         except Exception as e:
             print(f"  ! Graph '{name}' failed: {e}", file=sys.stderr)
             data[name] = {}
