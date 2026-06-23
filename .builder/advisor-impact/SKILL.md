@@ -362,6 +362,7 @@ No overall verdict badge (unlike other skills). This skill produces a **phased p
 
 ## Related Skills
 
+- `org-posture` — executive **scorecard** (Org Posture Index 0–100, grade A–F). **Complementary pair, not a duplicate:** org-posture answers *"what's our grade?"*; advisor-impact answers *"what to fix, in what order, at what cost/risk to **raise** it."* The two share one Secure Score source — both read Microsoft Secure Score through the canonical reader `shared/secure_score.py`, so the headline number matches.
 - `send-email-report` — for email delivery
 - `send-teams-notification` — for Teams Adaptive Card
 - `soc-executive-brief` — consolidator skill (different domain: SOC vs governance)
