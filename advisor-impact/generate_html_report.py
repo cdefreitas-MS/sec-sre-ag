@@ -1258,13 +1258,57 @@ def _render_xdr_section(xdr):
 # Microsoft Secure Score (M365/Entra) — dataset OPCIONAL (Graph /security/secureScores)
 # + cards de score (estilo Power BI) e Resumo Executivo
 # =============================================================================
+def _find_shared(name):
+    """Locate shared/<name> by walking up the tree (repo convention)."""
+    d = os.path.dirname(os.path.abspath(__file__))
+    for _ in range(8):
+        cand = os.path.join(d, "shared", name)
+        if os.path.isfile(cand):
+            return cand
+        nd = os.path.dirname(d)
+        if nd == d:
+            break
+        d = nd
+    return None
+
+
+def _shared_secure_score(resp):
+    """Delegate to the canonical shared/secure_score.py reader when resolvable (single source of truth)."""
+    path = _find_shared("secure_score.py")
+    if not path:
+        return False, None
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("secure_score", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return True, mod.latest_secure_score(resp)
+    except Exception:
+        return False, None
+
+
 def analyze_m365_secure_score(data):
-    """Microsoft Secure Score (Entra ID + Microsoft 365) via Graph /security/secureScores. Opcional."""
+    """Microsoft Secure Score (Entra ID + Microsoft 365) via Graph /security/secureScores. Opcional.
+    Single source of truth = shared/secure_score.py (the SAME reader as org-posture's Identity pillar,
+    so the headline number can't drift between the two reports). Falls back to an inline read
+    aligned to the canonical method (latest entry by createdDateTime)."""
+    ok, ss = _shared_secure_score(data)
+    if ok:
+        return ss
     rows = as_list(data)
     if not rows:
         return None
-    r = rows[0] if isinstance(rows[0], dict) else {}
-    p = r.get("properties") if isinstance(r.get("properties"), dict) else r
+    props = []
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        p = r.get("properties") if isinstance(r.get("properties"), dict) else r
+        if isinstance(p, dict) and p:
+            props.append(p)
+    if not props:
+        return None
+    props.sort(key=lambda p: str(p.get("createdDateTime", "")), reverse=True)
+    p = props[0]
     try:
         cur = float(p.get("currentScore"))
         mx = float(p.get("maxScore"))
