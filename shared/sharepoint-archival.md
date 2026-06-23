@@ -50,6 +50,16 @@ to recipients** (the archive is the canonical copy; email/Teams point at it):
 > report. If `folderUrl`/`webUrl` is `null`, omit the link entirely — do not substitute a
 > Teams link.
 
+> 🔴 **Teams transport guardrail (how the card is posted):** Teams delivery is **only** via
+> `send-teams-notification`, which POSTs to the Power Automate / Workflows **webhook** read
+> from `config.json` → `teams.webhook_url`. If `teams.webhook_url` is missing, empty, or
+> `enabled:false` → **skip Teams** and report `Teams skipped (no webhook configured)`.
+> **NEVER** post to Teams via Microsoft Graph (`ChannelMessage.Send` / `ChatMessage.Send` /
+> `Teamwork.*` / `POST .../teams/.../channels/.../messages` / `POST .../chats/.../messages`)
+> — those are **protected APIs** (require Microsoft approval + a payment model) and are not
+> part of this suite. On a webhook error, **log it and continue** — do **not** improvise a
+> Graph fallback.
+
 ### Size-aware attach policy (email)
 
 | Report class | On-disk HTML | Attach? | Always include link? |
