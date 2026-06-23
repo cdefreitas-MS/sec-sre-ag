@@ -1,0 +1,90 @@
+# =============================================================================
+# graph-least-privilege — verified queries (single source of truth)
+# Pattern: collector↔renderer. queries.yaml = CAPTURE. generate_html_report.py = RENDER.
+# Workspace: LA-HERBEST-SENTINEL (Sentinel / Log Analytics)
+# Concept ported from Mynster9361/Least_Privileged_MSGraph (MIT) into the SOC Autônomo
+# Python collector↔renderer stack (UAMI auth, no client secret). Read-only, recommend-only.
+# Placeholders: {days} {top_n} {graph_sp_appid} {uami_appid}
+# =============================================================================
+metadata:
+  skill: graph-least-privilege
+  title: Graph Least Privilege
+  description: >
+    Right-sizes Microsoft Graph APPLICATION permissions per app registration by cross-referencing
+    GRANTED app roles against ACTUALLY-USED endpoints in MicrosoftGraphActivityLogs. Surfaces
+    dormant apps (perms granted, zero calls), unused/excess scopes (heuristic endpoint→scope map)
+    and throttling (HTTP 429). META: highlights the SRE Agent's own UAMI. Recommend-only —
+    never removes a permission; right-sizing is a human decision.
+  data_sources: [Microsoft Graph servicePrincipals + appRoleAssignedTo, MicrosoftGraphActivityLogs (Log Analytics)]
+
+parameters:
+  days: 30
+  top_n: 60
+  graph_sp_appid: "00000003-0000-0000-c000-000000000000"   # Microsoft Graph SP (source of appRoles GUID→name)
+  uami_appid: "7e2ec058-8773-435e-95a5-436fe10f3289"        # SRE Agent UAMI (meta self-audit)
+
+scoring:
+  # Per-app verdict (recommend-only):
+  #   DORMANT — granted >=1 app role but 0 Graph calls in the window (strongest over-provisioning signal)
+  #   EXCESS  — >=1 granted scope whose endpoint family was never observed (heuristic)
+  #   TIGHT   — every mapped granted scope has matching observed activity
+  excess_warn: 1        # >=1 unused scope → 🟠
+  excess_high: 3        # >=3 unused scopes → 🔴
+
+queries:
+  # Q1 — actual Graph endpoint usage per app (anonymized URI family), {days}d
+  app_activity: |
+    MicrosoftGraphActivityLogs
+    | where TimeGenerated > ago({days}d)
+    | extend Path = tostring(split(tostring(RequestUri), '?')[0])
+    | extend Path = replace_regex(Path, @'https://[^/]+', '')
+    | extend Path = replace_regex(Path, @'/v1\.0|/beta', '')
+    | extend Family = strcat('/', tostring(split(Path, '/')[1]))
+    | where isnotempty(Family) and Family != '/'
+    | summarize Calls=count(), Throttled=countif(ResponseStatusCode == 429),
+                Families=make_set(Family, 120), Last=max(TimeGenerated)
+      by AppId, ServicePrincipalId
+    | order by Calls desc
+
+  # Q2 — per-app error / throttle rate (signal, optional)
+  app_errors: |
+    MicrosoftGraphActivityLogs
+    | where TimeGenerated > ago({days}d)
+    | summarize Total=count(), Err=countif(ResponseStatusCode >= 400),
+                Throttled=countif(ResponseStatusCode == 429) by AppId
+    | extend ErrRate = round(todouble(Err) / Total * 100, 1)
+    | where Total > 0
+
+# Graph REST (collected by the SRE Agent tool OR self-collected via `az rest`).
+# Perm required: Application.Read.All (UAMI already holds it). Read-only.
+graph:
+  # Microsoft Graph SP: appRoles dictionary (GUID→name) + EVERY app's granted application permissions.
+  graph_sp: "GET https://graph.microsoft.com/v1.0/servicePrincipals(appId='00000003-0000-0000-c000-000000000000')?$select=id,appRoles&$expand=appRoleAssignedTo"
+  # service principal catalog (SP objectId → appId, displayName, type, enabled)
+  service_principals: "GET https://graph.microsoft.com/v1.0/servicePrincipals?$top=999&$select=id,appId,displayName,servicePrincipalType,accountEnabled"
+
+# Heuristic endpoint-family ↔ minimum scope map (intentionally small + conservative).
+# Used ONLY to flag a granted scope as "no matching observed activity" (candidate for removal).
+# Mirrors the upstream module's disclaimer: a GUIDE, not a guarantee — validate per app.
+scope_endpoint_map:
+  "User.Read.All":            ["/users"]
+  "User.ReadWrite.All":       ["/users"]
+  "User.ReadBasic.All":       ["/users"]
+  "Group.Read.All":           ["/groups"]
+  "Group.ReadWrite.All":      ["/groups"]
+  "GroupMember.Read.All":     ["/groups"]
+  "Application.Read.All":      ["/applications", "/servicePrincipals"]
+  "Application.ReadWrite.All": ["/applications", "/servicePrincipals"]
+  "Directory.Read.All":        ["/directoryObjects", "/directoryRoles", "/users", "/groups"]
+  "Mail.Read":                ["/messages", "/mailFolders"]
+  "Mail.ReadWrite":           ["/messages", "/mailFolders"]
+  "Mail.Send":                ["/sendMail"]
+  "Calendars.Read":           ["/events", "/calendar", "/calendars"]
+  "Files.Read.All":           ["/drive", "/drives"]
+  "Sites.Read.All":           ["/sites"]
+  "Sites.ReadWrite.All":      ["/sites"]
+  "DeviceManagementManagedDevices.Read.All": ["/deviceManagement"]
+  "AuditLog.Read.All":        ["/auditLogs"]
+  "SecurityEvents.Read.All":  ["/security"]
+  "SecurityAlert.Read.All":   ["/security"]
+  "Reports.Read.All":         ["/reports"]

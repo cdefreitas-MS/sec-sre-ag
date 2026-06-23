@@ -32,6 +32,18 @@ Performs comprehensive security investigations on Windows, macOS, and Linux devi
 | 4 | *Is device WIN-12345 internet-facing and what ports are exposed?* |
 | 5 | *Analyze device my-mac for anomalous logon patterns* |
 
+### graph-least-privilege
+
+Right-sizes Microsoft Graph **application** permissions per app registration by cross-referencing **granted** app roles against **actually-used** endpoints in `MicrosoftGraphActivityLogs`. Surfaces **dormant** apps (permissions granted, zero Graph calls), **excess** scopes (granted scope whose endpoint family was never observed — via a heuristic endpoint→scope map), and HTTP 429 throttling. Self-audits the agent's own UAMI. 100% read-only, recommend-only — never removes a permission. Operational depth-layer of the org-posture 🤖 NHI section. *Concept ported from the public [Mynster9361/Least_Privileged_MSGraph](https://github.com/Mynster9361/Least_Privileged_MSGraph) (MIT), re-implemented in Python.*
+
+| # | Example prompt |
+|---|---|
+| 1 | *Run a Graph least-privilege audit for the tenant* |
+| 2 | *Which app registrations have Graph permissions they never use?* |
+| 3 | *Show me dormant apps that still hold application permissions* |
+| 4 | *Find over-privileged service principals and the scopes to remove* |
+| 5 | *Right-size the Microsoft Graph permissions across our apps* |
+
 ### identity-posture
 
 Audits organization-wide identity security posture using Microsoft Graph API and Log Analytics. Covers user inventory, directory roles, PIM assignments, Identity Protection risk signals, MFA registration, deleted accounts, stale account detection, password posture, and department-level breakdowns. Produces an HTML report with a composite posture score.
