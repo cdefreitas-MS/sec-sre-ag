@@ -58,7 +58,7 @@ graph:
   token_resource: "https://graph.microsoft.com"
   endpoints:
     secure_scores: "/security/secureScores?$top=1"
-    incidents: "/security/incidents?$filter=status eq 'active'&$top=500"
+    incidents: "/security/incidents?$filter=status eq 'active'&$top=50"   # Graph caps $top at 50 here — higher returns HTTP 400
     risky_users: "/identityProtection/riskyUsers?$filter=riskLevel eq 'high'&$top=500"
     # --- Informational sections below (NOT pillars of the index; degrade gracefully on 402/403/404) ---
     subscribed_skus: "/subscribedSkus"                                                  # 🪪 Licensing / FinOps (Organization.Read.All)
