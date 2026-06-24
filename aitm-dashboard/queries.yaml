@@ -1,0 +1,143 @@
+# =============================================================================
+# aitm-dashboard — verified queries (single source of truth)
+# Pattern: collector↔renderer. This file = CAPTURE. generate_html_report.py = RENDER.
+# Workspace: LA-HERBEST-SENTINEL (Sentinel / Log Analytics). TENANT-WIDE.
+# Foco: Adversary-in-the-Middle (roubo de token / MFA bypass / hijack de sessão)
+#       + persistência pós-compromisso (inbox rules de BEC, troca de método MFA).
+# Placeholders: {lookback_days}
+# =============================================================================
+metadata:
+  skill: aitm-dashboard
+  title: AiTM & Token Theft Dashboard
+  description: >
+    Tenant-wide Adversary-in-the-Middle hunt. Sinais de identidade (sign-ins/risco/MFA) vêm
+    do Sentinel KQL (SigninLogs, AADNonInteractiveUserSignInLogs, AuditLogs); a persistência
+    BEC (inbox rules) vem do Defender XDR via Graph runHuntingQuery (CloudAppEvents — tabela
+    XDR que NÃO existe no Sentinel). Roteamento por origem do dado (ver bloco `routing:`).
+  data_sources:
+    sentinel_kql: [SigninLogs, AADNonInteractiveUserSignInLogs, AuditLogs]
+    graph_xdr:    [CloudAppEvents]   # Defender XDR Advanced Hunting (inbox rules de BEC)
+
+parameters:
+  lookback_days: 7
+  session_window_hours: 1
+  session_country_min: 2
+
+queries:
+  # Q1 — overview (single row, lado sign-in)
+  overview: |
+    let win = {lookback_days}d;
+    SigninLogs
+    | where TimeGenerated >= ago(win)
+    | summarize
+        TotalSignins   = count(),
+        RiskySuccess   = countif(ResultType == 0 and RiskLevelDuringSignIn in ("high","medium")),
+        AnomalousToken = countif(RiskEventTypes_V2 has_any ("anomalousToken","tokenIssuerAnomaly")),
+        Unfamiliar     = countif(RiskEventTypes_V2 has_any ("unfamiliarFeatures","maliciousIPAddress","suspiciousBrowser")),
+        AffectedUsers  = dcountif(UserPrincipalName, RiskLevelDuringSignIn in ("high","medium")),
+        FirstSeen      = min(TimeGenerated), LastSeen = max(TimeGenerated)
+
+  # Q2 — risky SUCCESSFUL sign-ins (marca-d'água do AiTM: MFA satisfeito via token roubado)
+  risky_success: |
+    let win = {lookback_days}d;
+    SigninLogs
+    | where TimeGenerated >= ago(win)
+    | where ResultType == 0
+    | where RiskLevelDuringSignIn in ("high","medium") or RiskState in ("atRisk","confirmedCompromised")
+    | extend Country = tostring(LocationDetails.countryOrRegion)
+    | project TimeGenerated, UserPrincipalName, IPAddress, Country, AppDisplayName,
+              RiskLevelDuringSignIn, RiskState, AuthenticationRequirement
+    | order by TimeGenerated desc
+    | take 50
+
+  # Q3 — anomalous-token / token-issuer-anomaly risk events
+  anomalous_token: |
+    let win = {lookback_days}d;
+    SigninLogs
+    | where TimeGenerated >= ago(win)
+    | where RiskEventTypes_V2 has_any ("anomalousToken","tokenIssuerAnomaly","investigationsThreatIntelligence")
+    | extend Country = tostring(LocationDetails.countryOrRegion)
+    | project TimeGenerated, UserPrincipalName, IPAddress, Country, AppDisplayName,
+              RiskEvents = tostring(RiskEventTypes_V2), ResultType
+    | order by TimeGenerated desc
+    | take 50
+
+  # Q4 — session anomaly: mesmo usuário, sucesso em N+ países numa janela curta (token replay / impossible travel)
+  session_anomaly: |
+    let win = {lookback_days}d;
+    union isfuzzy=true
+      (SigninLogs            | extend Country = tostring(LocationDetails.countryOrRegion)),
+      (AADNonInteractiveUserSignInLogs | extend Country = tostring(LocationDetails.countryOrRegion))
+    | where TimeGenerated >= ago(win)
+    | where ResultType == 0
+    | summarize Countries = dcount(Country), IPs = dcount(IPAddress),
+                CountryList = make_set(Country, 8), IPList = make_set(IPAddress, 8)
+        by UserPrincipalName, bin(TimeGenerated, {session_window_hours}h)
+    | where Countries >= {session_country_min}
+    | project Window = TimeGenerated, UserPrincipalName, Countries, IPs,
+              CountryList = tostring(CountryList), IPList = tostring(IPList)
+    | order by Countries desc, IPs desc
+    | take 40
+
+  # Q5 — MFA method tampering (registro/remoção de método de segurança = persistência pós-compromisso)
+  mfa_changes: |
+    let win = {lookback_days}d;
+    AuditLogs
+    | where TimeGenerated >= ago(win)
+    | where OperationName has_any ("security info", "authentication method", "StrongAuthentication")
+    | extend Target = tostring(TargetResources[0].userPrincipalName),
+             Initiator = tostring(InitiatedBy.user.userPrincipalName)
+    | project TimeGenerated, OperationName, Target, Initiator, Result
+    | order by TimeGenerated desc
+    | take 40
+
+  # (Q6 inbox-rules é XDR/CloudAppEvents — NÃO vive no Sentinel → movido p/ o bloco `graph_xdr:` abaixo)
+
+  # Q7 — top alvos (usuários com mais indicadores AiTM)
+  top_targets: |
+    let win = {lookback_days}d;
+    SigninLogs
+    | where TimeGenerated >= ago(win)
+    | where RiskLevelDuringSignIn in ("high","medium")
+         or RiskEventTypes_V2 has_any ("anomalousToken","tokenIssuerAnomaly","unfamiliarFeatures")
+    | extend Country = tostring(LocationDetails.countryOrRegion)
+    | summarize Indicators = count(), RiskySuccess = countif(ResultType == 0),
+                Countries = dcount(Country), IPs = dcount(IPAddress),
+                LastSeen = max(TimeGenerated)
+        by UserPrincipalName
+    | order by Indicators desc
+    | take 25
+
+# =============================================================================
+# ROTEAMENTO POR ORIGEM DO DADO (não é fallback genérico):
+#   • Tabelas que VIVEM no Sentinel (Entra ID / AAD)   → KQL no Log Analytics (bloco `queries:` acima).
+#         SigninLogs · AADNonInteractiveUserSignInLogs · AuditLogs
+#   • Tabelas XDR-native (NÃO estão no Sentinel)        → Microsoft Graph runHuntingQuery (bloco `graph_xdr:`).
+#         CloudAppEvents (inbox rules de BEC) — Advanced Hunting do Defender XDR.
+# A inbox-rule é a ÚNICA peça XDR do AiTM → fonte de registro = Graph (não OfficeActivity no Sentinel).
+# Perms (UAMI): ThreatHunting.Read.All (runHuntingQuery), IdentityRiskEvent.Read.All, AuditLog.Read.All.
+# =============================================================================
+routing:
+  sentinel_kql: [overview, risky_success, anomalous_token, session_anomaly, mfa_changes, top_targets]
+  graph_xdr:    [inbox_rules]
+  graph_max_days: 30
+
+# XDR-native — SEMPRE via Graph (estas tabelas não existem no Sentinel deste tenant).
+# O renderer (self-collect) executa isto com `az account get-access-token --resource graph` + POST runHuntingQuery.
+graph_xdr:
+  # Q6 — BEC inbox-rule persistence (forward/redirect/delete) via Defender XDR Advanced Hunting
+  inbox_rules:
+    method: POST
+    url: "https://graph.microsoft.com/v1.0/security/runHuntingQuery"
+    result_key: results
+    columns: [Timestamp, AccountDisplayName, ActionType, IPAddress, Rule]
+    body: |
+      {"Query":"CloudAppEvents | where Timestamp >= ago({lookback_days}d) | where ActionType in ('New-InboxRule','Set-InboxRule','Update-InboxRules','UpdateInboxRules') | where RawEventData has_any ('ForwardTo','ForwardAsAttachmentTo','RedirectTo','DeleteMessage','MoveToFolder') | project Timestamp, AccountDisplayName, ActionType, IPAddress, Rule=substring(tostring(RawEventData),0,300) | order by Timestamp desc | take 40"}
+
+# OPCIONAL — fallback APENAS p/ as tabelas AAD, e SÓ se um conector do Sentinel estiver desligado (KQL = 0 linhas).
+# Não é o caminho padrão: as tabelas AAD estão confirmadas no LA-HERBEST-SENTINEL.
+graph_fallback:
+  signins:         "GET https://graph.microsoft.com/v1.0/auditLogs/signIns?$top=1000&$filter=riskLevelDuringSignIn ne 'none'"
+  risk_detections: "GET https://graph.microsoft.com/v1.0/identityProtection/riskDetections?$top=200&$filter=riskEventType in ('anomalousToken','tokenIssuerAnomaly','unfamiliarFeatures','maliciousIPAddress')"
+  risky_users:     "GET https://graph.microsoft.com/v1.0/identityProtection/riskyUsers?$filter=riskLevel eq 'high'&$top=100"
+  mfa_changes:     "GET https://graph.microsoft.com/v1.0/auditLogs/directoryAudits?$top=200&$filter=loggedByService eq 'Authentication Methods'"

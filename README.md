@@ -20,6 +20,18 @@ Remediation impact planner that unites **Azure Advisor** (Cost, Reliability, Per
 | 4 | *Consolidate Azure governance recommendations for resource group RG-SEC-HERBEST* |
 | 5 | *What's the cost savings potential from Azure Advisor in this subscription?* |
 
+### aitm-dashboard
+
+Hunts for **Adversary-in-the-Middle**, token theft, and MFA-bypass activity across Microsoft Sentinel (Entra ID sign-in tables) and Defender XDR (inbox rules via Advanced Hunting). Surfaces risky successful sign-ins (stolen token), anomalous tokens, session anomalies, MFA method changes, and BEC inbox rules — weighted into a scored verdict (CLEAR / MONITOR / ELEVATED). Source-aware routing (KQL for AAD tables, Graph `runHuntingQuery` for tables that don't live in Sentinel).
+
+| # | Example prompt |
+|---|---|
+| 1 | *Run the aitm-dashboard for the last 7 days* |
+| 2 | *Hunt for adversary-in-the-middle and token theft signals* |
+| 3 | *Show me suspicious inbox rules that could indicate BEC* |
+| 4 | *Are there anomalous token or session anomalies across the tenant?* |
+| 5 | *Check for risky successful sign-ins and MFA method changes* |
+
 ### computer-investigation
 
 Performs comprehensive security investigations on Windows, macOS, and Linux devices registered in Microsoft Entra ID and onboarded to Microsoft Defender for Endpoint. Collects device context, process execution history, network connections, registry persistence, file activity, vulnerability assessment, and risk scoring.
@@ -31,6 +43,18 @@ Performs comprehensive security investigations on Windows, macOS, and Linux devi
 | 3 | *Show me all vulnerabilities on device my-laptop and their exploitation risk* |
 | 4 | *Is device WIN-12345 internet-facing and what ports are exposed?* |
 | 5 | *Analyze device my-mac for anomalous logon patterns* |
+
+### exposure-graph
+
+Synthesizes a **blast-radius** view by crossing **entry points** (Identity Protection risky users + Defender for Endpoint exposed / internet-facing machines) with **crown jewels** (privileged identities resolved from directory roles, incl. users AND service principals). Quantifies a blast-radius score and a verdict (BAIXA / MODERADA / ALTA), highlighting over-privileged service principals and dormant high-value endpoints. 100% read-only (MDE + Graph).
+
+| # | Example prompt |
+|---|---|
+| 1 | *Generate the exposure-graph / blast radius for the tenant* |
+| 2 | *What's our blast radius from risky users to privileged identities?* |
+| 3 | *Show me exposed machines that could reach crown-jewel accounts* |
+| 4 | *Which privileged identities are most at risk from current exposure?* |
+| 5 | *Map entry points to high-value targets* |
 
 ### graph-least-privilege
 
@@ -163,6 +187,18 @@ Generates a comprehensive MITRE ATT&CK coverage analysis. Maps analytic rules an
 | 3 | *What are the top coverage gaps and how can we improve them?* |
 | 4 | *Show me untagged detection rules and suggest MITRE mappings* |
 | 5 | *Analyze our coverage against ransomware threat scenarios* |
+
+### org-posture
+
+Executive one-page **security posture index** for board/CISO. Consolidates Microsoft Secure Score (identity & configuration), Defender for Endpoint exposure, active Microsoft 365 Defender incidents (threat pressure), and Identity Protection high-risk users into a single weighted **Org Posture Index (0–100)** with an **A–F grade** + posture FORTE/MODERADA/FRACA + per-pillar breakdown and top drivers. Adds three informational, **index-neutral** sections: 🎓 Human Risk (Attack Simulation), 🪪 Licensing/FinOps, and 🤖 NHI / Agent Identity Governance (client-secret hygiene; drill-down via `graph-least-privilege`). 100% read-only.
+
+| # | Example prompt |
+|---|---|
+| 1 | *Run the org-posture scorecard for the board* |
+| 2 | *What's our overall security posture grade and what's dragging it down?* |
+| 3 | *Give me the executive posture index with the per-pillar breakdown* |
+| 4 | *Show the NHI / agent identity governance and licensing sections* |
+| 5 | *Generate the board report for our security posture* |
 
 ### sentinel-documenter
 

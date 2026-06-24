@@ -1,0 +1,59 @@
+# =============================================================================
+# exposure-graph — verified endpoints (single source of truth)
+# Pattern: collector↔renderer. This file = CAPTURE (MDE + Graph). generate_html_report.py = RENDER.
+# Sintetiza um ATTACK-SURFACE / BLAST-RADIUS a partir das fontes que JÁ temos perm:
+#   - MDE: exposureScore + máquinas expostas + recomendações exploráveis
+#   - Graph: identidades privilegiadas (crown jewels) + risky users (entry points)
+# NOTA: se Microsoft Security Exposure Management (attack paths nativos) estiver licenciado/concedido,
+#       dá p/ trocar a síntese pelos caminhos nativos (ver Skill.md → Enhancements).
+# =============================================================================
+metadata:
+  skill: exposure-graph
+  title: Exposure Graph & Blast Radius
+  description: >
+    Synthesized attack-surface / blast-radius from Defender for Endpoint (org exposure score,
+    most-exposed assets, exploitable exposed recommendations) correlated with privileged
+    identities (crown jewels) and high-risk users (entry points) from Microsoft Graph. Computes
+    heuristic attack paths (risky entry → privileged target) and an exposure verdict. Read-only.
+  data_sources: [Microsoft Defender for Endpoint (TVM API), Microsoft Graph (Identity Protection + directory roles)]
+
+parameters:
+  top_machines: 25
+  top_recommendations: 10
+  exposure_good: 30        # exposureScore <= good  → componente BAIXA
+  exposure_moderate: 50    # <= moderate → MODERADA · else ALTA
+  privileged_roles:
+    - "Global Administrator"
+    - "Privileged Role Administrator"
+    - "Security Administrator"
+    - "Exchange Administrator"
+    - "SharePoint Administrator"
+    - "User Administrator"
+    - "Conditional Access Administrator"
+    - "Application Administrator"
+    - "Cloud Application Administrator"
+    - "Hybrid Identity Administrator"
+
+scoring:
+  # pesos para nível de exposição/risco de máquina
+  level_weight: {High: 3, Medium: 2, Low: 1, None: 0, Informational: 0}
+  # BlastRadius = (#entry_points) * (#privileged_targets) ; PathScore por entry = level/risk weight
+  # Verdict (combina org exposureScore + caminhos sintetizados):
+  #   ALTA      : exposureScore > moderate  OU (entry>0 E priv>0 E exploitableExposed>0)
+  #   MODERADA  : exposureScore > good       OU entry>0 OU exploitableExposed>0
+  #   BAIXA     : caso contrário
+
+mde:
+  base: "https://api.securitycenter.microsoft.com"
+  token_resource: "https://api.securitycenter.microsoft.com"
+  endpoints:
+    exposure_score: "/api/exposureScore"
+    machines: "/api/machines?$top=4000"
+    recommendations: "/api/recommendations?$top=4000"
+
+graph:
+  base: "https://graph.microsoft.com/v1.0"
+  token_resource: "https://graph.microsoft.com"
+  endpoints:
+    directory_roles: "/directoryRoles?$expand=members"
+    risky_users: "/identityProtection/riskyUsers?$filter=riskLevel eq 'high'&$top=200"

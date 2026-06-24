@@ -1,0 +1,76 @@
+# =============================================================================
+# org-posture — verified endpoints (single source of truth)
+# Pattern: collector↔renderer. This file = CAPTURE (Graph + MDE). generate_html_report.py = RENDER.
+# Consolida 4 pilares num Org Posture Index (0-100, nota A-F):
+#   Identity posture (Secure Score %) · Endpoint exposure (100 - MDE exposureScore)
+#   Threat pressure (incidentes ativos, inverso) · Identity risk (risky users high, inverso)
+# Mega-report executivo (board/CISO). Reúne os domínios das skills das Fases A/B.
+# =============================================================================
+metadata:
+  skill: org-posture
+  title: Org Security Posture (Executive Index)
+  description: >
+    One-page executive security posture. Consolidates Microsoft Secure Score (identity/config),
+    Defender for Endpoint exposure score, active Microsoft 365 Defender incidents (threat pressure)
+    and Identity Protection high-risk users into a single weighted Org Posture Index (0–100, grade
+    A–F) with per-pillar breakdown and top drivers. Read-only; API-native.
+  data_sources: [Microsoft Graph (Secure Score + Security incidents + Identity Protection), Microsoft Defender for Endpoint (exposure score), Microsoft Graph subscribedSkus (licensing/FinOps — informational), Microsoft Graph attackSimulation reports (human risk — informational), Microsoft Graph applications + servicePrincipals (NHI / agent identity governance — informational)]
+
+parameters:
+  grade_strong: 80      # index >= strong → FORTE
+  grade_moderate: 60    # index >= moderate → MODERADA · else FRACA
+
+scoring:
+  # Org Posture Index = soma ponderada dos 4 pilares (cada 0-100). Pesos somam 1.0.
+  weights:
+    identity: 0.35       # Secure Score %
+    endpoint: 0.25       # 100 - exposureScore
+    threat: 0.25         # 100 - penalidade por incidentes ativos
+    identity_risk: 0.15  # 100 - penalidade por risky users high
+  # threat: subtrai por severidade de incidente ativo (capado em 0). Graph severities: informational/low/medium/high.
+  incident_penalty: {informational: 1, low: 3, medium: 6, high: 12}
+  # identity_risk: subtrai por usuário de alto risco
+  risky_user_penalty: 12
+  # nota por faixa de índice
+  grades: [[90, "A"], [80, "B"], [70, "C"], [60, "D"], [0, "F"]]
+
+# Informational sections rendered BELOW the index — they DO NOT change the Org Posture Index
+# (the 0–100 number stays a pure security roll-up, comparable over time). Each section degrades
+# to "omitted" when its data/permission is unavailable (402/403/404 → empty {} → not rendered).
+sections:
+  human_risk:                 # 🎓 Attack Simulation Training (Defender for Office 365) — awareness
+    permission: "AttackSimulation.Read.All"   # Application; may need a one-time grant on the agent identity
+    click_rate_warn: 10       # % compromised → 🟠
+    click_rate_high: 20       # % compromised → 🔴
+  licensing:                  # 🪪 FinOps / governance
+    permission: "Organization.Read.All"       # or Directory.Read.All
+    idle_warn_pct: 15         # unused % at/above which a SKU is flagged under-utilized
+    idle_warn_min: 5          # min unused seats for a SKU to be flagged
+  nhi_governance:             # 🤖 AI agent / Non-Human Identity governance — credential hygiene (rubric: agent-identity-governance)
+    permission: "Application.Read.All"
+    secret_expiring_days: 90  # client secret within N days of expiry → flag
+    secret_long_lived_days: 180  # secret with validity > N days → flag (cap expiry, per guidance)
+    secret_pct_warn: 30       # % of app registrations using client secrets → 🟠
+    secret_pct_high: 60       # → 🔴
+
+graph:
+  base: "https://graph.microsoft.com/v1.0"
+  token_resource: "https://graph.microsoft.com"
+  endpoints:
+    secure_scores: "/security/secureScores?$top=1"
+    incidents: "/security/incidents?$filter=status eq 'active'&$top=500"
+    risky_users: "/identityProtection/riskyUsers?$filter=riskLevel eq 'high'&$top=500"
+    # --- Informational sections below (NOT pillars of the index; degrade gracefully on 402/403/404) ---
+    subscribed_skus: "/subscribedSkus"                                                  # 🪪 Licensing / FinOps (Organization.Read.All)
+    attack_sim_simulations: "/security/attackSimulation/simulations?$top=50"            # 🎓 Human Risk (AttackSimulation.Read.All)
+    attack_sim_user_coverage: "/reports/security/getAttackSimulationSimulationUserCoverage"
+    attack_sim_training_coverage: "/reports/security/getAttackSimulationTrainingUserCoverage"
+    attack_sim_repeat_offenders: "/reports/security/getAttackSimulationRepeatOffenders"
+    applications: "/applications?$top=500&$select=id,displayName,passwordCredentials,keyCredentials"   # 🤖 NHI Governance (Application.Read.All)
+    service_principals: "/servicePrincipals?$top=500&$select=id,displayName,servicePrincipalType,accountEnabled"
+
+mde:
+  base: "https://api.securitycenter.microsoft.com"
+  token_resource: "https://api.securitycenter.microsoft.com"
+  endpoints:
+    exposure_score: "/api/exposureScore"
