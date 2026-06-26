@@ -56,6 +56,9 @@ Tunables (`queries.yaml` → `parameters`): `top_machines`, `top_recommendations
 `reports/exposure/<YYYYMMDD_HHMMSS>.html` with: exposure badge + 5 cards (exposure score / entry points / crown jewels / exploitable exposed / blast radius), a synthesized **attack-paths** banner, then tables for risky users, exposed machines, crown jewels, and exploitable exposed recommendations.
 
 ### Step 5: Deliver (archive → link → notify)
+
+> Follow the [canonical delivery sequence](../../shared/sharepoint-archival.md#canonical-delivery-sequence-archive--link--notify) — reuse the delivery skills (do **not** re-implement transport). Never email-only; if `sharepoint.site_id` / `teams.webhook_url` is missing in config, report it instead of skipping.
+
 1. **SharePoint (first)**: `python shared/sharepoint_upload.py upload --site "<config: sharepoint.site_id>" --skill exposure-graph --file <html>` (and the `.md`). Capture `webUrl` + `folderUrl` from stdout; skip/error → continue (best-effort, never blocks email/Teams).
 2. **send-email-report**: title "🕸️ Exposure Graph ({date})", verdict color. Small report (< 3 MB) → **attach the HTML** + body link `📂 Abrir no SharePoint: <folderUrl>` when present. 🔴 The link MUST be the SharePoint `folderUrl` — never a `teams.microsoft.com` / webhook link. 5 cards + path narrative.
 3. **send-teams-notification**: Adaptive Card with exposure verdict, blast radius, top crown jewels at risk + **Abrir no SharePoint** action → `folderUrl` (webhook only; never Graph).

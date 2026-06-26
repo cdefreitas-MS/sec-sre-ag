@@ -146,6 +146,9 @@ SigninLogs
 `reports/aitm/<YYYYMMDD_HHMMSS>.html` with: verdict badge + score + affected users, 5 metric cards (anomalous token / risky success / session anomaly / inbox rules / MFA changes), then tables for each query.
 
 ### Step 5: Deliver (archive → link → notify)
+
+> Follow the [canonical delivery sequence](../../shared/sharepoint-archival.md#canonical-delivery-sequence-archive--link--notify) — reuse the delivery skills (do **not** re-implement transport). Never email-only; if `sharepoint.site_id` / `teams.webhook_url` is missing in config, report it instead of skipping.
+
 1. **SharePoint (first)**: `python shared/sharepoint_upload.py upload --site "<config: sharepoint.site_id>" --skill aitm-dashboard --file <html>` (and the `.md`). Capture `webUrl` + `folderUrl` from stdout; skip/error → continue (best-effort, never blocks email/Teams).
 2. **send-email-report**: title "🎣 AiTM Dashboard ({date})", verdict color. Small report (< 3 MB) → **attach the HTML** + body link `📂 Abrir no SharePoint: <folderUrl>` when present. 🔴 The link MUST be the SharePoint `folderUrl` — never a `teams.microsoft.com` / webhook link. 5 metric cards + top targets.
 3. **send-teams-notification**: Adaptive Card with verdict, score, top flagged users + **Abrir no SharePoint** action → `folderUrl` (webhook only; never Graph).
