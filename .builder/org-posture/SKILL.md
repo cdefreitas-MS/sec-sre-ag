@@ -85,6 +85,9 @@ Pillar sub-scores:
 Below the pillar table, three **informational sections** render when their data is available — they **do not** change the Org Posture Index (kept pure/comparable): **🎓 Risco Humano** (Attack Simulation: usuários simulados · taxa de comprometimento 🔴/🟠/✅ · treinamento concluído % · reincidentes), **🪪 Licenciamento & Governança (FinOps)** (SKUs por total/atribuídas/ociosas/utilização, com flag ⚠️ de subutilização) and **🤖 Governança de Identidades de Agente / NHI** (app registrations · service principals · % apps com client secret 🔴/🟠/✅ · segredos expirados · vencendo ≤ 90d · validade > 180d — higiene de credenciais da população não-humana). Each is **omitted** when its source returns no data/permission.
 
 ### Step 5: Deliver (archive → link → notify)
+
+> Follow the [canonical delivery sequence](../../shared/sharepoint-archival.md#canonical-delivery-sequence-archive--link--notify) — reuse the delivery skills (do **not** re-implement transport). Never email-only; if `sharepoint.site_id` / `teams.webhook_url` is missing in config, report it instead of skipping.
+
 1. **SharePoint (first)**: `python shared/sharepoint_upload.py upload --site "<config: sharepoint.site_id>" --skill org-posture --file <html>` (and the `.md`). Capture `webUrl` + `folderUrl` from stdout; skip/error → continue (best-effort, never blocks email/Teams).
 2. **send-email-report**: title "🛡️ Org Posture: {grade} ({date})", posture color. Small report (< 3 MB) → **attach the HTML** + body link `📂 Abrir no SharePoint: <folderUrl>` when present. 🔴 The link MUST be the SharePoint `folderUrl` (a `sharepoint.com` URL) — never a `teams.microsoft.com` / webhook link. Grade + 4 cards + pillar table.
 3. **send-teams-notification**: Adaptive Card with grade, index, posture, weakest pillar + **Abrir no SharePoint** action → `folderUrl` (webhook only; never Graph).
