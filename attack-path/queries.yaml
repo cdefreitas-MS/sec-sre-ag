@@ -1,0 +1,215 @@
+# attack-path — CAPTURE + risk model (collector↔renderer convention)
+#
+# This skill is a META-CONSOLIDATOR: it does NOT introduce a new data source.
+# It ingests the SAME datasets your other skills already collect and SYNTHESIZES
+# cross-domain attack paths (entry → pivot → crown jewel), then ranks the
+# remediation CHOKEPOINTS that break the most paths.
+#
+# --from-json bundle keys (all optional except where noted — degrades gracefully):
+#   exposure_score        MDE  /exposureScore                       (exposure-graph)
+#   machines              MDE  /machines                            (exposure-graph)  -> exposed device entries
+#   recommendations       MDE  /recommendations                     (exposure-graph)  -> exploitable exposed weaknesses
+#   directory_roles       Graph /directoryRoles?$expand=members     (exposure-graph)  -> crown-jewel roles + members
+#   risky_users           Graph /identityProtection/riskyUsers      (exposure-graph)  -> phishable/compromised entries
+#   service_principals    Graph /servicePrincipals (+passwordCredentials/keyCredentials)  (org-posture NHI / spn-scope-drift)
+#   applications          Graph /applications (+passwordCredentials/keyCredentials)        (org-posture NHI)
+#   app_grants            map {appId|spObjectId: [granted Graph scope strings]}            (graph-least-privilege)
+#   sp_owners             map {appId|spObjectId: [owner upn]}                              (optional)
+#   admin_logons          map {deviceName: [admin upn]}                                    (optional lateral link)
+#   mdc_assessments       ARM  /Microsoft.Security/assessments      (advisor-impact)  -> public-network misconfig entries
+#   mitre_covered         list of ATT&CK technique IDs your detections cover (mitre-coverage-report) -> blind-spot flag
+#   silent_sources        list of log sources that went silent       (telemetry gap)  -> blind-spot flag
+#   impaired_sensors      list of device names with impaired MDE sensor                  -> blind-spot flag
+
+parameters:
+  # Crown-jewel directory roles (case-insensitive). Membership in these = highest impact.
+  privileged_roles:
+    - Global Administrator
+    - Privileged Role Administrator
+    - Privileged Authentication Administrator
+    - Security Administrator
+    - Application Administrator
+    - Cloud Application Administrator
+    - User Administrator
+    - Authentication Administrator
+    - Exchange Administrator
+    - SharePoint Administrator
+    - Intune Administrator
+    - Conditional Access Administrator
+  # Graph app-role scopes that effectively grant tenant takeover (self-escalation to GA).
+  tenant_takeover_scopes:
+    - RoleManagement.ReadWrite.Directory
+    - AppRoleAssignment.ReadWrite.All
+    - Application.ReadWrite.All
+    - Directory.ReadWrite.All
+    - PrivilegedAccess.ReadWrite.AzureAD
+    - PrivilegedAccess.ReadWrite.AzureADGroup
+  # Graph scopes with high blast radius (data exfil / impersonation) but not direct takeover.
+  high_impact_scopes:
+    - Mail.Send
+    - Mail.ReadWrite
+    - MailboxSettings.ReadWrite
+    - Files.ReadWrite.All
+    - Sites.ReadWrite.All
+    - User.ReadWrite.All
+    - Group.ReadWrite.All
+    - GroupMember.ReadWrite.All
+    - Policy.ReadWrite.ConditionalAccess
+  # Credential hygiene thresholds (days).
+  secret_expiring_days: 30
+  secret_long_lived_days: 180
+  # Path search.
+  max_path_depth: 5
+  top_paths: 40
+  top_chokepoints: 20
+
+scoring:
+  # Per-edge FEASIBILITY weight (0..1) — how easy is this hop to abuse.
+  edge_weight:
+    secret_expired: 0.90        # an already-expired secret often means rotation is unmanaged
+    secret_expiring: 0.70       # secret expiring soon → likely manually handled / leakable
+    secret_long_lived: 0.55     # secret valid > long_lived_days → long exposure window
+    secret_present: 0.45        # any client secret (vs cert/federated) is a weaker factor
+    cert_credential: 0.30       # certificate is stronger than a secret
+    public_exploit: 0.90        # exposed + public exploit available
+    exposed_high_sev: 0.70      # exposed weakness severity >= 8
+    exposed: 0.40               # exposed but lower severity
+    risky_user_high: 0.80
+    risky_user_medium: 0.55
+    risky_user_low: 0.35
+    scope_tenant_takeover: 0.85
+    scope_high_impact: 0.60
+    misconfig_public: 0.60
+    owns_sp: 0.65               # a user owning an app reg can mint its credentials
+    admin_logon: 0.70           # admin session present on an exposed device = credential theft
+    member_of: 1.00             # membership confers the role's privilege (impact lives in jewel)
+  # Crown-jewel IMPACT (0..1).
+  jewel_impact:
+    tenant_takeover: 1.00       # GA membership or a takeover Graph scope
+    global_admin: 1.00
+    privileged_role: 0.70
+    high_impact_capability: 0.55
+    sensitive_resource: 0.50
+    endpoint_foothold: 0.40
+  # Verdict thresholds.
+  verdict:
+    critical_path_likelihood: 0.50   # any path to a takeover jewel with likelihood >= this => CRÍTICA
+    elevated_path_risk: 35.0         # any path risk >= this (0..100) => ELEVADA
+
+# Abuse semantics per edge relation: how it's abused + MITRE technique + the remediation that BREAKS it.
+abuse_map:
+  weak_credential:
+    abuse: "Obter/abusar o segredo do app (vazado, longo, expirado-sem-rotação) e autenticar-se como o service principal"
+    mitre: T1078.004
+    break_with: "Rotacionar o segredo e migrar para credencial federada (workload identity) ou certificado gerenciado — remover client secrets"
+  member_of:
+    abuse: "Herdar o privilégio do papel atribuído"
+    mitre: T1098.003
+    break_with: "Remover a atribuição de papel privilegiado ou colocá-la sob PIM (just-in-time, aprovação)"
+  granted_scope_takeover:
+    abuse: "Escalar privilégio no tenant usando a permissão de aplicativo do Graph (auto-atribuir papéis / consentir apps / editar diretório)"
+    mitre: T1098.003
+    break_with: "Revogar o app role de takeover (RoleManagement/Application/Directory ReadWrite) — aplicar least-privilege"
+  granted_scope_impact:
+    abuse: "Exfiltrar dados ou personificar usuários via permissão de aplicativo de alto impacto (Mail/Files/Sites/User ReadWrite)"
+    mitre: T1114
+    break_with: "Revogar o app role de alto impacto ou restringir o escopo (RBAC for Applications / Application Access Policy)"
+  risky_identity:
+    abuse: "Comprometer a conta de alto risco (phishing / token roubado / AiTM) e usar a sessão"
+    mitre: T1078
+    break_with: "Conter o usuário (revogar sessões + reset + MFA forte) e exigir MFA phishing-resistant via CA"
+  exposed_internet:
+    abuse: "Explorar o serviço/endpoint exposto à internet para obter foothold"
+    mitre: T1190
+    break_with: "Remediar a CVE / restringir a exposição pública (patch, NSG, private endpoint, JIT)"
+  misconfig_public:
+    abuse: "Acessar o recurso por rede pública sem controle de borda"
+    mitre: T1190
+    break_with: "Desabilitar public network access e aplicar NSG / Private Link / firewall"
+  owns_sp:
+    abuse: "O proprietário do app registration pode criar uma nova credencial e assumir o service principal"
+    mitre: T1098.001
+    break_with: "Reduzir os proprietários do app registration e exigir aprovação para novas credenciais"
+  admin_logon:
+    abuse: "Roubar a sessão/credencial do admin presente no endpoint exposto e mover lateralmente"
+    mitre: T1550
+    break_with: "Isolar/limpar o endpoint, exigir PAW para sessões privilegiadas e revogar as sessões do admin"
+
+# Hunting dirigido pela correlação: para cada tipo de aresta do caminho, a consulta que
+# CONFIRMA se há comportamento ACONTECENDO AGORA nas entidades do caminho. Placeholders
+# ({appId},{spId},{spName},{upn},{adminname},{device},{resourceId}) são preenchidos pelo renderer.
+# product: sentinel (KQL no Log Analytics) | xdr (Advanced Hunting via Graph runHuntingQuery).
+hunting:
+  weak_credential:
+    - id: sp_signins
+      title: "Sign-ins recentes do service principal"
+      product: sentinel
+      signal: "tentativas/sucessos de autenticação do app nas últimas 24h"
+      kql: 'AADServicePrincipalSignInLogs | where TimeGenerated > ago(1d) | where AppId == "{appId}" | summarize Tentativas=count(), Falhas=countif(ResultType != 0), IPs=dcount(IPAddress), Ultimo=max(TimeGenerated)'
+    - id: sp_cred_added
+      title: "Credencial adicionada ao app (persistência)"
+      product: sentinel
+      signal: "novo segredo/certificado adicionado ao app recentemente"
+      kql: 'AuditLogs | where TimeGenerated > ago(7d) | where OperationName has "application" and OperationName has_any ("credential","Certificates") | mv-expand tr=TargetResources | where tostring(tr.id) == "{appId}" | project TimeGenerated, OperationName, Iniciador=tostring(InitiatedBy.user.userPrincipalName)'
+  granted_scope_takeover:
+    - id: sp_graph_activity
+      title: "Chamadas Graph sensíveis do app"
+      product: sentinel
+      signal: "uso recente do Graph pelo app (escrita em diretório/papéis)"
+      kql: 'MicrosoftGraphActivityLogs | where TimeGenerated > ago(1d) | where AppId == "{appId}" | summarize Chamadas=count(), Endpoints=dcount(RequestUri), Ultimo=max(TimeGenerated)'
+  granted_scope_impact:
+    - id: sp_graph_activity
+      title: "Chamadas Graph sensíveis do app"
+      product: sentinel
+      signal: "uso recente do Graph pelo app (Mail/Files/Sites)"
+      kql: 'MicrosoftGraphActivityLogs | where TimeGenerated > ago(1d) | where AppId == "{appId}" | summarize Chamadas=count(), Endpoints=dcount(RequestUri), Ultimo=max(TimeGenerated)'
+  risky_identity:
+    - id: user_risky_signins
+      title: "Sign-ins de risco do usuário"
+      product: sentinel
+      signal: "sign-ins de risco / país novo nas últimas 24h"
+      kql: 'SigninLogs | where TimeGenerated > ago(1d) | where UserPrincipalName =~ "{upn}" | summarize Tentativas=count(), Risco=make_set(RiskLevelDuringSignIn), Paises=make_set(tostring(LocationDetails.countryOrRegion)), Ultimo=max(TimeGenerated)'
+    - id: user_inbox_rules
+      title: "Regras de inbox (sinal de BEC)"
+      product: xdr
+      signal: "criação/edição de inbox rule (clássico de comprometimento de e-mail)"
+      kql: 'CloudAppEvents | where Timestamp > ago(3d) | where ActionType in ("New-InboxRule","Set-InboxRule","UpdateInboxRules") | where AccountId =~ "{upn}" or RawEventData has "{upn}" | project Timestamp, ActionType, AccountDisplayName'
+  member_of:
+    - id: role_change_user
+      title: "Mudança de papel privilegiado (usuário)"
+      product: sentinel
+      signal: "add/remove do usuário em papel privilegiado recentemente"
+      kql: 'AuditLogs | where TimeGenerated > ago(7d) | where Category == "RoleManagement" and OperationName has_any ("Add member to role","Add eligible member to role") | mv-expand tr=TargetResources | where tostring(tr.userPrincipalName) =~ "{upn}" | project TimeGenerated, OperationName, Iniciador=tostring(InitiatedBy.user.userPrincipalName)'
+    - id: role_change_sp
+      title: "Mudança de papel privilegiado (service principal)"
+      product: sentinel
+      signal: "add/remove do SP em papel privilegiado recentemente"
+      kql: 'AuditLogs | where TimeGenerated > ago(7d) | where Category == "RoleManagement" and OperationName has_any ("Add member to role","Add eligible member to role") | mv-expand tr=TargetResources | where tostring(tr.id) == "{spId}" | project TimeGenerated, OperationName, Iniciador=tostring(InitiatedBy.user.userPrincipalName)'
+  admin_logon:
+    - id: device_admin_logon
+      title: "Logons do admin no endpoint exposto"
+      product: xdr
+      signal: "sessão do admin no host exposto (alvo de roubo de credencial)"
+      kql: 'DeviceLogonEvents | where Timestamp > ago(3d) | where DeviceName == "{device}" and AccountName =~ "{adminname}" | summarize Logons=count(), Ultimo=max(Timestamp)'
+  exposed_internet:
+    - id: device_alerts
+      title: "Alertas recentes no endpoint exposto"
+      product: xdr
+      signal: "alertas do Defender no host nas últimas 72h"
+      kql: 'AlertEvidence | where Timestamp > ago(3d) | where DeviceName == "{device}" | summarize Alertas=dcount(AlertId), Ultimo=max(Timestamp)'
+  misconfig_public:
+    - id: resource_activity
+      title: "Atividade no recurso público"
+      product: sentinel
+      signal: "operações no recurso exposto nas últimas 72h"
+      kql: 'AzureActivity | where TimeGenerated > ago(3d) | where ResourceId =~ "{resourceId}" | summarize Ops=count() by OperationNameValue | top 10 by Ops'
+
+# Sentinel incident creation (ACTION — gated, opt-in via --create-incident).
+# Requires Microsoft Sentinel Contributor (the UAMI already has it). Default = draft only.
+incident:
+  api_version: "2024-03-01"
+  status: New
+  action_name: create_sentinel_incident
+  title_template: "[SOC Autônomo] Attack path ATIVO — {entry} → {target}"
+  # path risk → Sentinel severity
+  severity_by_risk: { high: 60, medium: 35 }   # >=60 High · >=35 Medium · else Low
