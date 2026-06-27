@@ -85,7 +85,7 @@ Concatenate the datasets the source skills already produce into one JSON. **All 
 | `machines` + `recommendations` | exposure-graph · MDE `/machines`,`/recommendations` | exposed-device entries + public-exploit weight |
 | `admin_logons` | optional · map `{deviceName: [admin upn]}` | exposed-host → admin lateral edge |
 | `sp_owners` | optional · map `{appId|spObjectId: [owner upn]}` | owner → app credential-minting edge |
-| `mdc_assessments` | advisor-impact · ARM `/Microsoft.Security/assessments` | public-network misconfig entries |
+| `mdc_assessments` | advisor-impact · ARM `/Microsoft.Security/assessments` | **real exposure entry vectors** (Defender for Cloud recs): open **management ports** (RDP/SSH on the internet → `🖥️ Servidor exposto`) and **public network access** + data-exposure recs (→ `🛢️ Dado exposto`). Each entry carries the **real recommendation** (shown as `📋 Recomendação` + deep link to fix). Pattern matchers in `queries.yaml:exposure_patterns`. |
 | `mitre_covered` | mitre-coverage-report · `[technique IDs your detections cover]` | detection blind-spot flag |
 | `silent_sources` / `impaired_sensors` | telemetry gap · `[source]` / `[device]` | telemetry blind-spot flag |
 

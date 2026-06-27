@@ -231,11 +231,12 @@ def _member_node(g, member):
     return nid, "user"
 
 
-def build_graph(data, params, scoring, abuse_map):
+def build_graph(data, params, scoring, abuse_map, exposure=None):
     g = Graph()
     ew = scoring.get("edge_weight", {})
     ji = scoring.get("jewel_impact", {})
-    g.add_node(EXT, "ext", "Atacante externo / internet", kind="entry")
+    exp = exposure or {}
+    g.add_node(EXT, "ext", "Internet (acesso externo)", kind="entry")
 
     obj_to_node, app_to_node, upn_to_node = {}, {}, {}
 
@@ -344,21 +345,32 @@ def build_graph(data, params, scoring, abuse_map):
             if un:  # link only to a known (privileged) identity → real lateral chain
                 g.add_edge(did, un, "admin_logon", ew.get("admin_logon", 0.7), "mde/logons", abuse_map)
 
-    # ── public-network misconfig resources (advisor-impact MDC) ─────
+    # ── REAL exposure → entry vectors (Defender for Cloud assessments) ─────
+    # A server with open management ports (RDP/SSH/WinRM on the internet), OR a resource
+    # with public network access + a data-exposure recommendation. Each entry carries the
+    # real recommendation displayName so the path is grounded, not a generic "attacker".
+    op_pats = [p.lower() for p in exp.get("open_ports", [])]
+    pd_pats = [p.lower() for p in exp.get("public_data", [])]
     for a in _val(data.get("mdc_assessments")):
         props = a.get("properties", {}) if isinstance(a, dict) else {}
-        name = str(props.get("displayName", "")).lower()
+        disp = str(props.get("displayName", ""))
+        name = disp.lower()
         status = str((props.get("status") or {}).get("code", "")).lower()
-        if status not in ("unhealthy", "") :
+        if status not in ("unhealthy", ""):
             continue
-        if "public network access" in name or ("public" in name and "disabled" in name):
-            rid_raw = props.get("resourceDetails", {}).get("id") or a.get("id", "")[:60]
-            short = str(rid_raw).rsplit("/", 1)[-1] or "recurso"
-            rn = g.add_node(f"res::{short}", "resource", f"Recurso público: {short}",
+        rid_raw = (props.get("resourceDetails", {}) or {}).get("id") or a.get("id", "")
+        short = str(rid_raw).rsplit("/", 1)[-1] or "recurso"
+        if op_pats and any(p in name for p in op_pats):
+            rn = g.add_node(f"srv::{short}", "server",
+                            f"Servidor exposto: {short} — {_open_port_label(name)}",
+                            kind="jewel", impact=ji.get("server_foothold", 0.5),
+                            meta={"resourceId": str(rid_raw), "resshort": short, "recommendation": disp})
+            g.add_edge(EXT, rn, "open_ports", ew.get("open_ports", 0.7), "mdc/assessments", abuse_map)
+        elif pd_pats and any(p in name for p in pd_pats):
+            rn = g.add_node(f"data::{short}", "data", f"Dado exposto: {short} — acesso público",
                             kind="jewel", impact=ji.get("sensitive_resource", 0.5),
-                            meta={"resourceId": str(rid_raw)})
-            g.add_edge(EXT, rn, "misconfig_public", ew.get("misconfig_public", 0.6),
-                       "mdc/assessments", abuse_map)
+                            meta={"resourceId": str(rid_raw), "resshort": short, "recommendation": disp})
+            g.add_edge(EXT, rn, "public_data", ew.get("public_data", 0.6), "mdc/assessments", abuse_map)
 
     # ── blind-spot annotation (Module 2 + Module 4) ─────────────────
     covered = {str(t).upper() for t in (data.get("mitre_covered") or [])}
@@ -514,7 +526,8 @@ REL_ICON = {"weak_credential": "🔑", "member_of": "👑", "granted_scope_takeo
             "granted_scope_impact": "📤", "risky_identity": "🎭", "admin_logon": "🖥️",
             "exposed_internet": "🌐", "misconfig_public": "🛟", "owns_sp": "🧷"}
 NODE_ICON = {"ext": "🌐", "sp": "🤖", "user": "👤", "device": "💻",
-             "resource": "🗄️", "role": "👑", "cap": "⚡", "foothold": "🎯"}
+             "resource": "🗄️", "server": "🖥️", "data": "🛢️",
+             "role": "👑", "cap": "⚡", "foothold": "🎯"}
 
 
 def _chain_html(g, p):
@@ -610,7 +623,7 @@ def _svg_attack_graph(g, paths, compact=False):
     heads = []
     for L in range(maxlayer + 1):
         if L == 0:
-            t = "🌐 Atacante"
+            t = "🌐 Acesso externo"
         elif L == jewel_col:
             t = "🎯 Alvo — até onde chega"
         elif L == 1:
@@ -687,6 +700,22 @@ def _svg_attack_graph(g, paths, compact=False):
 
 
 # ───────────── deep links · hunting · incident proposal ─────────────
+def _open_port_label(name):
+    if "rdp" in name or "3389" in name:
+        return "porta RDP (3389) aberta"
+    if "ssh" in name or " 22" in name:
+        return "porta SSH (22) aberta"
+    if "management ports" in name:
+        return "portas de gerência abertas (RDP/SSH/WinRM)"
+    if "just-in-time" in name:
+        return "portas de gerência sem Just-in-Time"
+    if "internet-facing" in name or "network security group" in name:
+        return "VM exposta à internet sem NSG"
+    if "all network ports" in name:
+        return "portas de rede sem restrição"
+    return "portas abertas"
+
+
 def _portal_link(g, nid):
     """Best deep link to open the object to fix (Entra / Defender / Azure Portal)."""
     nd = g.nodes.get(nid, {})
@@ -699,7 +728,7 @@ def _portal_link(g, nid):
                 f"UserProfileMenuBlade/~/overview/userId/{m['objectId']}")
     if t == "device" and m.get("id"):
         return f"https://security.microsoft.com/machines/{m['id']}/overview"
-    if t == "resource" and m.get("resourceId"):
+    if t in ("resource", "server", "data") and m.get("resourceId"):
         return f"https://portal.azure.com/#@/resource{m['resourceId']}/overview"
     if t == "role":
         return "https://entra.microsoft.com/#view/Microsoft_AAD_IAM/AllRolesBlade"
@@ -723,8 +752,9 @@ def _path_entities(g, p):
             ent.setdefault("upn", m.get("upn", ""))
         elif t == "device":
             ent.setdefault("device", m.get("name", nd.get("label", "").replace("Device: ", "")))
-        elif t == "resource":
+        elif t in ("resource", "server", "data"):
             ent.setdefault("resourceId", m.get("resourceId", ""))
+            ent.setdefault("resshort", m.get("resshort", short if (short := nd.get("label", "").split(":")[-1].strip()) else ""))
         elif t == "role":
             ent.setdefault("role", nd.get("label", "").replace("Papel: ", ""))
     if ent.get("upn"):
@@ -886,6 +916,9 @@ def render_html(s, g):
         nshare = entry_counts.get(entry_id, 1)
         share_badge = f' <span class="b solve">💥 fecha {nshare} caminhos</span>' if nshare > 1 else ""
         minimap = _svg_attack_graph(g, [p], compact=True)
+        entry_meta = g.nodes.get(entry_id, {}).get("meta", {})
+        rec = entry_meta.get("recommendation")
+        rec_row = f'<div class="row">📋 <b>Recomendação:</b> {html.escape(str(rec))}</div>' if rec else ""
         hblock = ""
         for hid in p.get("hunt_ids", []):
             it = hunts.get(hid, {})
@@ -919,6 +952,7 @@ def render_html(s, g):
                    f'<div class="maptitle">🗺️ Da camada de entrada até onde o ataque chega</div>'
                    f'<div class="mapwrap">{minimap}</div>'
                    f'<div class="row">🔧 <b>Correção:</b> {html.escape(p["edges"][0]["break_with"])}{fix_a}{share_badge}</div>'
+                   f'{rec_row}'
                    f'<div class="row">🎯 <b>Alvo:</b> {html.escape(p["nodes"][-1])}{tgt_a}</div>'
                    f'{hunt_html}{inc_html}</div></details>')
 
@@ -1010,9 +1044,10 @@ code{{background:#0a1322;border:1px solid #1c2942;border-radius:4px;padding:1px 
 <div class="card"><div class="n" style="color:#e6c463">{s['n_blind']}</div><div class="l">👁️ sem detecção</div></div>
 <div class="card"><div class="n" style="color:#ff4d5e">{s['n_active']}</div><div class="l">🔴 ativos agora</div></div>
 </div>
-<div class="lead">🧭 Cada <b>caminho de ataque</b> liga a <b>porta de entrada</b> (o que o atacante explora primeiro)
+<div class="lead">🧭 Cada <b>caminho de ataque</b> liga a <b>porta de entrada</b> (uma exposição REAL —
+servidor com porta de gerência aberta, recurso com acesso público, credencial fraca de app)
 até <b>onde ele chega</b> (a joia da coroa). Nenhum produto isolado vê estes caminhos porque eles cruzam
-domínios (credencial × privilégio × exposição). Clique em cada janela para ver o mapa, a caça e a correção.</div>
+domínios (rede × dados × credencial × privilégio). Clique em cada janela para ver o mapa, a caça e a correção.</div>
 {por}
 <div class="legend">
 <span><i class="sw" style="background:#ff8c00"></i> entrada</span>
@@ -1081,7 +1116,7 @@ def main():
     else:
         data = collect()
 
-    g = build_graph(data, params, scoring, abuse_map)
+    g = build_graph(data, params, scoring, abuse_map, q.get("exposure_patterns"))
     scored = score_paths(g, find_paths(g, params), scoring)
     chokes = chokepoints(g, scored, params)
     n_crit = sum(1 for p in scored if p["critical"])
