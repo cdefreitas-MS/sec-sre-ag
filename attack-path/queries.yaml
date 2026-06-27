@@ -80,6 +80,8 @@ scoring:
     scope_tenant_takeover: 0.85
     scope_high_impact: 0.60
     misconfig_public: 0.60
+    open_ports: 0.70            # internet-facing open management ports (RDP/SSH/WinRM) = real entry
+    public_data: 0.60          # resource with public network access + data-exposure recommendation
     owns_sp: 0.65               # a user owning an app reg can mint its credentials
     admin_logon: 0.70           # admin session present on an exposed device = credential theft
     member_of: 1.00             # membership confers the role's privilege (impact lives in jewel)
@@ -90,6 +92,7 @@ scoring:
     privileged_role: 0.70
     high_impact_capability: 0.55
     sensitive_resource: 0.50
+    server_foothold: 0.50       # compromising an internet-exposed server (open ports)
     endpoint_foothold: 0.40
   # Verdict thresholds.
   verdict:
@@ -134,6 +137,35 @@ abuse_map:
     abuse: "Roubar a sessão/credencial do admin presente no endpoint exposto e mover lateralmente"
     mitre: T1550
     break_with: "Isolar/limpar o endpoint, exigir PAW para sessões privilegiadas e revogar as sessões do admin"
+  open_ports:
+    abuse: "Explorar a porta de gerência exposta à internet (RDP/SSH/WinRM) para obter acesso ao servidor"
+    mitre: T1133
+    break_with: "Fechar/restringir as portas no NSG (nunca 0.0.0.0/0 em RDP/SSH), exigir Just-in-Time (JIT) + Bastion e firewall"
+  public_data:
+    abuse: "Acessar/exfiltrar dados do recurso pela rede pública (sem private endpoint/firewall)"
+    mitre: T1530
+    break_with: "Desabilitar public network access, aplicar Private Link/Service Endpoint e firewall com IPs permitidos"
+
+# Real exposure -> entry vectors (Defender for Cloud assessments). A case-insensitive substring
+# match in the assessment displayName decides the entry edge: open_ports (servidor) vs public_data (dado).
+exposure_patterns:
+  open_ports:
+    - management ports
+    - ports should be restricted
+    - all network ports
+    - internet-facing virtual machines
+    - open ports
+    - just-in-time network access
+    - network security groups
+    - rdp
+    - ssh
+  public_data:
+    - public network access
+    - public access should be disallowed
+    - restrict network access
+    - public network access disabled
+    - allow public access
+    - should disable public
 
 # Hunting dirigido pela correlação: para cada tipo de aresta do caminho, a consulta que
 # CONFIRMA se há comportamento ACONTECENDO AGORA nas entidades do caminho. Placeholders
@@ -202,6 +234,23 @@ hunting:
       title: "Atividade no recurso público"
       product: sentinel
       signal: "operações no recurso exposto nas últimas 72h"
+      kql: 'AzureActivity | where TimeGenerated > ago(3d) | where ResourceId =~ "{resourceId}" | summarize Ops=count() by OperationNameValue | top 10 by Ops'
+  open_ports:
+    - id: server_inbound
+      title: "Conexões de entrada no servidor exposto"
+      product: xdr
+      signal: "conexões de entrada aceitas no servidor nas últimas 72h (varredura/brute-force?)"
+      kql: 'DeviceNetworkEvents | where Timestamp > ago(3d) | where DeviceName has "{resshort}" and ActionType == "InboundConnectionAccepted" | summarize Conexoes=count(), IPs=dcount(RemoteIP), Ultimo=max(Timestamp)'
+    - id: resource_control_ops
+      title: "Operações de controle no recurso"
+      product: sentinel
+      signal: "operações no recurso nas últimas 72h"
+      kql: 'AzureActivity | where TimeGenerated > ago(3d) | where ResourceId =~ "{resourceId}" | summarize Ops=count() by OperationNameValue | top 10 by Ops'
+  public_data:
+    - id: resource_control_ops
+      title: "Operações de controle no recurso público"
+      product: sentinel
+      signal: "operações no recurso público nas últimas 72h"
       kql: 'AzureActivity | where TimeGenerated > ago(3d) | where ResourceId =~ "{resourceId}" | summarize Ops=count() by OperationNameValue | top 10 by Ops'
 
 # Sentinel incident creation (ACTION — gated, opt-in via --create-incident).
