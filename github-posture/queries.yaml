@@ -33,7 +33,7 @@ parameters:
 # security_events, read:org). NUNCA escreve. --from-json é o caminho primário/testável.
 # -----------------------------------------------------------------------------
 collector:
-  auth: "gh auth login  (org admin / security manager)  ·  scopes: read:org, admin:org, security_events"
+  auth: "GITHUB_TOKEN/GH_TOKEN no ambiente (REST, caminho do SRE Agent) OU `gh auth login` (org admin / security manager) · scopes: read:org, admin:org, security_events"
   rest:
     base: "gh api"
     # Org-level (1 chamada cada)

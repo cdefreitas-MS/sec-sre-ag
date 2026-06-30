@@ -6,7 +6,7 @@ github-posture / generate_html_report.py  (collector ↔ renderer)
 Postura de segurança de uma organização GitHub nos 8 DOMÍNIOS do Programa de Trabalho:
 governança/acesso, branch protection, secrets, GitHub Actions (CI/CD), code security
 (Dependabot/CodeQL), audit log e supply chain. Catálogo GH-NNN portado FIEL do
-github-security-audit.ps1/.sh. 100% READ-ONLY — toda chamada é GET (`gh api`).
+github-security-audit.ps1/.sh. 100% READ-ONLY — toda chamada é GET (`gh api` ou REST com GITHUB_TOKEN).
 
 MODULAR (3 usos):
   1) standalone        → relatório próprio HTML (email) + Markdown (repo)
@@ -16,13 +16,20 @@ MODULAR (3 usos):
 
 Dois modos de dado:
   --from-json inventory.json   → render determinístico/offline (caminho primário, testável)
-  --org <login>                → auto-coleta via gh api (precisa gh auth + admin:org/security_events)
+  --org <login>                → auto-coleta: REST se GITHUB_TOKEN/GH_TOKEN no ambiente (caminho do
+                                 SRE Agent), senão gh api (gh auth). Precisa scopes read:org/
+                                 admin:org/security_events p/ os domínios de governança.
 """
 from __future__ import annotations
 import argparse, datetime as dt, html, json, os, shutil, subprocess, sys
+import urllib.request, urllib.error
 
 # gh CLI no Windows resolve gh.exe via which; no Linux acha o binário.
 GH = shutil.which("gh") or "gh"
+# Coleta tem 2 caminhos: (a) GITHUB_TOKEN/GH_TOKEN no ambiente -> REST direto (api.github.com),
+# o caminho do SRE Agent (sem depender do gh CLI); (b) gh CLI autenticado -> gh api (dev local).
+GH_TOKEN = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+GH_API = (os.environ.get("GITHUB_API_URL") or "https://api.github.com").rstrip("/")
 
 # =============================================================================
 # helpers de leitura tolerante
@@ -774,7 +781,25 @@ def build_report(data, params):
 # =============================================================================
 # COLLECTOR — gh api (read-only). Caminho primário é --from-json.
 # =============================================================================
+def _http_get(endpoint):
+    """GET via REST com token no header. `endpoint` = caminho relativo (ex.: 'orgs/foo/members')
+    ou URL absoluta. 403/404/sem-scope -> None (o check vira Skip, degrada gracioso)."""
+    url = endpoint if str(endpoint).startswith("http") else f"{GH_API}/{str(endpoint).lstrip('/')}"
+    req = urllib.request.Request(url, headers={
+        "Authorization": f"Bearer {GH_TOKEN}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "github-posture",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            return json.loads(r.read().decode("utf-8") or "null")
+    except Exception:
+        return None
+
 def _gh(endpoint):
+    if GH_TOKEN:
+        return _http_get(endpoint)
     try:
         out = subprocess.run([GH, "api", endpoint], capture_output=True, text=True,
                              encoding="utf-8", errors="replace", timeout=120)
@@ -785,6 +810,9 @@ def _gh(endpoint):
         return None
 
 def _gh_repo_list(org, limit):
+    if GH_TOKEN:
+        out = _http_get(f"orgs/{org}/repos?per_page={min(int(limit), 100)}&type=all")
+        return out if isinstance(out, list) else []
     try:
         out = subprocess.run([GH, "repo", "list", org, "--limit", str(limit),
                               "--json", "name,visibility,defaultBranchRef"],
@@ -794,7 +822,8 @@ def _gh_repo_list(org, limit):
         return []
 
 def collect(org, params):
-    print(f"• coletando org {org} (gh api, read-only)…", file=sys.stderr)
+    mode = "REST (GITHUB_TOKEN)" if GH_TOKEN else "gh CLI"
+    print(f"• coletando org {org} via {mode} (read-only)…", file=sys.stderr)
     data = {"org": _gh(f"orgs/{org}") or {}}
     data["org"]["login"] = data["org"].get("login", org)
     data["members_no_2fa"]      = _gh(f"orgs/{org}/members?filter=2fa_disabled")
@@ -818,7 +847,7 @@ def collect(org, params):
         if not name:
             continue
         rd = _gh(f"repos/{org}/{name}") or {}
-        branch = (rm.get("defaultBranchRef") or {}).get("name") or rd.get("default_branch") or "main"
+        branch = (rm.get("defaultBranchRef") or {}).get("name") or rm.get("default_branch") or rd.get("default_branch") or "main"
         bp = _gh(f"repos/{org}/{name}/branches/{branch}/protection")
         sig = _gh(f"repos/{org}/{name}/branches/{branch}/protection/required_signatures")
         co = _gh(f"repos/{org}/{name}/contents/.github/CODEOWNERS")
@@ -857,7 +886,7 @@ def main():
     here = os.path.dirname(os.path.abspath(__file__))
     ap = argparse.ArgumentParser(description="GitHub Posture — gap-scored 8-domain audit (read-only)")
     ap.add_argument("--from-json", help="inventário pré-coletado (modo offline/primário)")
-    ap.add_argument("--org", help="login da organização (auto-coleta via gh api)")
+    ap.add_argument("--org", help="login da organização (auto-coleta: REST via GITHUB_TOKEN, senão gh api)")
     ap.add_argument("--queries", default=os.path.join(here, "queries.yaml"))
     ap.add_argument("--format", choices=["html", "md", "both"], default="both")
     ap.add_argument("--output", default=os.path.join(here, "tmp", "github-posture"))

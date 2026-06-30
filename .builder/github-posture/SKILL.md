@@ -49,7 +49,7 @@ After scoring, `build_attack_path_feed()` emits:
 ## Workflow
 
 ### Step 1: Collect (read-only)
-`gh api` over the org + per repo (auth: org admin / security manager — scopes `read:org`, `admin:org`, `security_events`). Endpoints in `queries.yaml → collector`. **Primary path is offline**: collect once, then render with `--from-json` (deterministic, no GitHub calls).
+Org + per-repo GitHub reads. **Two auth paths** (auto-detected): `GITHUB_TOKEN`/`GH_TOKEN` in the env → **REST via `api.github.com`** (the SRE Agent path, no `gh` CLI needed); else **`gh api`** (local dev, `gh auth login`). Scopes `read:org`/`admin:org`/`security_events` unlock the governance domains; without them those checks **Skip gracefully** (repo-level checks still run on whatever the token can read). Endpoints in `queries.yaml → collector`. **Primary path is offline**: collect once, then render with `--from-json` (deterministic, no GitHub calls).
 
 ### Step 2: Gap engine + importance (in the renderer)
 - `build_inventory()` normalizes org + repos into one inventory.
