@@ -1,0 +1,63 @@
+name: GitHub Posture Audit
+
+# Roda a skill github-posture (8 domínios, read-only) DENTRO do GitHub Actions, onde já
+# existe um token. Dispare manualmente em Actions → "GitHub Posture Audit" → "Run workflow".
+#
+#   • Token automático (github.token): cobre o repo-level do que a permission abaixo libera.
+#   • Para GOVERNANÇA de ORG (2FA, runners, audit streaming) + secret/branch-protection de
+#     TODOS os repos: crie um secret `GHP_TOKEN` (PAT fine-grained ou classic) com
+#     read:org / security_events / repo. O workflow usa GHP_TOKEN quando existir.
+#
+# O coletor é token-aware: lê GITHUB_TOKEN do ambiente via REST api.github.com (sem gh CLI).
+
+on:
+  workflow_dispatch:
+    inputs:
+      org:
+        description: "Org ou usuário GitHub a auditar (ex.: minha-org)"
+        required: true
+        type: string
+      max_repos:
+        description: "Máx. de repositórios a varrer"
+        required: false
+        default: "100"
+        type: string
+
+permissions:
+  contents: read
+  security-events: read   # deixa o token automático ler code scanning quando aplicável
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install deps
+        run: pip install pyyaml
+
+      - name: Run GitHub Posture
+        env:
+          # PAT com read:org/security_events se houver; senão o token automático do job.
+          GITHUB_TOKEN: ${{ secrets.GHP_TOKEN || github.token }}
+        run: |
+          python github-posture/generate_html_report.py \
+            --org "${{ inputs.org }}" \
+            --output out \
+            --save-raw \
+            --emit-feed out/_feed.json \
+            --format both
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: github-posture-${{ inputs.org }}
+          path: out/
+          if-no-files-found: warn
