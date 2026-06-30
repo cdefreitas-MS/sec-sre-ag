@@ -1974,8 +1974,10 @@ def render_html(ctx, q):
         nav_extra += "<button class=\"navbtn\" data-page=\"page-mdc\" onclick=\"showPage('page-mdc')\">🛡️ Defender for Cloud</button>"
     if mcsb_pct is not None:
         nav_extra += "<button class=\"navbtn\" data-page=\"page-mcsb\" onclick=\"showPage('page-mcsb')\">📋 MCSB</button>"
-    if devops_total:
+    if devops_total and not ctx.get("github_ctx"):
         nav_extra += "<button class=\"navbtn\" data-page=\"page-devops\" onclick=\"showPage('page-devops')\">🐙 DevOps</button>"
+    if ctx.get("github_ctx"):
+        nav_extra += "<button class=\"navbtn\" data-page=\"page-github\" onclick=\"showPage('page-github')\">🐙 GitHub</button>"
     topbar = (
         '<div class="topbar"><div class="brand" onclick="goHome()"><span class="mslogo-wrap">' + logo_sm + '</span></div>'
         '<div class="navlinks">'
@@ -2073,14 +2075,29 @@ def render_html(ctx, q):
     page_devops = (
         '<div id="page-devops" class="page" style="display:none">'
         '<button class="btn back" onclick="goHome()">← Início</button>'
-        + devops_html + '</div>')
+        + devops_html + '</div>') if (devops_total and not ctx.get("github_ctx")) else ''
+    if ctx.get("github_ctx"):
+        _dv_meta = None
+        if ctx.get("devops"):
+            _bsev = ctx["devops"].get("by_severity", {})
+            _dv_meta = {"total": ctx["devops"]["total"],
+                        "critical": _bsev.get("Critical", 0), "high": _bsev.get("High", 0)}
+        _gh_body = ctx["github_eng"].render_section(
+            ctx["github_ctx"],
+            devops_html=(devops_html if ctx.get("devops") else None),
+            devops_meta=_dv_meta)
+        page_github = ('<div id="page-github" class="page" style="display:none">'
+                       '<button class="btn back" onclick="goHome()">← Início</button>'
+                       + _gh_body + '</div>')
+    else:
+        page_github = ''
 
     footer = ('<div class="meta" style="margin-top:20px;border-top:1px solid var(--border);padding-top:12px">'
               'advisor-impact · Azure Advisor + Microsoft Defender for Cloud · risco = disrupção de aplicar '
               '(não criticidade). Custos via Azure Retail Prices API · Compliance via MCSB '
               '(inspirado no <a href="https://github.com/microsoft/ESA" style="color:var(--accent)">microsoft/ESA</a>).</div>')
 
-    body = topbar + home + page_exec + page_mdc + page_m365 + page_plan + page_mcsb + page_devops + footer + '</div>'
+    body = topbar + home + page_exec + page_mdc + page_m365 + page_plan + page_mcsb + page_devops + page_github + footer + '</div>'
     script = '<script>const DATA=' + data_json + ';\n' + _REPORT_JS + '</script>'
     return head + body + script + '</body></html>'
 
@@ -2238,6 +2255,44 @@ def _validate_links(ctx):
     return missing
 
 
+def _github_posture(github_json=None, github_org=None, queries_path=None):
+    """Roda o motor github-posture (8 domínios) e devolve (html_section, feed) p/ embutir
+    a aba 'GitHub Posture' no advisor-impact. Best-effort: sem o motor/dado, devolve
+    (None, None) e o relatório segue sem a aba (skip gracioso)."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    eng_path = os.path.join(here, "..", "github-posture", "generate_html_report.py")
+    if not os.path.exists(eng_path):
+        print(f"  [github] motor não encontrado em {eng_path} — aba GitHub omitida", file=sys.stderr)
+        return None, None
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("github_posture_engine", eng_path)
+        eng = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(eng)
+        qpath = queries_path or os.path.join(here, "..", "github-posture", "queries.yaml")
+        gq = eng.load_yaml(qpath)
+        gparams = dict(gq.get("parameters", {}) or {})
+        gparams["_catalog"] = gq["best_practices"]
+        if github_json:
+            with open(github_json, "r", encoding="utf-8") as f:
+                gdata = json.load(f)
+        elif github_org:
+            gdata = eng.collect(github_org, gparams)
+            if not gdata.get("org"):
+                print("  [github] coleta falhou (gh não autenticado / sem admin:org). Aba GitHub omitida.", file=sys.stderr)
+                return None, None
+        else:
+            return None, None
+        gctx = eng.build_report(gdata, gparams)
+        print(f"  [github] GitHub Posture Score {gctx['score']}/100 ({gctx['verdict']}) · "
+              f"{len(gctx['findings'])} achados · feed: {len(gctx['feed']['github_secrets'])} secret(s)/"
+              f"{len(gctx['feed']['github_oidc'])} oidc", file=sys.stderr)
+        return gctx, eng
+    except Exception as e:
+        print(f"  [github] erro ao montar a seção: {e}", file=sys.stderr)
+        return None, None
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="advisor-impact — Advisor + Defender for Cloud remediation planner.")
     ap.add_argument("--from-json", dest="from_json")
@@ -2247,6 +2302,8 @@ def main(argv=None):
     ap.add_argument("--subs", dest="subs", default=None, help="Lista de subscription IDs separados por vírgula (escopo ARG); sem isso = tenant inteiro")
     ap.add_argument("--category", default=None, help="Cost|Security|Reliability|OperationalExcellence|Performance|all")
     ap.add_argument("--queries", default=None)
+    ap.add_argument("--github-org", dest="github_org", default=None, help="Org GitHub p/ anexar a aba 'GitHub Posture' (8 domínios via gh api; precisa admin:org/security_events)")
+    ap.add_argument("--github-json", dest="github_json", default=None, help="Inventário GitHub pré-coletado (offline) p/ a aba GitHub Posture")
     ap.add_argument("--output", default=".")
     ap.add_argument("--format", choices=["html", "md", "both"], default="both")
     ap.add_argument("--save-raw", action="store_true")
@@ -2299,6 +2356,10 @@ def main(argv=None):
 
     ctx = build_context(q, raw, params)
     _validate_links(ctx)
+    gh_ctx, gh_eng = _github_posture(args.github_json, args.github_org)
+    if gh_ctx:
+        ctx["github_ctx"] = gh_ctx
+        ctx["github_eng"] = gh_eng
     stamp = dt.datetime.now().strftime("%Y%m%d-%H%M")
     base = f"advisor-impact-{stamp}"
     if args.format in ("html", "both"):
@@ -2314,6 +2375,11 @@ def main(argv=None):
         with open(p, "w", encoding="utf-8") as f:
             f.write(render_md(ctx, q))
         print(f"   → {p}")
+    if gh_ctx and (gh_ctx["feed"].get("github_secrets") or gh_ctx["feed"].get("github_oidc")):
+        fp = os.path.join(args.output, "_github_feed.json")
+        with open(fp, "w", encoding="utf-8") as f:
+            json.dump(gh_ctx["feed"], f, ensure_ascii=False, indent=2)
+        print(f"   → {fp} (feed cross-domain p/ o attack-path)")
     return 0
 
 

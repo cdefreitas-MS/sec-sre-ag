@@ -17,6 +17,8 @@
 #   sp_owners             map {appId|spObjectId: [owner upn]}                              (optional)
 #   admin_logons          map {deviceName: [admin upn]}                                    (optional lateral link)
 #   mdc_assessments       ARM  /Microsoft.Security/assessments      (advisor-impact)  -> public-network misconfig entries
+#   github_secrets        list {repo, secret_type, cloud_credential, appId?, html_url}  (github-posture feed) -> leaked-secret cross-domain entries
+#   github_oidc           list {repo, sp_appId, weakness}                               (github-posture feed) -> Actions/OIDC cross-domain entries
 #   mitre_covered         list of ATT&CK technique IDs your detections cover (mitre-coverage-report) -> blind-spot flag
 #   silent_sources        list of log sources that went silent       (telemetry gap)  -> blind-spot flag
 #   impaired_sensors      list of device names with impaired MDE sensor                  -> blind-spot flag
@@ -82,6 +84,10 @@ scoring:
     misconfig_public: 0.60
     open_ports: 0.70            # internet-facing open management ports (RDP/SSH/WinRM) = real entry
     public_data: 0.60          # resource with public network access + data-exposure recommendation
+    leaked_secret: 0.85         # GitHub: secret commitado/vazado num repo (alerta de secret scanning) = achável e abusável
+    secret_is_credential: 0.90  # GitHub: o secret vazado É uma credencial Azure/M365 válida -> auth quase certa como o SP
+    weak_actions: 0.60          # GitHub: Actions fraco (GITHUB_TOKEN write / runner self-hosted público) = vetor de workflow envenenado
+    oidc_federation: 0.75       # GitHub: repo consegue assumir um SP do Azure via OIDC/federated credential
     owns_sp: 0.65               # a user owning an app reg can mint its credentials
     admin_logon: 0.70           # admin session present on an exposed device = credential theft
     member_of: 1.00             # membership confers the role's privilege (impact lives in jewel)
@@ -92,6 +98,7 @@ scoring:
     privileged_role: 0.70
     high_impact_capability: 0.55
     sensitive_resource: 0.50
+    cloud_access: 0.60          # GitHub: acesso ao tenant obtido de uma credencial de nuvem vazada / federação OIDC
     server_foothold: 0.50       # compromising an internet-exposed server (open ports)
     endpoint_foothold: 0.40
   # Verdict thresholds.
@@ -146,6 +153,23 @@ abuse_map:
     mitre: T1530
     break_with: "Desabilitar public network access, aplicar Private Link/Service Endpoint e firewall com IPs permitidos"
 
+  leaked_secret:
+    abuse: "Localizar o segredo commitado/vazado no repositório (alerta de secret scanning) e reutilizá-lo"
+    mitre: T1552.001
+    break_with: "Rotacionar o segredo na ORIGEM (não só remover do código), habilitar push protection + secret scanning e investigar uso indevido"
+  secret_is_credential:
+    abuse: "Autenticar-se como o service principal/identidade do Azure usando o segredo vazado do GitHub (credencial válida no tenant)"
+    mitre: T1078.004
+    break_with: "Revogar/rotacionar a credencial, migrar p/ federated credential (workload identity) e remover client secrets do app"
+  weak_actions:
+    abuse: "Abusar de um workflow do GitHub Actions com GITHUB_TOKEN de escrita ou runner self-hosted exposto (PR envenenado) p/ executar código no pipeline"
+    mitre: T1195.002
+    break_with: "GITHUB_TOKEN default = read-only, restringir Actions a verified/owned, runners efêmeros/isolados e exigir aprovação de workflow"
+  oidc_federation:
+    abuse: "Usar a federação OIDC do repositório p/ emitir um token e assumir o service principal do Azure a partir do pipeline"
+    mitre: T1199
+    break_with: "Restringir o subject claim da federated credential ao repo/branch/environment exatos, exigir environment protection e revisar as federated credentials do app"
+
 # Real exposure -> entry vectors (Defender for Cloud assessments). A case-insensitive substring
 # match in the assessment displayName decides the entry edge: open_ports (servidor) vs public_data (dado).
 exposure_patterns:
@@ -183,6 +207,18 @@ hunting:
       product: sentinel
       signal: "novo segredo/certificado adicionado ao app recentemente"
       kql: 'AuditLogs | where TimeGenerated > ago(7d) | where OperationName has "application" and OperationName has_any ("credential","Certificates") | mv-expand tr=TargetResources | where tostring(tr.id) == "{appId}" | project TimeGenerated, OperationName, Iniciador=tostring(InitiatedBy.user.userPrincipalName)'
+  secret_is_credential:
+    - id: sp_signins_after_leak
+      title: "Sign-ins do SP cuja credencial vazou no GitHub"
+      product: sentinel
+      signal: "uso do app após o vazamento — autenticação com a credencial exposta"
+      kql: 'AADServicePrincipalSignInLogs | where TimeGenerated > ago(7d) | where AppId == "{appId}" | summarize Tentativas=count(), Falhas=countif(ResultType != 0), IPs=dcount(IPAddress), Ultimo=max(TimeGenerated)'
+  oidc_federation:
+    - id: sp_signins_oidc
+      title: "Sign-ins federados (OIDC) do SP via GitHub Actions"
+      product: sentinel
+      signal: "tokens federados emitidos p/ o app (workflow assumindo o SP)"
+      kql: 'AADServicePrincipalSignInLogs | where TimeGenerated > ago(7d) | where AppId == "{appId}" | where ResultType == 0 | summarize Logins=count(), IPs=dcount(IPAddress), Ultimo=max(TimeGenerated)'
   granted_scope_takeover:
     - id: sp_graph_activity
       title: "Chamadas Graph sensíveis do app"
