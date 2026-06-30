@@ -114,6 +114,12 @@ def build_inventory(data: dict) -> dict:
         "SecretAlerts": _sanitize_secret_alerts(data.get("secret_alerts")),
         "PublicRepos": as_list(data.get("public_repos")),
         "Repos": as_list(data.get("repos")),
+        # IsOrg: conta de ORGANIZAÇÃO (governança org-level só faz sentido aqui).
+        # Authed: o coletor conseguiu LER security_and_analysis de algum repo (auth suficiente);
+        # sem isso não dá p/ distinguir 'feature desligada' de 'sem permissão' -> checks Skipam.
+        "IsOrg": str(org.get("type", "")).lower() == "organization",
+        "Authed": any(isinstance(r.get("security_and_analysis"), dict)
+                      for r in as_list(data.get("repos"))),
     }
 
 def _ss(repo, *path):
@@ -126,6 +132,11 @@ def _repo_name(r):
 def _names(repos, limit=10):
     out = ", ".join(_repo_name(r) for r in repos[:limit])
     return out + (" …" if len(repos) > limit else "")
+
+def _sec_repos(inv):
+    """Repos cujo security_and_analysis foi LEGÍVEL (auth suficiente). Sem isso não dá p/
+    distinguir 'feature desligada' de 'sem permissão p/ ver' → o check Skipa (honesto)."""
+    return [r for r in inv["Repos"] if isinstance(r.get("security_and_analysis"), dict)]
 
 # Tipos de secret-scanning que correspondem a uma CREDENCIAL DE NUVEM (Azure/M365) →
 # viram attack-path cross-domain (secret no repo == credencial válida no tenant).
@@ -219,8 +230,8 @@ def _bp(repo):
 
 def c_bp_present(inv, p):
     repos = inv["Repos"]
-    if not repos:
-        raise Skip()
+    if not repos or not inv.get("Authed"):
+        raise Skip()  # branch protection exige auth; sem token não dá p/ afirmar "sem proteção"
     unprot = [r for r in repos if _bp(r) is None]
     if unprot:
         return F(f"{len(unprot)} repo(s) sem branch protection na branch padrão", _names(unprot))
@@ -267,19 +278,19 @@ def c_codeowners(inv, p):
 
 # ── DOMAIN 3: SECRETS & CREDENTIALS ─────────────────────────────────────────
 def c_secret_scanning(inv, p):
-    repos = inv["Repos"]
+    repos = _sec_repos(inv)
     if not repos:
-        raise Skip()
-    off = [r for r in repos if _ss(r, "secret_scanning") not in ("enabled",)]
+        raise Skip()  # security_and_analysis ilegível (sem auth) → não "desabilitado"
+    off = [r for r in repos if _ss(r, "secret_scanning") != "enabled"]
     if off:
         return F(f"{len(off)} repo(s) sem secret scanning", _names(off))
     return None
 
 def c_push_protection(inv, p):
-    repos = inv["Repos"]
+    repos = _sec_repos(inv)
     if not repos:
         raise Skip()
-    off = [r for r in repos if _ss(r, "secret_scanning_push_protection") not in ("enabled",)]
+    off = [r for r in repos if _ss(r, "secret_scanning_push_protection") != "enabled"]
     if off:
         return F(f"{len(off)} repo(s) sem push protection", _names(off))
     return None
@@ -296,7 +307,7 @@ def c_open_secret_alerts(inv, p):
 
 def c_environments(inv, p):
     repos = inv["Repos"]
-    if not repos:
+    if not repos or not inv.get("Authed"):
         raise Skip()
     bad = []
     for r in repos:
@@ -309,7 +320,7 @@ def c_environments(inv, p):
 
 def c_deploy_keys(inv, p):
     repos = inv["Repos"]
-    if not repos:
+    if not repos or not inv.get("Authed"):
         raise Skip()
     bad = []
     for r in repos:
@@ -332,7 +343,7 @@ def c_actions_policy(inv, p):
 
 def c_github_token_default(inv, p):
     repos = inv["Repos"]
-    if not repos:
+    if not repos or not inv.get("Authed"):
         raise Skip()
     bad = [r for r in repos if str(r.get("github_token_default", "")).lower() == "write"]
     if bad:
@@ -356,10 +367,10 @@ def c_self_hosted_runners(inv, p):
 
 # ── DOMAIN 5: CODE SECURITY ─────────────────────────────────────────────────
 def c_dependabot(inv, p):
-    repos = inv["Repos"]
+    repos = _sec_repos(inv)
     if not repos:
         raise Skip()
-    off = [r for r in repos if _ss(r, "dependabot_alerts") not in ("enabled",)]
+    off = [r for r in repos if _ss(r, "dependabot_alerts") != "enabled"]
     if off:
         return F(f"{len(off)} repo(s) sem Dependabot alerts", _names(off))
     return None
@@ -374,7 +385,7 @@ def c_critical_dependabot(inv, p):
 
 def c_code_scanning(inv, p):
     repos = inv["Repos"]
-    if not repos:
+    if not repos or not inv.get("Authed"):
         raise Skip()
     off = [r for r in repos if not r.get("code_scanning")]
     if off:
@@ -383,6 +394,8 @@ def c_code_scanning(inv, p):
 
 # ── DOMAIN 6: AUDIT LOG & MONITORING ────────────────────────────────────────
 def c_audit_streaming(inv, p):
+    if not inv.get("IsOrg"):
+        raise Skip()  # streaming de audit log é recurso de ORG; conta pessoal não tem
     streams = inv["AuditLogStreams"]
     active = [s for s in streams if s.get("enabled")]
     if not active:
@@ -391,12 +404,16 @@ def c_audit_streaming(inv, p):
     return None
 
 def c_ip_allow_list(inv, p):
+    if not inv.get("IsOrg"):
+        raise Skip()
     active = [x for x in inv["IpAllowList"] if x.get("is_active")]
     if not active:
         return F("IP allow list não configurada", "Considere restringir o acesso à org por rede conhecida.")
     return None
 
 def c_org_webhooks(inv, p):
+    if not inv.get("IsOrg"):
+        raise Skip()
     hooks = inv["OrgWebhooks"]
     if not hooks:
         return None
@@ -410,11 +427,11 @@ def c_public_repos(inv, p):
     return F(f"{len(pub)} repositório(s) público(s)", ", ".join(_repo_name(r) for r in pub[:10]))
 
 def c_ghas_coverage(inv, p):
-    repos = inv["Repos"]
+    repos = _sec_repos(inv)
     if not repos:
         raise Skip()
-    off = [r for r in repos if _ss(r, "advanced_security") not in ("enabled",)]
-    if off and len(off) != len(repos):  # se NENHUM tem, é provável que não seja GHAS-elegível → não penaliza falso
+    off = [r for r in repos if _ss(r, "advanced_security") != "enabled"]
+    if off and len(off) != len(repos):  # se NENHUM tem, provável não-elegível a GHAS → não penaliza falso
         return F(f"{len(off)}/{len(repos)} repo(s) sem GitHub Advanced Security", _names(off))
     return None
 
@@ -616,6 +633,7 @@ GHP_STYLE = """
 .ghp .feed ul li{font-size:12.5px;color:#c9d1d9;margin:3px 0}
 .ghp .feed a{color:#58a6ff;text-decoration:none}
 .ghp h4{margin:6px 0 4px;font-size:14px;color:#e6edf3}
+.ghp .covnote{margin:12px 0;padding:10px 14px;background:#1d1606;border:1px solid #3a2e10;border-radius:10px;color:#ffd98a;font-size:12.5px}
 </style>"""
 
 def _finding_card(f):
@@ -701,6 +719,20 @@ def _orient_html(ctx, devops_meta):
     <div class="obig" style="color:#e6edf3">{dv_big}</div><div class="osub">Remediação de código (findings) · {dv_sub}</div></div>
 </div>"""
 
+def _coverage_note(inv):
+    """Aviso quando a coleta não teve auth/escopo de org — explica por que domínios Skiparam."""
+    if inv.get("IsOrg") and inv.get("Authed"):
+        return ""
+    bits = []
+    if not inv.get("IsOrg"):
+        bits.append("conta pessoal (não-org) — domínios de governança org-level não se aplicam")
+    if not inv.get("Authed"):
+        bits.append("coleta sem token de segurança — secret scanning, branch protection, Actions e o feed "
+                    "cross-domain exigem auth (<code>read:org</code>/<code>security_events</code>) e ficaram como "
+                    "<b>não avaliado</b> (não significam “desabilitado”)")
+    return ('<div class="covnote">⚠️ <b>Cobertura limitada:</b> ' + "; ".join(bits) +
+            '. Os achados refletem só o que é observável com o acesso atual.</div>')
+
 def render_section(ctx, devops_html=None, devops_meta=None):
     """Seção HTML UNIFICADA e SETORIZADA para a aba 🐙 GitHub do advisor-impact (ou corpo
     da página standalone). 3 setores que se complementam:
@@ -716,6 +748,7 @@ def render_section(ctx, devops_html=None, devops_meta=None):
 <div class="ghp">
 <h2>🐙 GitHub — segurança unificada</h2>
 <div class="sub">Org <b>{esc(org)}</b> · 3 camadas que se complementam — a 3ª (o diferencial) nenhum produto entrega isolado · <b>read-only</b></div>
+{_coverage_note(inv)}
 {_orient_html(ctx, devops_meta)}
 
 <div class="sector">
