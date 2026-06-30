@@ -1,0 +1,114 @@
+# =============================================================================
+# github-posture — verified collector + GH-NNN gap catalog (single source of truth)
+# Pattern: collector↔renderer. This file = CAPTURE + RULES. generate_html_report.py = RENDER.
+# Catálogo GH-NNN portado FIEL do "Programa de Trabalho de Segurança GitHub" (8 domínios),
+#   re-implementado a partir do github-security-audit.ps1/.sh (mesmos checks, IDs próprios).
+# 100% READ-ONLY: toda chamada é GET (gh api). NÃO muta a organização.
+# Placeholders: {org} {repo} {default_branch} {max_repos} {sla_critical_days}
+# =============================================================================
+metadata:
+  skill: github-posture
+  title: GitHub Posture — Living GHAS & Governance Audit
+  description: >
+    Daily read-only posture of a GitHub organization across the 8 domains of the Security
+    Work Program: governance/access, branch protection, secrets, GitHub Actions (CI/CD),
+    code security (Dependabot/CodeQL), audit log, and supply chain. SCORED gap analysis
+    (GH-NNN) → GitHub Posture Score (0-100) with verdict SAUDÁVEL/ATENÇÃO/EM RISCO/CRÍTICO,
+    an IMPORTANCE layer (🔥 o que importa × 📋 recomendação) and a CROSS-DOMAIN feed that
+    attack-path ingests (leaked secret → Azure credential; Actions/OIDC → Azure). Collector↔
+    renderer; renderer offline+determinístico. Saída HTML (email) + Markdown (repo).
+  source_program: "Programa de Trabalho de Segurança GitHub (8 domínios) · github-security-audit.ps1/.sh"
+
+parameters:
+  max_repos: 100
+  min_reviews: 2                 # GH-202: required approving reviews na branch protegida
+  max_owners: 5                  # GH-107: nº saudável de org owners
+  sla_critical_days: 7           # GH-502: SLA p/ Dependabot crítico aberto
+  # Plano "saudável" (base permission). write/admin = achado.
+  safe_base_permissions: ["read", "none"]
+
+# -----------------------------------------------------------------------------
+# COLLECTOR — capture para tmp/github-posture/_raw/. Tudo GET (read-only) via gh api.
+# No SRE Agent: GitHub CLI (`gh api`) ou REST com token de App/PAT (scopes admin:org,
+# security_events, read:org). NUNCA escreve. --from-json é o caminho primário/testável.
+# -----------------------------------------------------------------------------
+collector:
+  auth: "gh auth login  (org admin / security manager)  ·  scopes: read:org, admin:org, security_events"
+  rest:
+    base: "gh api"
+    # Org-level (1 chamada cada)
+    org:                "orgs/{org}"
+    members_no_2fa:     "orgs/{org}/members?filter=2fa_disabled"
+    pats:               "orgs/{org}/personal-access-tokens"
+    outside_collabs:    "orgs/{org}/outside_collaborators"
+    owners:             "orgs/{org}/members?role=admin"
+    actions_permissions: "orgs/{org}/actions/permissions"
+    runner_groups:      "orgs/{org}/actions/runner-groups"
+    runners:            "orgs/{org}/actions/runners"
+    audit_log_streams:  "orgs/{org}/audit-log/streams"
+    ip_allow_list:      "orgs/{org}/ip-allow-list"
+    org_webhooks:       "orgs/{org}/hooks"
+    dependabot_critical: "orgs/{org}/dependabot/alerts?severity=critical&state=open&per_page=100"
+    secret_alerts:      "orgs/{org}/secret-scanning/alerts?state=open&per_page=100"
+    public_repos:       "repo list {org} --visibility public --json name"
+    repo_list:          "repo list {org} --limit {max_repos} --json name,visibility,defaultBranchRef"
+    # Per-repo (loop sobre repo_list)
+    repo:               "repos/{org}/{repo}"
+    branch_protection:  "repos/{org}/{repo}/branches/{default_branch}/protection"
+    required_signatures: "repos/{org}/{repo}/branches/{default_branch}/protection/required_signatures"
+    codeowners:         "repos/{org}/{repo}/contents/.github/CODEOWNERS"
+    environments:       "repos/{org}/{repo}/environments"
+    deploy_keys:        "repos/{org}/{repo}/keys"
+    workflow_perms:     "repos/{org}/{repo}/actions/permissions/workflow"
+    code_scanning:      "repos/{org}/{repo}/code-scanning/analyses?per_page=1"
+
+# -----------------------------------------------------------------------------
+# GAP ENGINE — catálogo GH-NNN (FIEL aos 8 domínios do Programa de Trabalho).
+# Cada `check` mapeia p/ uma função no renderer (dispatch por nome). Data-driven:
+# adicionar regra = 1 linha aqui + 1 função no renderer. Categories = domínio.
+# Sev: Critical/Warning/Info. Flags p/ a camada de importância:
+#   active: true       → achado representa EXPOSIÇÃO ATIVA (secret vazado, CVE crítica aberta)
+#   cross_domain: true → achado ALIMENTA um attack-path para o Azure/identidade (o diferencial)
+# -----------------------------------------------------------------------------
+best_practices:
+  # ── DOMAIN 1: GOVERNANCE & ACCESS CONTROL ───────────────────────────────────
+  - {id: GH-101, title: "2FA não obrigatório na organização", category: Governance, severity: Critical, check: Test-Org2faRequired, remediation: "Settings → Authentication security → Require two-factor authentication. Exija 2FA (idealmente passkey/segurança física) p/ todos os membros.", learn: "https://docs.github.com/organizations/keeping-your-organization-secure/managing-two-factor-authentication-for-your-organization/requiring-two-factor-authentication-in-your-organization"}
+  - {id: GH-102, title: "Membros sem 2FA habilitado", category: Governance, severity: Critical, check: Test-MembersWithout2fa, remediation: "Remova/contate os membros sem 2FA antes de tornar o 2FA obrigatório (senão são removidos da org).", learn: "https://docs.github.com/organizations/keeping-your-organization-secure"}
+  - {id: GH-103, title: "SAML SSO não verificado/forçado", category: Governance, severity: Warning, check: Test-SamlSsoEnforced, remediation: "Settings → Authentication security → SAML SSO. Force SSO p/ centralizar identidade no IdP (Entra) e revogação.", learn: "https://docs.github.com/organizations/managing-saml-single-sign-on-for-your-organization"}
+  - {id: GH-104, title: "Personal Access Tokens (PATs) clássicos em uso", category: Governance, severity: Warning, check: Test-PatPolicy, remediation: "Restrinja PATs via fine-grained tokens + aprovação; prefira GitHub Apps/OIDC a PATs de longa duração.", learn: "https://docs.github.com/organizations/managing-programmatic-access-to-your-organization"}
+  - {id: GH-105, title: "Permissão base da org muito ampla (write/admin)", category: Governance, severity: Warning, check: Test-BasePermission, remediation: "Settings → Member privileges → Base permissions = 'read' ou 'none'. 'write'/'admin' dá acesso amplo por padrão.", learn: "https://docs.github.com/organizations/managing-user-access-to-your-organizations-repositories"}
+  - {id: GH-106, title: "Outside collaborators presentes", category: Governance, severity: Info, check: Test-OutsideCollaborators, remediation: "Revise periodicamente colaboradores externos; remova acesso obsoleto e prefira times.", learn: "https://docs.github.com/organizations/managing-user-access-to-your-organizations-repositories/managing-outside-collaborators"}
+  - {id: GH-107, title: "Excesso de organization owners", category: Governance, severity: Warning, check: Test-OwnerCount, remediation: "Reduza owners (recomendado ≤5). Owner = controle total da org (raio de explosão máximo).", learn: "https://docs.github.com/organizations/managing-peoples-access-to-your-organization-with-roles"}
+  - {id: GH-108, title: "Fork de repositório privado permitido", category: Governance, severity: Info, check: Test-PrivateForkPolicy, remediation: "Settings → Member privileges → desabilite o fork de repos privados se não for necessário (reduz vazamento de código).", learn: "https://docs.github.com/organizations/managing-organization-settings/managing-the-forking-policy-for-your-organization"}
+
+  # ── DOMAIN 2: REPOSITORY & BRANCH PROTECTION ───────────────────────────────
+  - {id: GH-201, title: "Repositórios sem branch protection na branch padrão", category: BranchProtection, severity: Critical, check: Test-BranchProtectionPresent, remediation: "Habilite ruleset/branch protection na default branch de todo repo (exigir PR, revisão, status checks).", learn: "https://docs.github.com/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches"}
+  - {id: GH-202, title: "Branch protection fraca (reviews/stale/codeowners/admins/checks/assinatura)", category: BranchProtection, severity: Warning, check: Test-BranchProtectionStrength, remediation: "Exija ≥2 reviews, dismiss stale reviews, code owner review, enforce admins, status checks obrigatórios e commits assinados.", learn: "https://docs.github.com/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches"}
+  - {id: GH-203, title: "Repositórios sem arquivo CODEOWNERS", category: BranchProtection, severity: Info, check: Test-Codeowners, remediation: "Adicione .github/CODEOWNERS p/ exigir revisão dos donos do código em áreas sensíveis.", learn: "https://docs.github.com/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners"}
+
+  # ── DOMAIN 3: SECRETS & CREDENTIALS ────────────────────────────────────────
+  - {id: GH-301, title: "Secret scanning desabilitado", category: Secrets, severity: Critical, check: Test-SecretScanning, remediation: "Habilite secret scanning em todos os repos (org-wide via security configuration). Detecta credenciais commitadas.", learn: "https://docs.github.com/code-security/secret-scanning/about-secret-scanning"}
+  - {id: GH-302, title: "Push protection desabilitado", category: Secrets, severity: Warning, check: Test-PushProtection, remediation: "Habilite push protection p/ bloquear o commit de segredos ANTES de entrarem no histórico.", learn: "https://docs.github.com/code-security/secret-scanning/protecting-pushes-with-secret-scanning"}
+  - {id: GH-303, title: "Alertas de secret scanning ABERTOS (segredo vazado)", category: Secrets, severity: Critical, check: Test-OpenSecretAlerts, remediation: "Trate cada alerta: ROTACIONE o segredo na origem (não só remova do código) e investigue uso indevido. Um segredo Azure aqui é um attack-path real para o tenant.", learn: "https://docs.github.com/code-security/secret-scanning/managing-alerts-from-secret-scanning", active: true, cross_domain: true}
+  - {id: GH-304, title: "Environments sem regras de proteção", category: Secrets, severity: Info, check: Test-Environments, remediation: "Adicione required reviewers / wait timer aos environments que guardam secrets de deploy.", learn: "https://docs.github.com/actions/deployment/targeting-different-environments/using-environments-for-deployment"}
+  - {id: GH-305, title: "Deploy keys com acesso de ESCRITA", category: Secrets, severity: Warning, check: Test-DeployKeys, remediation: "Troque deploy keys de write p/ read-only; uma chave de write comprometida permite push de código malicioso.", learn: "https://docs.github.com/authentication/connecting-to-github-with-ssh/managing-deploy-keys"}
+
+  # ── DOMAIN 4: GITHUB ACTIONS (CI/CD) ───────────────────────────────────────
+  - {id: GH-401, title: "Política de Actions sem restrição (todas permitidas)", category: Actions, severity: Warning, check: Test-ActionsPolicy, remediation: "Org Settings → Actions → Allow select actions (verified/owned). Restringe a supply chain de Actions de terceiros.", learn: "https://docs.github.com/organizations/managing-organization-settings/disabling-or-limiting-github-actions-for-your-organization"}
+  - {id: GH-402, title: "GITHUB_TOKEN padrão com permissão de ESCRITA", category: Actions, severity: Warning, check: Test-GithubTokenDefault, remediation: "Default workflow permissions = read-only; conceda write por workflow (princípio do menor privilégio no token).", learn: "https://docs.github.com/actions/security-guides/automatic-token-authentication", cross_domain: true}
+  - {id: GH-403, title: "Runner group permitindo repositórios públicos", category: Actions, severity: Critical, check: Test-RunnerGroupsPublic, remediation: "Nunca exponha self-hosted runners a repos públicos (risco de execução de código de PR não confiável). Restrinja o grupo.", learn: "https://docs.github.com/actions/hosting-your-own-runners/managing-access-to-self-hosted-runners-using-groups", cross_domain: true}
+  - {id: GH-404, title: "Self-hosted runners presentes (verificar efêmero/isolado)", category: Actions, severity: Info, check: Test-SelfHostedRunners, remediation: "Use runners efêmeros e isolados; um runner persistente comprometido vira pivô p/ a rede e p/ a nuvem (OIDC).", learn: "https://docs.github.com/actions/security-guides/security-hardening-for-github-actions", cross_domain: true}
+
+  # ── DOMAIN 5: CODE SECURITY ────────────────────────────────────────────────
+  - {id: GH-501, title: "Dependabot alerts desabilitado", category: CodeSecurity, severity: Warning, check: Test-Dependabot, remediation: "Habilite Dependabot alerts org-wide; sem isso você não enxerga CVEs nas dependências.", learn: "https://docs.github.com/code-security/dependabot/dependabot-alerts/about-dependabot-alerts"}
+  - {id: GH-502, title: "Alertas Dependabot CRÍTICOS abertos (fora do SLA)", category: CodeSecurity, severity: Critical, check: Test-CriticalDependabot, remediation: "Remediar/atualizar dependências críticas dentro do SLA (≤7 dias). CVE crítica explorável = porta de entrada.", learn: "https://docs.github.com/code-security/dependabot/dependabot-security-updates/about-dependabot-security-updates", active: true}
+  - {id: GH-503, title: "Code scanning (CodeQL) inativo", category: CodeSecurity, severity: Warning, check: Test-CodeScanning, remediation: "Habilite CodeQL (default setup) nos repos relevantes p/ SAST contínuo no PR.", learn: "https://docs.github.com/code-security/code-scanning/automatically-scanning-your-code-for-vulnerabilities-and-errors/about-code-scanning"}
+
+  # ── DOMAIN 6: AUDIT LOG & MONITORING ───────────────────────────────────────
+  - {id: GH-601, title: "Audit log streaming não configurado (SOC cego ao GitHub)", category: AuditLog, severity: Warning, check: Test-AuditLogStreaming, remediation: "Configure audit log streaming p/ o SIEM (Sentinel/Splunk). Sem isso o SOC NÃO enxerga ataques no GitHub — blind spot de detecção.", learn: "https://docs.github.com/organizations/keeping-your-organization-secure/managing-organization-settings/streaming-the-audit-log-for-your-organization", cross_domain: true}
+  - {id: GH-602, title: "IP allow list não configurada", category: AuditLog, severity: Info, check: Test-IpAllowList, remediation: "Considere restringir o acesso à org por IP allow list (rede corporativa/egress conhecido).", learn: "https://docs.github.com/organizations/keeping-your-organization-secure/managing-allowed-ip-addresses-for-your-organization"}
+  - {id: GH-603, title: "Webhooks de organização presentes", category: AuditLog, severity: Info, check: Test-OrgWebhooks, remediation: "Revise os endpoints dos webhooks da org (exfil/SSRF); valide assinatura e destino.", learn: "https://docs.github.com/organizations/managing-organization-settings/about-webhooks"}
+
+  # ── DOMAIN 7 & 8: SUPPLY CHAIN & REPO SETTINGS ─────────────────────────────
+  - {id: GH-701, title: "Repositórios públicos presentes", category: SupplyChain, severity: Info, check: Test-PublicRepos, remediation: "Confirme a necessidade de cada repo público; código privado exposto vira reconhecimento p/ atacante.", learn: "https://docs.github.com/repositories/managing-your-repositorys-settings-and-features/managing-repository-settings/setting-repository-visibility"}
+  - {id: GH-801, title: "GHAS (Advanced Security) não habilitado em parte dos repos", category: SupplyChain, severity: Warning, check: Test-GhasCoverage, remediation: "Habilite GitHub Advanced Security via security configuration org-wide p/ cobrir secret/code scanning em todos os repos elegíveis.", learn: "https://docs.github.com/get-started/learning-about-github/about-github-advanced-security"}

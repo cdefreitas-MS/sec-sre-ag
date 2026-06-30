@@ -372,6 +372,35 @@ def build_graph(data, params, scoring, abuse_map, exposure=None):
                             meta={"resourceId": str(rid_raw), "resshort": short, "recommendation": disp})
             g.add_edge(EXT, rn, "public_data", ew.get("public_data", 0.6), "mdc/assessments", abuse_map)
 
+    # ── GitHub (feed do github-posture) → vetores de entrada cross-domain ─────
+    # Um segredo VAZADO num repo que É uma credencial Azure válida, OU um repo cujo
+    # Actions/OIDC consegue assumir um SP do Azure. Ambos encadeiam repo → SP → papel
+    # privilegiado — a correlação cross-domain que nenhum produto isolado faz.
+    def _cloud_jewel():
+        return g.add_node("cap::cloud_access", "cap",
+                          "Capacidade: acesso à nuvem (credencial vazada do GitHub)",
+                          kind="jewel", impact=ji.get("cloud_access", 0.6))
+
+    for s in _val(data.get("github_secrets")):
+        if not (s.get("cloud_credential") or s.get("appId")):
+            continue  # segredo não-nuvem (ex.: Slack) não vira attack-path p/ o tenant
+        repo = str(s.get("repo") or "?")
+        rn = g.add_node(f"gh::{repo}", "repo", f"Repo: {repo} — segredo vazado", kind="pivot",
+                        meta={"repo": repo, "secret_type": s.get("secret_type", ""), "url": s.get("html_url", "")})
+        g.add_edge(EXT, rn, "leaked_secret", ew.get("leaked_secret", 0.85), "github/secret_scanning", abuse_map)
+        tgt = app_to_node.get(s.get("appId")) if s.get("appId") else None
+        g.add_edge(rn, tgt or _cloud_jewel(), "secret_is_credential",
+                   ew.get("secret_is_credential", 0.9), "github/secret_scanning", abuse_map)
+
+    for o in _val(data.get("github_oidc")):
+        repo = str(o.get("repo") or "?")
+        rn = g.add_node(f"gh::{repo}", "repo", f"Repo: {repo} — Actions/OIDC", kind="pivot",
+                        meta={"repo": repo, "weakness": o.get("weakness", "")})
+        g.add_edge(EXT, rn, "weak_actions", ew.get("weak_actions", 0.6), "github/actions", abuse_map)
+        tgt = app_to_node.get(o.get("sp_appId")) if o.get("sp_appId") else None
+        g.add_edge(rn, tgt or _cloud_jewel(), "oidc_federation",
+                   ew.get("oidc_federation", 0.75), "github/actions", abuse_map)
+
     # ── blind-spot annotation (Module 2 + Module 4) ─────────────────
     covered = {str(t).upper() for t in (data.get("mitre_covered") or [])}
     silent = {str(s).lower() for s in (data.get("silent_sources") or [])}
@@ -398,6 +427,9 @@ DOMAIN = {
     "granted_scope_impact": "privilégio",
     "risky_identity": "identidade", "admin_logon": "identidade",
     "exposed_internet": "exploração", "misconfig_public": "exploração",
+    "open_ports": "exploração", "public_data": "exploração",
+    "leaked_secret": "código", "weak_actions": "código",
+    "secret_is_credential": "credencial", "oidc_federation": "credencial",
 }
 
 
@@ -556,10 +588,13 @@ VERDICT_COLOR = {"CRÍTICA": "#d13438", "ELEVADA": "#ff8c00",
                  "MODERADA": "#ffb900", "CONTIDA": "#107c10"}
 REL_ICON = {"weak_credential": "🔑", "member_of": "👑", "granted_scope_takeover": "⚡",
             "granted_scope_impact": "📤", "risky_identity": "🎭", "admin_logon": "🖥️",
-            "exposed_internet": "🌐", "misconfig_public": "🛟", "owns_sp": "🧷"}
+            "exposed_internet": "🌐", "misconfig_public": "🛟", "owns_sp": "🧷",
+            "open_ports": "🚪", "public_data": "🛢️",
+            "leaked_secret": "🔓", "secret_is_credential": "🔑",
+            "weak_actions": "⚙️", "oidc_federation": "🔗"}
 NODE_ICON = {"ext": "🌐", "sp": "🤖", "user": "👤", "device": "💻",
              "resource": "🗄️", "server": "🖥️", "data": "🛢️",
-             "role": "👑", "cap": "⚡", "foothold": "🎯"}
+             "role": "👑", "cap": "⚡", "foothold": "🎯", "repo": "🐙"}
 
 
 def _chain_html(g, p):
@@ -760,6 +795,8 @@ def _portal_link(g, nid):
                 f"UserProfileMenuBlade/~/overview/userId/{m['objectId']}")
     if t == "device" and m.get("id"):
         return f"https://security.microsoft.com/machines/{m['id']}/overview"
+    if t == "repo" and m.get("url"):
+        return m["url"]
     if t in ("resource", "server", "data") and m.get("resourceId"):
         return f"https://portal.azure.com/#@/resource{m['resourceId']}/overview"
     if t == "role":
