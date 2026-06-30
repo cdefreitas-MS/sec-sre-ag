@@ -24,7 +24,7 @@ on:
         type: string
 
 permissions:
-  contents: read
+  contents: write          # publica os dados (sanitizados) na branch gh-posture-data p/ o SRE Agent
   security-events: read   # deixa o token automático ler code scanning quando aplicável
 
 jobs:
@@ -61,3 +61,33 @@ jobs:
           name: github-posture-${{ inputs.org }}
           path: out/
           if-no-files-found: warn
+
+      # Handoff p/ o SRE Agent (Jeito 1): publica o inventário + feed (SANITIZADOS, sem valor
+      # de segredo) numa branch de dados separada. O agente lê de lá com o Code Access dele e
+      # renderiza/entrega via --from-json (o token GitHub fica SÓ aqui no Actions).
+      - name: Publish data for the SRE Agent (gh-posture-data branch)
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          ORG="${{ inputs.org }}"
+          REPO="${{ github.repository }}"
+          if [ ! -f out/_raw.json ]; then echo "sem out/_raw.json — nada a publicar"; exit 0; fi
+          rm -rf publish && mkdir publish && cd publish
+          git init -q
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
+          if git fetch -q origin gh-posture-data 2>/dev/null; then
+            git checkout -q -B gh-posture-data origin/gh-posture-data
+          else
+            git checkout -q --orphan gh-posture-data
+            git rm -rfq . 2>/dev/null || true
+          fi
+          cp ../out/_raw.json "${ORG}-raw.json"
+          cp ../out/_feed.json "${ORG}-feed.json" 2>/dev/null || echo '{"github_secrets":[],"github_oidc":[]}' > "${ORG}-feed.json"
+          git add -A
+          git commit -q -m "github-posture data: ${ORG} ($(date -u +%FT%TZ))" || { echo "sem mudança"; exit 0; }
+          git push -q origin gh-posture-data
+          echo "✅ publicado em gh-posture-data: ${ORG}-raw.json + ${ORG}-feed.json"
