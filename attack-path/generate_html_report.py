@@ -459,6 +459,38 @@ def score_paths(g, paths, scoring):
     return out
 
 
+# Importance TIER = SINAL vs RUÍDO. The headline is "what no product correlates + what's happening",
+# NOT a list of recommendations a product already lists.
+TIER = {
+    "critico": ("🔥", "O que realmente importa", "#ff7d8a"),
+    "relevante": ("⚡", "Ninguém correlaciona", "#7fe0a8"),
+    "recomendacao": ("📋", "Recomendação conhecida", "#7d8aa6"),
+}
+
+
+def classify_importance(paths):
+    """Rank by IMPORTANCE (separate from raw risk): a path matters when NO product
+    correlates it (cross-domain), it leads to TAKEOVER, or there is ACTIVE behaviour
+    (hunt hit). A single-hop misconfig that a product already lists = 'just a
+    recommendation' (noise) and is demoted to the bottom section."""
+    for p in paths:
+        active = bool(p.get("active"))
+        takeover = bool(p.get("takeover"))
+        novel = bool(p.get("novel"))
+        blind = bool(p.get("blind"))
+        ndom = len(p.get("domains", []))
+        if active or takeover:
+            tier = "critico"
+        elif novel:
+            tier = "relevante"
+        else:
+            tier = "recomendacao"
+        p["importance_tier"] = tier
+        p["importance"] = round((1000 if active else 0) + (400 if takeover else 0)
+                                + (100 + 25 * ndom if novel else 0) + (15 if blind else 0)
+                                + p["risk"], 1)
+
+
 def chokepoints(g, scored, params):
     """Aggregate the remediation that breaks the most high-risk paths."""
     agg = {}
@@ -895,9 +927,12 @@ def render_html(s, g):
     for q in s["paths"]:
         eid = q["node_ids"][1] if len(q["node_ids"]) > 1 else q["node_ids"][0]
         entry_counts[eid] = entry_counts.get(eid, 0) + 1
-    pcards = ""
+    imp_html = ""
+    recs_html = ""
     for i, p in enumerate(s["paths"], 1):
         rc = _risk_color(p["risk"])
+        tb = TIER.get(p.get("importance_tier", "recomendacao"), TIER["recomendacao"])
+        tier_badge = f'<span class="b tier" style="color:{tb[2]}" title="{tb[1]}">{tb[0]}</span>'
         tags = ""
         if p["critical"]:
             tags += '<span class="b crit">🔴 takeover</span>'
@@ -945,8 +980,8 @@ def render_html(s, g):
                         f'<div class="muted">Criação <b>gated por aprovação</b> — a UAMI já tem Microsoft Sentinel '
                         f'Contributor. Rode <code>--create-incident --sub &lt;id&gt; --rg &lt;rg&gt; --workspace &lt;nome&gt;</code> '
                         f'para criar, ou:</div><pre>{cmd}</pre></div>')
-        pcards += (f'<details class="pcard{" active" if active else ""}">'
-                   f'<summary><span class="rp" style="color:{rc};border-color:{rc}">{p["risk"]}</span> '
+        window = (f'<details class="pcard{" active" if active else ""}">'
+                   f'<summary>{tier_badge}<span class="rp" style="color:{rc};border-color:{rc}">{p["risk"]}</span> '
                    f'<span class="sc">{html.escape(short)}</span> {tags}{act_badge}</summary>'
                    f'<div class="pb">'
                    f'<div class="maptitle">🗺️ Da camada de entrada até onde o ataque chega</div>'
@@ -955,6 +990,10 @@ def render_html(s, g):
                    f'{rec_row}'
                    f'<div class="row">🎯 <b>Alvo:</b> {html.escape(p["nodes"][-1])}{tgt_a}</div>'
                    f'{hunt_html}{inc_html}</div></details>')
+        if p.get("importance_tier") == "recomendacao":
+            recs_html += window
+        else:
+            imp_html += window
 
     notice = ""
     if s.get("n_active"):
@@ -1030,6 +1069,13 @@ code{{background:#0a1322;border:1px solid #1c2942;border-radius:4px;padding:1px 
 .start{{background:#0f2a1c;border:1px solid #1f5a3a;border-left:4px solid #2ecc71;border-radius:10px;padding:12px 16px;margin:12px 0;font-size:13px}}
 .start a{{color:#7fe0a8;white-space:nowrap}}
 .b.solve{{background:#0f2a1c;color:#7fe0a8}}
+.b.tier{{background:#16203a;font-size:12.5px}}
+.recsec{{margin-top:18px;background:#0d1424;border:1px solid #1f2c47;border-radius:10px;padding:2px 10px 8px}}
+.recsec>summary{{cursor:pointer;font-size:13px;color:#93a1bd;padding:9px 4px;list-style:none}}
+.recsec>summary::-webkit-details-marker{{display:none}}
+.recsec>summary::before{{content:"▸ ";color:#647394}}
+.recsec[open]>summary::before{{content:"▾ "}}
+.imp-empty{{color:#7fe0a8;padding:12px;background:#0f2a1c;border:1px solid #1f5a3a;border-radius:8px;font-size:13px}}
 .maptitle{{font-size:11.5px;color:#8da3c4;font-weight:600;margin:4px 0 2px}}
 .mapwrap{{overflow:auto;background:#0c1426;border:1px solid #22304e;border-radius:8px;padding:6px;margin:2px 0 8px}}
 .ft{{margin-top:24px;color:#647394;font-size:12px;text-align:center}}
@@ -1038,16 +1084,17 @@ code{{background:#0a1322;border:1px solid #1c2942;border-radius:4px;padding:1px 
 <p>Sintetiza caminhos de ataque a partir de exposição · higiene de credenciais (NHI) · permissões Graph · papéis privilegiados · CVEs · misconfig — e ranqueia a correção que quebra mais caminhos · {now}</p>
 <div class="badge">SUPERFÍCIE {s['verdict']}</div></div>
 <div class="cards">
-<div class="card"><div class="n" style="color:{vc}">{s['n_paths']}</div><div class="l">Caminhos de ataque</div></div>
-<div class="card"><div class="n" style="color:#ff7d8a">{s['n_crit']}</div><div class="l">→ takeover do tenant</div></div>
-<div class="card"><div class="n" style="color:#7fe0a8">{s['n_novel']}</div><div class="l">🧬 cross-domain (novos)</div></div>
-<div class="card"><div class="n" style="color:#e6c463">{s['n_blind']}</div><div class="l">👁️ sem detecção</div></div>
+<div class="card"><div class="n" style="color:#ff7d8a">{s['n_important']}</div><div class="l">🔥 o que importa</div></div>
 <div class="card"><div class="n" style="color:#ff4d5e">{s['n_active']}</div><div class="l">🔴 ativos agora</div></div>
+<div class="card"><div class="n" style="color:#7fe0a8">{s['n_novel']}</div><div class="l">🧬 cross-domain</div></div>
+<div class="card"><div class="n" style="color:#e6c463">{s['n_blind']}</div><div class="l">👁️ sem detecção</div></div>
+<div class="card"><div class="n" style="color:#7d8aa6">{s['n_recs']}</div><div class="l">📋 só recomendação</div></div>
 </div>
-<div class="lead">🧭 Cada <b>caminho de ataque</b> liga a <b>porta de entrada</b> (uma exposição REAL —
-servidor com porta de gerência aberta, recurso com acesso público, credencial fraca de app)
-até <b>onde ele chega</b> (a joia da coroa). Nenhum produto isolado vê estes caminhos porque eles cruzam
-domínios (rede × dados × credencial × privilégio). Clique em cada janela para ver o mapa, a caça e a correção.</div>
+<div class="lead">🧭 Este relatório separa o <b>sinal do ruído</b>. Em cima, <b>🔥 o que realmente importa</b>:
+combinações que <b>nenhum produto correlaciona</b> (cross-domain), que levam a <b>takeover do tenant</b>,
+ou com <b>comportamento ativo</b> confirmado pela caça. Embaixo (colapsado), as <b>📋 recomendações
+conhecidas</b> que o Defender/Advisor já listam — contexto, não prioridade.
+<b>{s['n_important']}</b> que importam · <b>{s['n_recs']}</b> recomendações.</div>
 {por}
 <div class="legend">
 <span><i class="sw" style="background:#ff8c00"></i> entrada</span>
@@ -1056,33 +1103,48 @@ domínios (rede × dados × credencial × privilégio). Clique em cada janela pa
 <span><i class="ln" style="border-color:#d13438"></i> alto risco</span>
 <span><i class="ln" style="border-color:#e6c463;border-top-style:dashed"></i> sem detecção (blind spot)</span>
 </div>
-{notice}<h3 style="font-size:14px;margin:18px 0 8px">Caminhos de ataque — clique para expandir cada janela</h3>
-<div class="pcards">{pcards or '<div class="muted">Nenhum caminho sintetizado.</div>'}</div>
+{notice}<h3 style="font-size:15px;margin:18px 0 8px">🔥 O que realmente importa <span class="muted" style="font-weight:400;font-size:12px">— ninguém correlaciona / vulnerabilidade real / comportamento ativo</span></h3>
+<div class="pcards">{imp_html or '<div class="imp-empty">✅ Nenhum risco que os produtos não vejam — só recomendações conhecidas (abaixo).</div>'}</div>
+<details class="recsec"><summary>📋 Recomendações conhecidas ({s['n_recs']}) — pontos que o Defender/Advisor já listam (contexto, clique p/ ver)</summary>
+<div class="pcards">{recs_html or '<div class="muted" style="padding:8px">Nenhuma.</div>'}</div></details>
 <div class="ft">attack-path · collector↔renderer · análise 100% read-only (criação de incidente gated por aprovação) · gerado pelo SOC Autônomo</div>
 </div></body></html>"""
 
 
 def render_md(s, g):
     L = [f"# 🧬 Attack Path Synthesizer — SUPERFÍCIE {s['verdict']}", ""]
-    L.append(f"- Caminhos: **{s['n_paths']}** · → takeover: **{s['n_crit']}** · "
+    L.append(f"- 🔥 O que importa: **{s.get('n_important', 0)}** · 📋 recomendações: **{s.get('n_recs', 0)}** · "
              f"cross-domain: **{s['n_novel']}** · sem detecção: **{s['n_blind']}** · "
-             f"ativos agora: **{s.get('n_active', 0)}** · nós {s['n_nodes']} / arestas {s['n_edges']}")
+             f"ativos agora: **{s.get('n_active', 0)}** · total {s['n_paths']} · nós {s['n_nodes']}/arestas {s['n_edges']}")
     if s["chokepoints"]:
         c0 = s["chokepoints"][0]
         L += ["", "## 🎯 Por onde começar", "",
-              f"**{c0['fix']}** em **{c0['on']}** — fecha **{c0['paths']}** caminho(s) de ataque de uma vez."]
-    L += ["", "## 🧬 Caminhos de ataque (top)", ""]
-    for i, p in enumerate(s["paths"], 1):
-        chain = " → ".join(p["nodes"])
+              f"**{c0['fix']}** em **{c0['on']}** — fecha **{c0['paths']}** caminho(s) de uma vez."]
+
+    def _md_path(i, p):
         tags = []
+        if p.get("active"):
+            tags.append("🔴 ativo agora")
         if p["critical"]:
             tags.append("🔴 takeover")
         if p["novel"]:
             tags.append("🧬 " + "+".join(p["domains"]))
         if p["blind"]:
             tags.append("👁️ blind spot")
-        L.append(f"{i}. **risco {p['risk']}** (prob {int(p['likelihood']*100)}% × impacto {p['impact']}) "
-                 f"{' '.join(tags)}  \n   {chain}")
+        return (f"{i}. **risco {p['risk']}** (prob {int(p['likelihood']*100)}% × impacto {p['impact']}) "
+                f"{' '.join(tags)}  \n   {' → '.join(p['nodes'])}")
+
+    imp = [p for p in s["paths"] if p.get("importance_tier") != "recomendacao"]
+    recs = [p for p in s["paths"] if p.get("importance_tier") == "recomendacao"]
+    L += ["", "## 🔥 O que realmente importa", ""]
+    if imp:
+        for i, p in enumerate(imp, 1):
+            L.append(_md_path(i, p))
+    else:
+        L.append("_Nada além de recomendações conhecidas._")
+    L += ["", "## 📋 Recomendações conhecidas (contexto — já cobertas pelos produtos)", ""]
+    for i, p in enumerate(recs, 1):
+        L.append(_md_path(i, p))
     if s.get("incidents"):
         L += ["", "## 🚨 Incidentes propostos (movimentação ativa — criação gated)", ""]
         for inc in s["incidents"]:
@@ -1118,7 +1180,6 @@ def main():
 
     g = build_graph(data, params, scoring, abuse_map, q.get("exposure_patterns"))
     scored = score_paths(g, find_paths(g, params), scoring)
-    chokes = chokepoints(g, scored, params)
     n_crit = sum(1 for p in scored if p["critical"])
     n_blind = sum(1 for p in scored if p["blind"])
     n_novel = sum(1 for p in scored if p["novel"])
@@ -1140,9 +1201,13 @@ def main():
     if args.hunt:
         run_hunts(hunts, args.workspace)
         refresh_active(top_paths, hunts)
+    classify_importance(top_paths)
+    top_paths.sort(key=lambda p: p["importance"], reverse=True)
+    important = [p for p in top_paths if p.get("importance_tier") != "recomendacao"]
+    chokes = chokepoints(g, important or top_paths, params)
     s = {"verdict": verdict, "n_paths": len(scored), "n_crit": n_crit, "n_blind": n_blind,
-         "n_novel": n_novel, "top_risk": top_risk,
-         "top_choke_risk": chokes[0]["risk_removed"] if chokes else 0.0,
+         "n_novel": n_novel, "n_important": len(important), "n_recs": len(top_paths) - len(important),
+         "top_risk": top_risk, "top_choke_risk": chokes[0]["risk_removed"] if chokes else 0.0,
          "n_nodes": len(g.nodes), "n_edges": len(g.edges),
          "paths": top_paths, "chokepoints": chokes, "hunts": hunts,
          "inc_api": inc_cfg.get("api_version", "2024-03-01")}
@@ -1167,9 +1232,9 @@ def main():
         p = base.with_suffix(".md")
         p.write_text(render_md(s, g), encoding="utf-8")
         print(f"📄 {p}")
-    print(f"✅ {SKILL}: SUPERFÍCIE {s['verdict']} · {s['n_paths']} caminhos · "
-          f"{s['n_crit']} → takeover · {s['n_novel']} cross-domain · {s['n_blind']} sem detecção · "
-          f"{s['n_active']} ativos · top chokepoint remove {s['top_choke_risk']}")
+    print(f"✅ {SKILL}: SUPERFÍCIE {s['verdict']} · 🔥 {s['n_important']} que importam ({s['n_recs']} recomendações) · "
+          f"{s['n_active']} ativos · {s['n_novel']} cross-domain · {s['n_blind']} sem detecção · "
+          f"top chokepoint remove {s['top_choke_risk']}")
 
 
 if __name__ == "__main__":
