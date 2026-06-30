@@ -6,7 +6,7 @@ github-posture / generate_html_report.py  (collector ↔ renderer)
 Postura de segurança de uma organização GitHub nos 8 DOMÍNIOS do Programa de Trabalho:
 governança/acesso, branch protection, secrets, GitHub Actions (CI/CD), code security
 (Dependabot/CodeQL), audit log e supply chain. Catálogo GH-NNN portado FIEL do
-github-security-audit.ps1/.sh. 100% READ-ONLY — toda chamada é GET (`gh api`).
+github-security-audit.ps1/.sh. 100% READ-ONLY — toda chamada é GET (`gh api` ou REST com GITHUB_TOKEN).
 
 MODULAR (3 usos):
   1) standalone        → relatório próprio HTML (email) + Markdown (repo)
@@ -16,13 +16,20 @@ MODULAR (3 usos):
 
 Dois modos de dado:
   --from-json inventory.json   → render determinístico/offline (caminho primário, testável)
-  --org <login>                → auto-coleta via gh api (precisa gh auth + admin:org/security_events)
+  --org <login>                → auto-coleta: REST se GITHUB_TOKEN/GH_TOKEN no ambiente (caminho do
+                                 SRE Agent), senão gh api (gh auth). Precisa scopes read:org/
+                                 admin:org/security_events p/ os domínios de governança.
 """
 from __future__ import annotations
 import argparse, datetime as dt, html, json, os, shutil, subprocess, sys
+import urllib.request, urllib.error
 
 # gh CLI no Windows resolve gh.exe via which; no Linux acha o binário.
 GH = shutil.which("gh") or "gh"
+# Coleta tem 2 caminhos: (a) GITHUB_TOKEN/GH_TOKEN no ambiente -> REST direto (api.github.com),
+# o caminho do SRE Agent (sem depender do gh CLI); (b) gh CLI autenticado -> gh api (dev local).
+GH_TOKEN = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+GH_API = (os.environ.get("GITHUB_API_URL") or "https://api.github.com").rstrip("/")
 
 # =============================================================================
 # helpers de leitura tolerante
@@ -66,6 +73,27 @@ def F(evidence, detail=""):
 # =============================================================================
 # Inventário normalizado a partir do JSON (--from-json) ou _raw coletado
 # =============================================================================
+# Alertas de secret-scanning PODEM trazer o VALOR do segredo (campo `secret`) quando o token
+# tem privilégio alto. O relatório só precisa do METADADO (tipo/localização/URL) — NUNCA o
+# valor. Allowlist defensiva: descarta `secret`/`secret_value`/`token`/etc. antes de persistir
+# ou renderizar (evita armazenar segredo em claro — endereça o achado CodeQL).
+_SECRET_ALERT_KEEP = {"number", "state", "secret_type", "secret_type_display_name",
+                      "html_url", "resolution", "repository", "repo", "appId",
+                      "resourceId", "cloud_credential"}
+
+def _sanitize_secret_alerts(alerts):
+    """Mantém só metadados do alerta (tipo/localização/URL); remove qualquer valor de segredo."""
+    out = []
+    for a in as_list(alerts):
+        if not isinstance(a, dict):
+            continue
+        clean = {k: v for k, v in a.items() if k in _SECRET_ALERT_KEEP}
+        repo = clean.get("repository")
+        if isinstance(repo, dict):
+            clean["repository"] = {"name": repo.get("name")}
+        out.append(clean)
+    return out
+
 def build_inventory(data: dict) -> dict:
     org = data.get("org") or {}
     return {
@@ -83,7 +111,7 @@ def build_inventory(data: dict) -> dict:
         "IpAllowList": as_list(data.get("ip_allow_list")),
         "OrgWebhooks": as_list(data.get("org_webhooks")),
         "DependabotCritical": as_list(data.get("dependabot_critical")),
-        "SecretAlerts": as_list(data.get("secret_alerts")),
+        "SecretAlerts": _sanitize_secret_alerts(data.get("secret_alerts")),
         "PublicRepos": as_list(data.get("public_repos")),
         "Repos": as_list(data.get("repos")),
     }
@@ -774,7 +802,25 @@ def build_report(data, params):
 # =============================================================================
 # COLLECTOR — gh api (read-only). Caminho primário é --from-json.
 # =============================================================================
+def _http_get(endpoint):
+    """GET via REST com token no header. `endpoint` = caminho relativo (ex.: 'orgs/foo/members')
+    ou URL absoluta. 403/404/sem-scope -> None (o check vira Skip, degrada gracioso)."""
+    url = endpoint if str(endpoint).startswith("http") else f"{GH_API}/{str(endpoint).lstrip('/')}"
+    req = urllib.request.Request(url, headers={
+        "Authorization": f"Bearer {GH_TOKEN}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "github-posture",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            return json.loads(r.read().decode("utf-8") or "null")
+    except Exception:
+        return None
+
 def _gh(endpoint):
+    if GH_TOKEN:
+        return _http_get(endpoint)
     try:
         out = subprocess.run([GH, "api", endpoint], capture_output=True, text=True,
                              encoding="utf-8", errors="replace", timeout=120)
@@ -785,6 +831,12 @@ def _gh(endpoint):
         return None
 
 def _gh_repo_list(org, limit):
+    if GH_TOKEN:
+        out = _http_get(f"orgs/{org}/repos?per_page={min(int(limit), 100)}&type=all")
+        if not isinstance(out, list) or not out:
+            # conta pessoal (não é org): repos do usuário
+            out = _http_get(f"users/{org}/repos?per_page={min(int(limit), 100)}&type=owner")
+        return out if isinstance(out, list) else []
     try:
         out = subprocess.run([GH, "repo", "list", org, "--limit", str(limit),
                               "--json", "name,visibility,defaultBranchRef"],
@@ -794,8 +846,11 @@ def _gh_repo_list(org, limit):
         return []
 
 def collect(org, params):
-    print(f"• coletando org {org} (gh api, read-only)…", file=sys.stderr)
-    data = {"org": _gh(f"orgs/{org}") or {}}
+    mode = "REST (GITHUB_TOKEN)" if GH_TOKEN else "gh CLI"
+    print(f"• coletando {org} via {mode} (read-only)…", file=sys.stderr)
+    # org OU conta de usuário — o GitHub do SRE Agent pode ser um user, não uma org.
+    # Endpoints de governança da org dão Skip p/ um user; os de repositório rodam mesmo assim.
+    data = {"org": _gh(f"orgs/{org}") or _gh(f"users/{org}") or {}}
     data["org"]["login"] = data["org"].get("login", org)
     data["members_no_2fa"]      = _gh(f"orgs/{org}/members?filter=2fa_disabled")
     data["pats"]                = _gh(f"orgs/{org}/personal-access-tokens")
@@ -808,7 +863,7 @@ def collect(org, params):
     data["ip_allow_list"]       = _gh(f"orgs/{org}/ip-allow-list")
     data["org_webhooks"]        = _gh(f"orgs/{org}/hooks")
     data["dependabot_critical"] = _gh(f"orgs/{org}/dependabot/alerts?severity=critical&state=open&per_page=100")
-    data["secret_alerts"]       = _gh(f"orgs/{org}/secret-scanning/alerts?state=open&per_page=100")
+    data["secret_alerts"]       = _sanitize_secret_alerts(_gh(f"orgs/{org}/secret-scanning/alerts?state=open&per_page=100"))
     repo_meta = _gh_repo_list(org, params.get("max_repos", 100))
     data["public_repos"] = [r for r in repo_meta if str(r.get("visibility", "")).lower() == "public"]
     print(f"• coletando {len(repo_meta)} repo(s)…", file=sys.stderr)
@@ -818,7 +873,7 @@ def collect(org, params):
         if not name:
             continue
         rd = _gh(f"repos/{org}/{name}") or {}
-        branch = (rm.get("defaultBranchRef") or {}).get("name") or rd.get("default_branch") or "main"
+        branch = (rm.get("defaultBranchRef") or {}).get("name") or rm.get("default_branch") or rd.get("default_branch") or "main"
         bp = _gh(f"repos/{org}/{name}/branches/{branch}/protection")
         sig = _gh(f"repos/{org}/{name}/branches/{branch}/protection/required_signatures")
         co = _gh(f"repos/{org}/{name}/contents/.github/CODEOWNERS")
@@ -857,7 +912,7 @@ def main():
     here = os.path.dirname(os.path.abspath(__file__))
     ap = argparse.ArgumentParser(description="GitHub Posture — gap-scored 8-domain audit (read-only)")
     ap.add_argument("--from-json", help="inventário pré-coletado (modo offline/primário)")
-    ap.add_argument("--org", help="login da organização (auto-coleta via gh api)")
+    ap.add_argument("--org", help="login da organização (auto-coleta: REST via GITHUB_TOKEN, senão gh api)")
     ap.add_argument("--queries", default=os.path.join(here, "queries.yaml"))
     ap.add_argument("--format", choices=["html", "md", "both"], default="both")
     ap.add_argument("--output", default=os.path.join(here, "tmp", "github-posture"))
@@ -876,8 +931,8 @@ def main():
     elif args.org:
         data = collect(args.org, params)
         if not data.get("org"):
-            sys.exit("❌ coleta falhou: org vazia (gh não autenticado ou sem permissão admin:org/security_events).\n"
-                     "   Autentique com `gh auth login` e rode novamente, ou use --from-json.")
+            sys.exit("❌ coleta falhou: login não resolvido como org nem user (token sem auth/escopo, ou login errado).\n"
+                     "   Defina GITHUB_TOKEN (read:org/security_events) ou `gh auth login`, ou use --from-json.")
         if args.save_raw:
             os.makedirs(args.output, exist_ok=True)
             with open(os.path.join(args.output, "_raw.json"), "w", encoding="utf-8") as f:
