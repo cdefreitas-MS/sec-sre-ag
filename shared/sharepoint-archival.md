@@ -51,9 +51,20 @@ to recipients** (the archive is the canonical copy; email/Teams point at it):
 > Teams link.
 
 > 🔴 **Teams transport guardrail (how the card is posted):** Teams delivery is **only** via
-> `send-teams-notification`, which POSTs to the Power Automate / Workflows **webhook** read
-> from `config.json` → `teams.webhook_url`. If `teams.webhook_url` is missing, empty, or
-> `enabled:false` → **skip Teams** and report `Teams skipped (no webhook configured)`.
+> the Power Automate / Workflows **webhook**, posted through the helper
+> [`shared/teams_notify.py`](teams_notify.py) so the webhook secret never lands in config,
+> logs, or chat:
+> ```bash
+> python shared/teams_notify.py --config config.json --card tmp/<skill>/card.json
+> ```
+> The helper resolves the webhook in this order: **`teams.webhook_secret_uri`** (an Azure
+> Key Vault secret URI — **preferred**, read in-process via `az keyvault secret show`) →
+> **`teams.webhook_url`** (clear-text **fallback only**). It prints only a JSON status line
+> (`{"ok":true,"status":202,"source":"keyvault"}`) and **never** echoes the URL. If neither
+> is set (or `enabled:false`) → **skip Teams** and report `Teams skipped (no webhook
+> configured)` (exit 3). **NEVER** paste the resolved webhook anywhere, and **NEVER** post
+> the raw card to the webhook by hand (that re-exposes the secret) — always go through the
+> helper.
 > **NEVER** post to Teams via Microsoft Graph (`ChannelMessage.Send` / `ChatMessage.Send` /
 > `Teamwork.*` / `POST .../teams/.../channels/.../messages` / `POST .../chats/.../messages`)
 > — those are **protected APIs** (require Microsoft approval + a payment model) and are not
