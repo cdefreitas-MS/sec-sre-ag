@@ -1,11 +1,15 @@
 ---
 name: ioc-investigation
+tools:
+  - RunAzCliReadCommands
+  - QueryLogAnalyticsByWorkspaceId
 description: >
   IoC (Indicator of Compromise) investigation skill for environments with Azure Monitor MCP
   (Log Analytics workspace queries) and Azure CLI access — currently without
   Sentinel Data Lake MCP, Sentinel Triage MCP, or Microsoft Graph MCP
   (not yet connectable to Azure SRE Agent; direct API access to Sentinel Data Lake and Microsoft Graph not yet implemented).
-  KQL queries run against Log Analytics tables through the Azure Monitor MCP tool.
+  Data is routed by origin: XDR-origin tables (Device*, Alert*, Email*, CloudAppEvents) are queried via
+  Microsoft Graph Advanced Hunting (runHuntingQuery) by default; Sentinel/Entra ID tables via Log Analytics KQL.
   MDE API calls (custom IOC list, TVM) are executed via RunAzCliReadCommands (az rest).
   3rd-party IP enrichment is provided by enrich_ips.py (ipinfo.io, vpnapi.io, AbuseIPDB, Shodan).
 threat_pulse_domains: [identity, endpoint, email, exposure]
@@ -15,6 +19,37 @@ drill_down_prompt: 'Investigate IoC {entity} — threat intel, organizational ex
 > ⚠️ **CRITICAL TOOL RULE — ALWAYS PASS --subscription TO MCP MONITOR**
 >
 > When calling `monitor-client_monitor_workspace_log_query`, the `subscription` parameter is MANDATORY. Without it, the tool returns a 400 error. Always pass it.
+
+## 🧭 Data Source Routing by Origin (READ FIRST)
+
+**Query each table from its system of record — not from wherever it happens to be mirrored.** Tables whose origin is **Defender XDR** are queried via **Microsoft Graph Advanced Hunting** (`runHuntingQuery`) **by default**, NOT via KQL against the Sentinel workspace. This is authoritative even when the Defender XDR data connector also streams those tables into Log Analytics.
+
+| Origin (system of record) | Tables | Transport |
+|---|---|---|
+| **Defender XDR** (Advanced Hunting) | `DeviceNetworkEvents`, `DeviceProcessEvents`, `DeviceFileEvents`, `DeviceRegistryEvents`, `DeviceLogonEvents`, `DeviceImageLoadEvents`, `DeviceEvents`, `DeviceInfo`, `AlertEvidence`, `AlertInfo`, `EmailEvents`, `EmailUrlInfo`, `EmailAttachmentInfo`, `UrlClickEvents`, `CloudAppEvents`, `IdentityLogonEvents`, `IdentityQueryEvents`, `IdentityDirectoryEvents` | **Graph `runHuntingQuery`** (`RunAzCliReadCommands`) |
+| **Sentinel / Entra ID** | `ThreatIntelIndicators`, `SecurityAlert`, `SecurityIncident`, `SigninLogs`, `AADNonInteractiveUserSignInLogs`, `AADUserRiskEvents`, `AuditLogs`, `OfficeActivity`, `SecurityEvent`, `Anomalies` | **Log Analytics KQL** (`QueryLogAnalyticsByWorkspaceId` / Azure Monitor MCP) |
+
+### Running an XDR query (Graph Advanced Hunting)
+
+Use **`RunAzCliReadCommands`** — NOT `RunAzCliWriteCommands` (we need the Managed-Identity/application path that carries the `ThreatHunting.Read.All` app role granted to the agent's UAMI; the Write tool falls back to OBO/delegated and returns 403).
+
+1. Write the query body to a temp file (avoids shell-quoting issues with the KQL):
+   `create_file("temp/hunt.json", '{"Query": "<KQL_BODY>"}')`
+2. Execute:
+   ```
+   az rest --method post \
+     --url "https://graph.microsoft.com/v1.0/security/runHuntingQuery" \
+     --resource "https://graph.microsoft.com" \
+     --headers "Content-Type=application/json" \
+     --body "@temp/hunt.json"
+   ```
+
+- The **KQL body is identical** to the query templates in this skill — only the transport changes. `let`, `datetime()`, `ago()`, `union`, and `join` all work unchanged in Advanced Hunting.
+- XDR Advanced Hunting uses **`Timestamp`** as the time column (the `Device*` / `Alert*` / `Email*` templates below already do). Never `TimeGenerated` for these tables.
+- Result rows are returned under **`.Results`** in the JSON response.
+- **Fallback:** if `runHuntingQuery` returns `403` (missing scope) or is unavailable, run the *same* KQL against the Sentinel workspace via `QueryLogAnalyticsByWorkspaceId` (works when the Defender XDR connector streams the table) and note **"XDR via Sentinel connector (fallback)"** in the report.
+
+---
 
 # IoC (Indicator of Compromise) Investigation — Monitor MCP + Azure CLI
 
@@ -42,7 +77,9 @@ The investigation correlates IoCs with threat intelligence, identifies associate
 
 > **Why these MCP servers are absent:** Sentinel Data Lake MCP, Sentinel Triage MCP, and Microsoft Graph MCP cannot currently be connected to Azure SRE Agent. This does **not** mean the underlying data is inaccessible — the data exposed by these servers (Sentinel Data Lake, Defender XDR / Advanced Hunting, Microsoft Graph) can be reached via direct API calls. However, direct API access to Sentinel Data Lake and Microsoft Graph as a replacement for these MCP servers has not yet been studied and implemented in this skill.
 
-**Data sources (Log Analytics via KQL):** ThreatIntelIndicators (new STIX table — ⚠️ NOT legacy ThreatIntelligenceIndicator), DeviceNetworkEvents, DeviceProcessEvents, DeviceFileEvents, DeviceRegistryEvents, DeviceLogonEvents, DeviceImageLoadEvents, DeviceEvents, AlertEvidence, AlertInfo, SecurityAlert, SigninLogs, AADNonInteractiveUserSignInLogs, EmailUrlInfo.
+**Data sources — routed by origin (see [Data Source Routing](#-data-source-routing-by-origin-read-first)):**
+- **Defender XDR via Graph `runHuntingQuery`:** DeviceNetworkEvents, DeviceProcessEvents, DeviceFileEvents, DeviceRegistryEvents, DeviceLogonEvents, DeviceImageLoadEvents, DeviceEvents, AlertEvidence, AlertInfo, EmailUrlInfo.
+- **Sentinel / Entra ID via Log Analytics KQL:** ThreatIntelIndicators (new STIX table — ⚠️ NOT legacy ThreatIntelligenceIndicator), SecurityAlert, SigninLogs, AADNonInteractiveUserSignInLogs.
 
 **Data sources (MDE API via `az rest`):** Custom IOC list, IP alerts/statistics, File info/stats/alerts/machines, CVE→affected devices (TVM).
 
@@ -614,13 +651,15 @@ This file contains the **exact `az rest` commands**, the required `--resource` p
 - Do NOT attempt MDE API calls from memory — the URLs and `--resource` parameter are precise and must match exactly.
 - If the first MDE API call returns 403 → skip ALL remaining MDE API calls and note "MDE API not accessible — KQL-only mode" in the report.
 
-#### Batch 1: KQL Queries via Azure Monitor MCP (Run ALL in parallel)
+#### Batch 1: Threat-Intel queries (routed by origin — run ALL in parallel)
 
-| Query | Table | IoC Types | Details |
-|-------|-------|-----------|---------|
-| **Q1** | ThreatIntelIndicators | All | TI indicator match (STIX schema) |
-| **Q8** | AlertEvidence | All | IoC in alert evidence |
-| **Q10** | SecurityAlert | All | Security alerts mentioning IoC |
+> **Q1** is a Sentinel table → Azure Monitor MCP / `QueryLogAnalyticsByWorkspaceId`. **Q8** (`AlertEvidence`) is an XDR table → Graph `runHuntingQuery` (see [Data Source Routing](#-data-source-routing-by-origin-read-first)). **Q10** is Sentinel-native.
+
+| Query | Table | Origin → Transport | IoC Types | Details |
+|-------|-------|-------------------|-----------|---------|
+| **Q1** | ThreatIntelIndicators | Sentinel → Log Analytics KQL | All | TI indicator match (STIX schema) |
+| **Q8** | AlertEvidence | XDR → Graph `runHuntingQuery` | All | IoC in alert evidence |
+| **Q10** | SecurityAlert | Sentinel → Log Analytics KQL | All | Security alerts mentioning IoC |
 
 #### Batch 2: MDE API Calls via `RunAzCliReadCommands` (Run ALL in parallel)
 
@@ -638,21 +677,21 @@ This file contains the **exact `az rest` commands**, the required `--resource` p
 
 ---
 
-### Phase 4: Activity and Connection Analysis (KQL via Azure Monitor MCP)
+### Phase 4: Activity and Connection Analysis (routed by origin)
 
-**Run ALL activity queries in parallel!**
+**Run ALL activity queries in parallel!** All `Device*`, `AlertEvidence`, `AlertInfo`, and `EmailUrlInfo` queries below are **XDR-origin → Graph `runHuntingQuery`** (same KQL body; see [Data Source Routing](#-data-source-routing-by-origin-read-first)). **Q11** (`SigninLogs` + `AADNonInteractiveUserSignInLogs`) is Sentinel/Entra ID → Log Analytics KQL.
 
-| Query | Table | IoC Types | Details |
-|-------|-------|-----------|---------|
-| **Q2** | DeviceNetworkEvents | IP | Connection summary |
-| **Q3** | DeviceNetworkEvents | IP | Connection timeline (top 20) |
-| **Q4** | DeviceNetworkEvents | Domain | DNS/HTTP connection activity |
-| **Q5** | DeviceNetworkEvents | Domain | Connection timeline (top 20) |
-| **Q6** | EmailUrlInfo | Domain, URL | Email delivery analysis |
-| **Q7** | DeviceFileEvents | Hash | File events across tables |
-| **Q7b** | DeviceProcessEvents | Hash | Process events with hash |
-| **Q9** | AlertEvidence + AlertInfo | All | Full alert correlation with details |
-| **Q11** | SigninLogs | IP | Sign-in analysis (Azure AD) |
+| Query | Table | Origin → Transport | IoC Types | Details |
+|-------|-------|-------------------|-----------|---------|
+| **Q2** | DeviceNetworkEvents | XDR → Graph `runHuntingQuery` | IP | Connection summary |
+| **Q3** | DeviceNetworkEvents | XDR → Graph `runHuntingQuery` | IP | Connection timeline (top 20) |
+| **Q4** | DeviceNetworkEvents | XDR → Graph `runHuntingQuery` | Domain | DNS/HTTP connection activity |
+| **Q5** | DeviceNetworkEvents | XDR → Graph `runHuntingQuery` | Domain | Connection timeline (top 20) |
+| **Q6** | EmailUrlInfo | XDR → Graph `runHuntingQuery` | Domain, URL | Email delivery analysis |
+| **Q7** | DeviceFileEvents | XDR → Graph `runHuntingQuery` | Hash | File events across tables |
+| **Q7b** | DeviceProcessEvents | XDR → Graph `runHuntingQuery` | Hash | Process events with hash |
+| **Q9** | AlertEvidence + AlertInfo | XDR → Graph `runHuntingQuery` | All | Full alert correlation with details |
+| **Q11** | SigninLogs | Sentinel → Log Analytics KQL | IP | Sign-in analysis (Azure AD) |
 
 ---
 
@@ -703,9 +742,11 @@ Create single JSON file: `temp/ioc_investigation_{ioc_type}_{ioc_normalized}_{ti
 
 ## KQL Execution Reference
 
-### How to Run KQL Queries
+> 🧭 **Route by origin first.** The query templates below are grouped by table. **XDR-origin tables** (`Device*`, `AlertEvidence`, `AlertInfo`, `EmailUrlInfo`) run via **Graph `runHuntingQuery`** (see [Data Source Routing](#-data-source-routing-by-origin-read-first)) — same KQL body, different transport. Only **Sentinel/Entra ID tables** (`ThreatIntelIndicators`, `SecurityAlert`, `SigninLogs`, `AADNonInteractiveUserSignInLogs`) use the Azure Monitor MCP against Log Analytics as described here.
 
-All KQL queries in this skill are executed via the **Azure Monitor MCP tool**:
+### How to Run KQL Queries (Sentinel / Entra ID tables)
+
+Sentinel/Entra ID KQL queries in this skill are executed via the **Azure Monitor MCP tool**:
 
 ```
 Tool: monitor-client_monitor_workspace_log_query

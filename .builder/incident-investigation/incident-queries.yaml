@@ -2,6 +2,14 @@
 # These queries replace the Sentinel Triage MCP tools (GetIncidentById, ListAlerts, etc.)
 # Execute via: monitor-client_monitor_workspace_log_query
 #
+# DATA SOURCE ROUTING (see SKILL.md → "Data Source Routing by Origin"):
+#   Q1–Q8 below are SENTINEL-native — they pivot on SecurityIncident.AlertIds and read
+#   SecurityIncident / SecurityAlert, which do NOT exist in XDR Advanced Hunting. Run them
+#   in Log Analytics (QueryLogAnalyticsByWorkspaceId / Azure Monitor MCP). Do NOT route them
+#   to Graph runHuntingQuery. XDR routing (runHuntingQuery) applies to the Phase 2 deep-dive
+#   sub-skills (user / computer / ioc-investigation) that query Device* / AlertEvidence / Email*
+#   directly, and to any standalone XDR-table lookup not gated by SecurityIncident.
+#
 # Replace placeholders:
 #   <INCIDENT_ID>  — numeric incident ID or ProviderIncidentId
 #   <INCIDENT_GUID> — Sentinel GUID (SecurityIncident.IncidentName)
