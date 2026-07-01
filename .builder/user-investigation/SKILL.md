@@ -334,6 +334,14 @@ Deep-dive analysis, compliance reviews, thorough forensics.
 - **Output location:** `reports/user-investigations/Investigation_Report_<username>_<timestamp>.html`
 - **⚠️ Conditional materialization:** The script is materialized to disk ONLY when the user requests HTML output. See [Phase 4 → Mode 3](#mode-3--html-report-conditional-materialization) for the workflow.
 
+### Mode 4: Deliver (Triple — Opt-in, on report request)
+- **Opt-in — runs ONLY when the user explicitly asks to send/deliver/archive** (e.g. *"gere e envie o report"*, *"generate and send the report"*, *"email this investigation"*, *"posta no Teams"*, *"arquiva no SharePoint"*). Default stays **inline-only** — never deliver automatically.
+- First generate the HTML (Mode 3), then follow the [canonical delivery sequence](../../shared/sharepoint-archival.md#canonical-delivery-sequence-archive--link--notify) — reuse the delivery skills; do **NOT** re-implement transport:
+  1. **SharePoint (first)** — `python shared/sharepoint_upload.py upload --site "<config: sharepoint.site_id>" --skill user-investigation --file <html>`; capture `webUrl` + `folderUrl` from stdout; skip/error → `webUrl=null`, continue (best-effort, never blocks email/Teams).
+  2. **Email — `send-email-report`** — subject `👤 User Investigation: {upn} · {risk} ({date})`. User reports are **Sensitive** (identity/PII) → **link-only** by default (data minimization): include `📂 Abrir no SharePoint: <folderUrl>`. The report link MUST be a `sharepoint.com` URL — never a `teams.microsoft.com`/webhook link.
+  3. **Teams — `send-teams-notification`** — post via the Power Automate **webhook only** (never Graph) using `shared/teams_notify.py`; add an **Abrir no SharePoint** action → `folderUrl`.
+- **Never email-only.** If `sharepoint.site_id` / `teams.webhook_url` is missing in config, **report the gap** instead of silently skipping (Teams skipped only when no webhook is configured — and then say so).
+
 ### Markdown Rendering Notes
 - ✅ ASCII tables, box-drawing characters, and bar charts render perfectly in markdown code blocks
 - ✅ Unicode block characters render correctly in monospaced fonts
