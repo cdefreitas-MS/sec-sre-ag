@@ -1,6 +1,9 @@
 ---
 name: soc-executive-brief
 description: 'ONE executive SOC email consolidating three signals into a single verdict: (1) Threat Pulse — recent incidents, open High-severity, MTTR; (2) Identity Posture — sign-ins, risky users, MFA coverage, privileged accounts; (3) MITRE Coverage — % of tactics covered by enabled rules + untagged rules. Computes a weighted SOC Score (0-100, FORTE/MODERADA/FRACA) and the single next action to take. Collector↔renderer, deterministic, 100% READ-ONLY (GET/query only). Replaces three separate emails with one executive brief. Use for: brief executivo, soc daily brief, consolidado SOC, threat pulse + identity + mitre, email executivo de segurança, postura SOC diária.'
+tools:
+  - RunAzCliReadCommands
+  - QueryLogAnalyticsByWorkspaceId
 ---
 
 # SOC Executive Brief — Instructions

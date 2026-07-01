@@ -1,6 +1,9 @@
 ---
 name: attack-path
 description: 'Cross-domain attack-path synthesizer + blast-radius remediation re-prioritizer. Ingests the datasets your other skills already collect (exposure-graph exposure/devices, org-posture NHI / spn-scope-drift credential hygiene, graph-least-privilege granted Graph scopes, exposure-graph privileged roles, threat-correlation/MDE exposed weaknesses, advisor-impact Defender-for-Cloud misconfig) and SYNTHESIZES a directed risk graph (nodes = identities/service-principals/devices/resources/roles/capabilities; edges = ABUSABLE transitions). Finds attack paths external-attacker -> pivot -> crown-jewel, scores each by likelihood (product of edge feasibility) x impact (crown-jewel value), and ranks the remediation CHOKEPOINTS that break the most high-risk paths — re-prioritizing fixes by BLAST-RADIUS REDUCTION, not Secure-Score points. Annotates each edge with the ATT&CK technique and flags paths that are also DETECTION BLIND SPOTS (technique not covered / telemetry silent). Finds the cross-domain toxic combinations no single Microsoft product surfaces, because each product is single-domain. 100% READ-ONLY, deterministic, collector<->renderer. Use for: attack path analysis, attack path synthesis, toxic combination, lateral movement path, privilege escalation path, blast radius, choke point remediation, what to fix first, emergent risk, cross-domain correlation, identity attack path, service principal attack path, tenant takeover path.'
+tools:
+  - RunAzCliReadCommands
+  - QueryLogAnalyticsByWorkspaceId
 ---
 
 # Attack Path — Cross-Domain Attack-Path Synthesizer
