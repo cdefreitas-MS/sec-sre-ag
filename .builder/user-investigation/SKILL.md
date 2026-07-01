@@ -11,6 +11,8 @@ description: >
   Entra ID user data is collected via RunAzCliReadCommands tool (Graph API)
   or KQL fallback queries from SigninLogs.
   KQL queries run against Log Analytics tables through the Azure Monitor MCP tool.
+  Data is routed by origin: XDR-origin tables (CloudAppEvents, Device*, Identity*, Alert*) are queried via
+  Microsoft Graph Advanced Hunting (runHuntingQuery) by default; Sentinel/Entra ID tables via Log Analytics KQL.
 ---
 
 > ⚠️ **CRITICAL OUTPUT RULE — ALWAYS PRESENT RESULTS INLINE FIRST**
@@ -25,6 +27,39 @@ description: >
 > ⚠️ **CRITICAL TOOL RULE — ALWAYS PASS --subscription TO MCP MONITOR**
 >
 > When calling `monitor-client_monitor_workspace_log_query`, the `subscription` parameter is MANDATORY. Without it, the tool returns a 400 error that may be silently interpreted as "no data". Always read the subscription ID from the agent's `<azure_resource_access>` settings and pass it in every call.
+
+## 🧭 Data Source Routing by Origin (READ FIRST)
+
+**Query each table from its system of record — not from wherever it happens to be mirrored.** Tables whose origin is **Defender XDR** are queried via **Microsoft Graph Advanced Hunting** (`runHuntingQuery`) **by default**, NOT via KQL against the Sentinel workspace. This is authoritative even when the Defender XDR data connector also streams those tables into Log Analytics.
+
+| Origin (system of record) | Tables | Transport |
+|---|---|---|
+| **Defender XDR** (Advanced Hunting) | `CloudAppEvents`, `DeviceNetworkEvents`, `DeviceProcessEvents`, `DeviceFileEvents`, `DeviceLogonEvents`, `DeviceEvents`, `DeviceInfo`, `AlertEvidence`, `AlertInfo`, `EmailEvents`, `EmailUrlInfo`, `IdentityLogonEvents`, `IdentityQueryEvents`, `IdentityDirectoryEvents` | **Graph `runHuntingQuery`** (`RunAzCliReadCommands`) |
+| **Sentinel / Entra ID** | `SigninLogs`, `AADNonInteractiveUserSignInLogs`, `AADUserRiskEvents`, `AuditLogs`, `SecurityAlert`, `SecurityIncident`, `OfficeActivity`, `ThreatIntelIndicators`, `Anomalies` | **Log Analytics KQL** (`QueryLogAnalyticsByWorkspaceId` / Azure Monitor MCP) |
+
+> **Entra ID user profile / directory objects** (user, manager, group memberships, app role assignments, risk state) come from **Microsoft Graph REST** (`GET /v1.0/users/...`, `/identityProtection/...`) via `RunAzCliReadCommands` — not from a table. See `get-entra-user-context-via-tool.md`.
+
+### Running an XDR query (Graph Advanced Hunting)
+
+Use **`RunAzCliReadCommands`** — NOT `RunAzCliWriteCommands` (we need the Managed-Identity/application path that carries the `ThreatHunting.Read.All` app role granted to the agent's UAMI; the Write tool falls back to OBO/delegated and returns 403).
+
+1. Write the query body to a temp file (avoids shell-quoting issues with the KQL):
+   `create_file("temp/hunt.json", '{"Query": "<KQL_BODY>"}')`
+2. Execute:
+   ```
+   az rest --method post \
+     --url "https://graph.microsoft.com/v1.0/security/runHuntingQuery" \
+     --resource "https://graph.microsoft.com" \
+     --headers "Content-Type=application/json" \
+     --body "@temp/hunt.json"
+   ```
+
+- The **KQL body is identical** to the query templates in this skill — only the transport changes. `let`, `datetime()`, `ago()`, `union`, and `join` all work unchanged in Advanced Hunting.
+- XDR Advanced Hunting uses **`Timestamp`** as the time column (never `TimeGenerated` for these tables).
+- Result rows are returned under **`.Results`** in the JSON response.
+- **Fallback:** if `runHuntingQuery` returns `403` (missing scope) or is unavailable, run the *same* KQL against the Sentinel workspace via `QueryLogAnalyticsByWorkspaceId` (works when the Defender XDR connector streams the table) and note **"XDR via Sentinel connector (fallback)"** in the report.
+
+---
 
 # User Security Investigation — Monitor MCP + Azure CLI
 
@@ -42,7 +77,10 @@ This skill performs comprehensive security investigations on Entra ID user accou
 
 > **Why these MCP servers are absent:** Sentinel Data Lake MCP, Sentinel Triage MCP, and Microsoft Graph MCP cannot currently be connected to Azure SRE Agent. This does **not** mean the underlying data is inaccessible — the data exposed by these servers (Sentinel Data Lake, Defender XDR / Advanced Hunting, Microsoft Graph) can be reached via direct API calls. However, direct API access to Sentinel Data Lake and Microsoft Graph as a replacement for these MCP servers has not yet been studied and implemented in this skill.
 
-**Data sources:** SigninLogs, AADNonInteractiveUserSignInLogs, AuditLogs, SecurityAlert, SecurityIncident, OfficeActivity, CloudAppEvents, AADUserRiskEvents, ThreatIntelIndicators, Anomalies, Signinlogs_Anomalies_KQL_CL (custom, if present), Identity Protection (via `RunAzCliReadCommands` or KQL fallback).
+**Data sources — routed by origin (see [Data Source Routing](#-data-source-routing-by-origin-read-first)):**
+- **Defender XDR via Graph `runHuntingQuery`:** CloudAppEvents, Device* (logon/network/process/file), Identity* (MDI), AlertEvidence, AlertInfo.
+- **Sentinel / Entra ID via Log Analytics KQL:** SigninLogs, AADNonInteractiveUserSignInLogs, AuditLogs, SecurityAlert, SecurityIncident, OfficeActivity, AADUserRiskEvents, ThreatIntelIndicators, Anomalies, Signinlogs_Anomalies_KQL_CL (custom, if present).
+- **Microsoft Graph REST (via `RunAzCliReadCommands`):** Entra ID user profile + Identity Protection (KQL fallback from SigninLogs when Graph perms are absent).
 
 **Skill files:**
 - `SKILL.md` — this file (investigation workflow, KQL queries, report templates)
@@ -454,9 +492,11 @@ When multiple modes are selected:
 
 ## KQL Execution Reference
 
-### Primary: Azure Monitor MCP Tool
+> 🧭 **Route by origin first.** This section covers **Sentinel / Entra ID** tables (`SigninLogs`, `AADNonInteractiveUserSignInLogs`, `AADUserRiskEvents`, `AuditLogs`, `SecurityAlert`, `SecurityIncident`, `OfficeActivity`, `Anomalies`, `ThreatIntelIndicators`). **XDR-origin** tables (`CloudAppEvents`, `Device*`, `Identity*`, `AlertEvidence`, `AlertInfo`) run via **Graph `runHuntingQuery`** — same KQL body, different transport (see [Data Source Routing](#-data-source-routing-by-origin-read-first)).
 
-Use `monitor-client_monitor_workspace_log_query` for all KQL queries.
+### Primary: Azure Monitor MCP Tool (Sentinel / Entra ID tables)
+
+Use `monitor-client_monitor_workspace_log_query` for Sentinel/Entra ID KQL queries.
 
 | Parameter | Required | Source |
 |-----------|----------|--------|
@@ -485,7 +525,8 @@ az monitor log-analytics query --workspace "<workspace_GUID>" --analytics-query 
 | **AADUserRiskEvents** | IP column is `IpAddress` (lowercase 'p') | Use `IpAddress`, NOT `IPAddress` |
 | **AADUserRiskEvents** | Time column is `ActivityDateTime` | NOT `TimeGenerated` |
 | **SecurityAlert** | `Status` is immutable — always "New" | Join with `SecurityIncident` for real status |
-| **CloudAppEvents** | High-volume; `RawEventData` is large JSON | Filter by `TimeGenerated` → `ActionType` first |
+| **CloudAppEvents** | XDR-origin → query via Graph `runHuntingQuery`; in Advanced Hunting the time column is `Timestamp` (NOT `TimeGenerated`) | Route via [Data Source Routing](#-data-source-routing-by-origin-read-first); on Sentinel fallback keep `TimeGenerated` |
+| **CloudAppEvents** | High-volume; `RawEventData` is large JSON | Filter by time → `ActionType` first |
 | **CloudAppEvents** | `AccountId` is GUID, NOT UPN | Use `AccountObjectId` or `AccountDisplayName` |
 | **Signinlogs_Anomalies_KQL_CL** | Custom table — may not exist | Handle "Failed to resolve" gracefully |
 | **Anomalies** | `Tactics`, `Techniques` are JSON strings | `parse_json()` before `make_set()` |
@@ -779,6 +820,8 @@ SecurityIncident
 ```
 
 ### Q10. DLP Events
+
+> **XDR-origin** (`CloudAppEvents`) → run via Graph `runHuntingQuery` (see [Data Source Routing](#-data-source-routing-by-origin-read-first)). In Advanced Hunting the time column is **`Timestamp`** — replace `TimeGenerated` with `Timestamp` below. If falling back to Sentinel Log Analytics, keep `TimeGenerated`.
 
 ```kql
 let upn = '<UPN>';
