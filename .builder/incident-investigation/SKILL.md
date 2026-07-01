@@ -704,6 +704,7 @@ ELSE IF user says "done" or declines:
 | **Inline** (default) | Always | Present all findings, alerts, assets, evidences, and recommendations directly in chat |
 | **Markdown file** | Only if user explicitly requests | Save full investigation report as `.md` file |
 | **HTML report** | Only if user explicitly requests | Resolve `generate_html_report.py` via [File Resolution cascade](#file-resolution-coderefs-first) and run: `python3 <resolved_path>/generate_html_report.py <json_file> --output-dir reports/incident-investigation/` |
+| **Deliver (triple)** | Only if the user **explicitly** asks to send/deliver/archive | Generate the HTML, then archive to **SharePoint → email → Teams** (opt-in; never automatic). See **Deliver (Triple — Opt-in, on report request)** below. |
 | **JSON export** | Only if user explicitly requests | Save investigation data using the JSON Export Structure below |
 
 > **Conditional — File Resolution Cascade:** The `generate_html_report.py` script is resolved ONLY when the user requests HTML output.
@@ -712,6 +713,18 @@ ELSE IF user says "done" or declines:
 > 3. Else: `read_skill_file("incident-investigation", "generate_html_report.py")` → `CreateFile("tmp/incident-investigation/generate_html_report.py", <content>)`
 > 4. Run: `python3 <resolved_path>/generate_html_report.py <json_file> --output-dir reports/incident-investigation/`
 > Resolve via cascade only when the user requests an HTML report.
+
+### Deliver (Triple — Opt-in, on report request)
+
+**Opt-in — runs ONLY when the user explicitly asks to send/deliver/archive a report** (e.g. *"gere e envie o report"*, *"generate and send the report"*, *"email this incident"*, *"posta no Teams"*, *"arquiva no SharePoint"*). Default stays **inline-only** — never deliver automatically.
+
+When triggered, first generate the HTML report (above), then follow the [canonical delivery sequence](../../shared/sharepoint-archival.md#canonical-delivery-sequence-archive--link--notify) — reuse the delivery skills; do **NOT** re-implement transport:
+
+1. **SharePoint (first)** — `python shared/sharepoint_upload.py upload --site "<config: sharepoint.site_id>" --skill incident-investigation --file <html>`; capture `webUrl` + `folderUrl` from stdout; skip (exit 3) / error (exit 1) → `webUrl=null`, continue (best-effort, never blocks email/Teams).
+2. **Email — `send-email-report`** — subject `🔍 Incident {id}: {severity} ({date})`. Incident reports aggregate entity/PII sub-investigations → **Sensitive, link-only** (data minimization): include `📂 Abrir no SharePoint: <folderUrl>`. The report link MUST be a `sharepoint.com` URL — never a `teams.microsoft.com`/webhook link.
+3. **Teams — `send-teams-notification`** — post via the Power Automate **webhook only** (never Graph) using `shared/teams_notify.py`; add an **Abrir no SharePoint** action → `folderUrl`.
+
+> **Never email-only.** If `sharepoint.site_id` / `teams.webhook_url` is missing in config, **report the gap** instead of silently skipping (Teams skipped only when no webhook configured — and then say so explicitly).
 
 ---
 

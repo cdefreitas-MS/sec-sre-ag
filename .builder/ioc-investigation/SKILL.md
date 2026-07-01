@@ -227,6 +227,7 @@ Before executing any script resolved via the File Resolution cascade, the agent 
 | **Inline** (DEFAULT — ALWAYS) | Every invocation | Present all findings, threat intel, activity, risk assessment inline in chat |
 | **Markdown file** | Only if the user **explicitly** requests | Save investigation report as `.md` file |
 | **HTML report** | Only if the user **explicitly** requests | Generate **one HTML report per IoC** investigated. Present only the HTML report links to the user |
+| **Deliver (triple)** | Only if the user **explicitly** asks to send/deliver/archive | Generate the HTML, then archive to **SharePoint → email → Teams** (opt-in; never automatic). See [Deliver (on report request)](#deliver-on-report-request--canonical-sequence) below. |
 | **JSON export** | **Internal only** — created automatically as intermediate step for HTML generation | Save `ioc_investigation_*.json` to `temp/`. **NEVER show JSON file links to the user** unless they explicitly ask for JSON export |
 
 > **Rule:** Always start with inline presentation. Never skip inline output. The other modes are additive, triggered only by explicit user request.
@@ -259,6 +260,23 @@ When multiple IoCs are investigated together (e.g., an IP + a domain), **generat
   ```
 - Present all generated HTML report links to the user together at the end
 - **NEVER present JSON file links to the user** — JSON is an internal intermediate artifact
+
+### Deliver (on report request) — canonical sequence
+
+**Opt-in — runs ONLY when the user explicitly asks to send/deliver/archive a report** (e.g. *"gere e envie o report"*, *"generate and send the report"*, *"email this investigation"*, *"posta no Teams"*, *"arquiva no SharePoint"*). The default stays **inline-only** — never deliver automatically.
+
+When triggered, first generate the HTML report (above), then follow the [canonical delivery sequence](../../shared/sharepoint-archival.md#canonical-delivery-sequence-archive--link--notify) — reuse the delivery skills; do **NOT** re-implement transport:
+
+1. **SharePoint (first).** Archive the HTML (best-effort — must NOT block email/Teams):
+   ```bash
+   python shared/sharepoint_upload.py upload --site "<config: sharepoint.site_id>" --skill ioc-investigation --file <html>
+   ```
+   Capture `webUrl` + `folderUrl` from stdout; on skip (exit 3) / error (exit 1) set `webUrl=null` and continue.
+2. **Email — `send-email-report`.** Subject: `🔍 IoC Investigation: {ioc_value} · {verdict} ({date})`. IoC reports are **Sensitive** (exposure/entity detail) → **link-only** by default (data minimization): include `📂 Abrir no SharePoint: <folderUrl>` when present. The report link MUST be a `sharepoint.com` URL — **never** a `teams.microsoft.com`/webhook link.
+3. **Teams — `send-teams-notification`.** Post via the Power Automate **webhook only** (never Graph) using `shared/teams_notify.py`; add an **Abrir no SharePoint** action → `folderUrl`.
+
+> **Never email-only.** If `sharepoint.site_id` / `teams.webhook_url` is missing in config, **report the gap** instead of silently skipping (Teams is skipped only when no webhook is configured — and then say so).
+> **One report per IoC → one delivery per IoC** (see [Multi-IoC HTML Reports](#multi-ioc-html-reports)).
 
 ### enrich_ips.py — Conditional Resolution (codeRefs-first)
 
