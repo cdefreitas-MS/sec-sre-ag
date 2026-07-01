@@ -1,6 +1,9 @@
 ---
 name: sentinel-documenter
 description: 'Living, gap-scored documentation for a Microsoft Sentinel workspace. A YAML-driven Python pipeline inventories the workspace (analytic rules, data connectors, DCRs/DCEs, tables, RBAC, settings) via az rest / az monitor, runs a SCORED best-practice gap analysis against the SENT-NNN catalog (43 rules across Cost, Coverage, Operational, Identity, Network, Resilience, Hygiene, Foundation, Strategic — ported faithfully from the open-source Sentinel-As-Code Wave 4 best-practices.json v2.0.0), estimates cost (Usage GB x Azure Retail Prices + 5 GB/day Sentinel free benefit + commitment-tier what-if), and emits a Documenter Score (0-100) with verdict SAUDÁVEL / ATENÇÃO / EM RISCO / CRÍTICO. The script renders the final HTML (email) + Markdown (repo) deterministically — no LLM rendering phase. 100% READ-ONLY (GET/query/anonymous only — never mutates the workspace). Use for: documentar sentinel, sentinel documenter, workspace health, sentinel best practices, gap analysis sentinel, custo do sentinel, SENT-NNN.'
+tools:
+  - RunAzCliReadCommands
+  - QueryLogAnalyticsByWorkspaceId
 ---
 
 # Sentinel Documenter — Instructions

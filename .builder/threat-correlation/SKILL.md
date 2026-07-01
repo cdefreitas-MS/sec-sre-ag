@@ -1,6 +1,8 @@
 ---
 name: threat-correlation
 description: 'Correlates threat intelligence with the environment''s REAL vulnerabilities and ACTIVE alerts to surface the CVEs that matter right now. Tier 1 (license-free) via Defender XDR Advanced Hunting — exposed-device count per CVE (DeviceTvmSoftwareVulnerabilities) enriched in-KQL with CVSS + exploit signal from the TVM KB (DeviceTvmSoftwareVulnerabilitiesKB), cross-referenced with active alerts on the same devices (AlertInfo + AlertEvidence) = active threat on a vulnerable asset, plus crown-jewel weighting. Tier 2 (with MDTI premium API add-on) enriches the top CVEs with actor/article/dark-web context from Microsoft Defender Threat Intelligence, degrading gracefully on 402/403. Ranks each CVE (exposed x CVSS x exploit x active-alert x asset-criticality) and renders an executive verdict per CVE (corrigir agora / janela / monitorar) as HTML + Markdown, delivered via email + Teams and archived to SharePoint. Collector<->renderer, deterministic, 100% READ-ONLY. Use for: threat correlation, ameacas que importam, quais CVEs estao sendo exploradas no meu ambiente, vulnerabilidade com ameaca ativa, MDTI, threat-vulnerability correlation, exploitable exposed CVEs, active threat on vulnerable asset.'
+tools:
+  - RunAzCliReadCommands
 ---
 
 # Threat ↔ Vulnerability Correlation — Skill Instructions

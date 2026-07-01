@@ -1,6 +1,9 @@
 ---
 name: incident-triage
 description: 'One-shot, autonomous, deterministic triage report for a SINGLE security incident (Microsoft Sentinel / Defender XDR). Collects the incident header + related alerts, extracts affected entities (users/hosts/IPs), tags MITRE techniques (native alert Tactics + free-text inference via shared/mitre_map.py), builds a recommended RESPONSE PLAN where every action is risk-gated via shared/action_safety.py (risk/approval/rollback/guardrails), and closes with a verdict (TRUE POSITIVE PROVÁVEL / REQUER ANÁLISE / PROVÁVEL BENIGNO) + the single next action. Collector↔renderer, HTML (dark, email) + Markdown. 100% READ-ONLY — it RECOMMENDS, never executes. Complements (does NOT replace) the interactive incident-investigation. Use for: triagem de incidente, triage incident, brief de incidente, incident triage report, plano de resposta do incidente, veredito do incidente, autonomous incident triage.'
+tools:
+  - RunAzCliReadCommands
+  - QueryLogAnalyticsByWorkspaceId
 threat_pulse_domains: [incidents]
 drill_down_prompt: 'Triage incident {entity} — header, alerts, entities, MITRE tagging, gated response plan, verdict + next action'
 ---
