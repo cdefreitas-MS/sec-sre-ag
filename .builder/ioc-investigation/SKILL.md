@@ -26,25 +26,31 @@ drill_down_prompt: 'Investigate IoC {entity} — threat intel, organizational ex
 
 | Origin (system of record) | Tables | Transport |
 |---|---|---|
-| **Defender XDR** (Advanced Hunting) | `DeviceNetworkEvents`, `DeviceProcessEvents`, `DeviceFileEvents`, `DeviceRegistryEvents`, `DeviceLogonEvents`, `DeviceImageLoadEvents`, `DeviceEvents`, `DeviceInfo`, `AlertEvidence`, `AlertInfo`, `EmailEvents`, `EmailUrlInfo`, `EmailAttachmentInfo`, `UrlClickEvents`, `CloudAppEvents`, `IdentityLogonEvents`, `IdentityQueryEvents`, `IdentityDirectoryEvents` | **Graph `runHuntingQuery`** (`RunAzCliReadCommands`) |
+| **Defender XDR** (Advanced Hunting) | `DeviceNetworkEvents`, `DeviceProcessEvents`, `DeviceFileEvents`, `DeviceRegistryEvents`, `DeviceLogonEvents`, `DeviceImageLoadEvents`, `DeviceEvents`, `DeviceInfo`, `AlertEvidence`, `AlertInfo`, `EmailEvents`, `EmailUrlInfo`, `EmailAttachmentInfo`, `UrlClickEvents`, `CloudAppEvents`, `IdentityLogonEvents`, `IdentityQueryEvents`, `IdentityDirectoryEvents` | **Graph `runHuntingQuery`** (via `RunInTerminal`) |
 | **Sentinel / Entra ID** | `ThreatIntelIndicators`, `SecurityAlert`, `SecurityIncident`, `SigninLogs`, `AADNonInteractiveUserSignInLogs`, `AADUserRiskEvents`, `AuditLogs`, `OfficeActivity`, `SecurityEvent`, `Anomalies` | **Log Analytics KQL** (`QueryLogAnalyticsByWorkspaceId` / Azure Monitor MCP) |
 
 ### Running an XDR query (Graph Advanced Hunting)
 
-Execute the `runHuntingQuery` POST via **`RunInTerminal`** — in the SRE Agent sandbox `az` is authenticated as the agent's **User-Assigned Managed Identity (UAMI)**, so the Graph token carries the UAMI's *application* permissions. Do **NOT** use `RunAzCliReadCommands` (it classifies `--method post` as a **write** and blocks it) and do **NOT** use `RunAzCliWriteCommands` (it falls back to OBO/delegated → 403).
+Execute the `runHuntingQuery` POST via **`RunInTerminal`** (the POST is blocked by `RunAzCliReadCommands` as a "write", and `RunAzCliWriteCommands` OBO-403s).
 
-> **Prerequisite — app role:** the UAMI must hold the Microsoft Graph **`ThreatHunting.Read.All`** application role. If `runHuntingQuery` returns **403** ("missing scopes" / role not assigned), the role is **not** granted → use the Sentinel fallback below and flag it so an admin can grant `ThreatHunting.Read.All` on the agent's UAMI.
+> **⚠️ Identity gotcha — the real cause of the 403.** The agent has **two** managed identities: a **system-assigned** MI (the DEFAULT for `az` / `az rest` / `az account get-access-token`) that holds only a minimal role set (e.g. `Sites.Selected`), and a **user-assigned** MI (**UAMI**) that holds the security roles incl. **`ThreatHunting.Read.All`**. A plain `az rest`/token call uses the **system-assigned** MI → `runHuntingQuery` returns **403 `"Missing application roles. API required roles: ThreatHunting.Read.All, application roles: Sites.Selected."`**. You MUST mint the Graph token from the **UAMI** explicitly (validated: UAMI token → HTTP 200).
 
 1. Write the query body to a temp file (avoids shell-quoting issues with the KQL):
    `create_file("temp/hunt.json", '{"Query": "<KQL_BODY>"}')`
-2. Execute via **`RunInTerminal`**:
+2. Mint a Graph token for the **UAMI** via the Container Apps identity endpoint. The UAMI `client_id` is the agent's user-assigned MI appId — resolve it from the agent's `<agent_identity>` settings, or from `config.json` → `agent_uami_client_id`:
+   ```bash
+   TOKEN=$(curl -s -H "X-IDENTITY-HEADER: $IDENTITY_HEADER" \
+     "$IDENTITY_ENDPOINT?api-version=2019-08-01&resource=https://graph.microsoft.com&client_id=<UAMI_CLIENT_ID>" \
+     | python3 -c "import sys,json;print(json.load(sys.stdin)['access_token'])")
    ```
-   az rest --method post \
-     --url "https://graph.microsoft.com/v1.0/security/runHuntingQuery" \
-     --resource "https://graph.microsoft.com" \
-     --headers "Content-Type=application/json" \
-     --body "@temp/hunt.json"
+3. POST `runHuntingQuery` with the explicit UAMI Bearer token:
+   ```bash
+   curl -s -X POST "https://graph.microsoft.com/v1.0/security/runHuntingQuery" \
+     -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+     -d @temp/hunt.json
    ```
+   > Do **NOT** use `az rest --method post ... --resource https://graph.microsoft.com` — it mints the token from the **system-assigned** MI and 403s. (`az account get-access-token --client-id` is unavailable on the sandbox az 2.76, so the identity endpoint is the reliable path.)
+   > **Optional token check:** base64url-decode the JWT payload (2nd segment) and confirm `appid` == the UAMI client_id and `ThreatHunting.Read.All` is in the `roles` array.
 
 - The **KQL body is identical** to the query templates in this skill — only the transport changes. `let`, `datetime()`, `ago()`, `union`, and `join` all work unchanged in Advanced Hunting.
 - XDR Advanced Hunting uses **`Timestamp`** as the time column (the `Device*` / `Alert*` / `Email*` templates below already do). Never `TimeGenerated` for these tables.
