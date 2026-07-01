@@ -1,0 +1,38 @@
+# =============================================================================
+# secure-score-leadership — verified queries (single source of truth)
+# Pattern: collector↔renderer. This file = CAPTURE (Graph). generate_html_report.py = RENDER.
+# Graph permission: SecurityEvents.Read.All (Application). Read-only.
+# Placeholders: {trend_snapshots}
+# =============================================================================
+metadata:
+  skill: secure-score-leadership
+  title: Secure Score — Leadership
+  description: >
+    Executive Microsoft Secure Score report: current posture, 30/90-day trend, comparison
+    vs peers (all tenants / same seat count / industry), per-category breakdown, and the
+    highest-ROI quick wins (gain × low cost × low user impact). Read-only.
+  data_source: Microsoft Graph Security API
+
+parameters:
+  trend_snapshots: 90
+  quick_wins: 8
+  strong_pct: 70
+  moderate_pct: 50
+
+scoring:
+  # ROI = (maxScore - score) * cost_weight[implementationCost] * impact_weight[userImpact]
+  cost_weight:
+    Low: 1.0
+    Moderate: 0.6
+    High: 0.3
+  impact_weight:
+    Low: 1.0
+    Moderate: 0.7
+    High: 0.4
+
+graph:
+  base: "https://graph.microsoft.com/v1.0"
+  token_resource: "https://graph.microsoft.com"
+  endpoints:
+    secure_scores: "/security/secureScores?$top={trend_snapshots}"
+    control_profiles: "/security/secureScoreControlProfiles?$top=300"
