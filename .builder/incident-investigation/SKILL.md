@@ -29,7 +29,7 @@ drill_down_prompt: 'Investigate incident {entity} — alert details, entity extr
 
 | Origin (system of record) | Tables | Transport |
 |---|---|---|
-| **Defender XDR** (Advanced Hunting) | `AlertEvidence`, `AlertInfo`, `DeviceInfo`, `DeviceNetworkEvents`, `DeviceProcessEvents`, `DeviceFileEvents`, `DeviceLogonEvents`, `DeviceEvents`, `EmailEvents`, `EmailUrlInfo`, `CloudAppEvents`, `IdentityLogonEvents`, `IdentityDirectoryEvents` | **Graph `runHuntingQuery`** (`RunAzCliReadCommands`) |
+| **Defender XDR** (Advanced Hunting) | `AlertEvidence`, `AlertInfo`, `DeviceInfo`, `DeviceNetworkEvents`, `DeviceProcessEvents`, `DeviceFileEvents`, `DeviceLogonEvents`, `DeviceEvents`, `EmailEvents`, `EmailUrlInfo`, `CloudAppEvents`, `IdentityLogonEvents`, `IdentityDirectoryEvents` | **Graph `runHuntingQuery`** (via `RunInTerminal`) |
 | **Sentinel / Entra ID** | `SecurityIncident`, `SecurityAlert`, `SigninLogs`, `AADNonInteractiveUserSignInLogs`, `SecurityEvent`, `AuditLogs` | **Log Analytics KQL** (`QueryLogAnalyticsByWorkspaceId` / Azure Monitor MCP) |
 
 > **Phase 1 incident correlation stays in Sentinel.** `SecurityIncident` and `SecurityAlert` are **Sentinel-only** tables (they do **not** exist in XDR Advanced Hunting), and the Phase 1 queries (`incident-queries.yaml` Q1–Q8) pivot on `SecurityIncident.AlertIds` → they run in **Log Analytics KQL** (even Q4, which reads `AlertEvidence` gated by the incident's alert IDs). **XDR routing via `runHuntingQuery` applies to:** (a) the **Phase 2 deep-dive sub-skills** (user / computer / ioc-investigation query `Device*` / `AlertEvidence` / `Email*` directly), and (b) any standalone XDR-table lookup that is **not** gated by `SecurityIncident`.
@@ -734,7 +734,7 @@ If the Monitor MCP tool fails, use `RunAzCliReadCommands` with:
 az monitor log-analytics query --workspace "<workspace_GUID>" --analytics-query "<KQL_QUERY>" --timespan "P7D" --subscription <subId>
 ```
 
-> **⚠️ Shell `az` vs Tool:** The `az` CLI binary may NOT be in the shell PATH. Always use the `RunAzCliReadCommands` tool, not `RunInTerminal` with `az` commands.
+> **⚠️ Shell `az` vs Tool (Log Analytics fallback only):** For the `az monitor log-analytics query` fallback above, use the `RunAzCliReadCommands` tool. **Exception:** the XDR `runHuntingQuery` POST is executed via `RunInTerminal` (see [Data Source Routing](#-data-source-routing-by-origin-read-first)) — in the SRE Agent sandbox `az` runs as the agent's UAMI, so `RunInTerminal` is correct there.
 
 ### Known Table Pitfalls (Log Analytics)
 

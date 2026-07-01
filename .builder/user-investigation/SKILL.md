@@ -34,7 +34,7 @@ description: >
 
 | Origin (system of record) | Tables | Transport |
 |---|---|---|
-| **Defender XDR** (Advanced Hunting) | `CloudAppEvents`, `DeviceNetworkEvents`, `DeviceProcessEvents`, `DeviceFileEvents`, `DeviceLogonEvents`, `DeviceEvents`, `DeviceInfo`, `AlertEvidence`, `AlertInfo`, `EmailEvents`, `EmailUrlInfo`, `IdentityLogonEvents`, `IdentityQueryEvents`, `IdentityDirectoryEvents` | **Graph `runHuntingQuery`** (`RunAzCliReadCommands`) |
+| **Defender XDR** (Advanced Hunting) | `CloudAppEvents`, `DeviceNetworkEvents`, `DeviceProcessEvents`, `DeviceFileEvents`, `DeviceLogonEvents`, `DeviceEvents`, `DeviceInfo`, `AlertEvidence`, `AlertInfo`, `EmailEvents`, `EmailUrlInfo`, `IdentityLogonEvents`, `IdentityQueryEvents`, `IdentityDirectoryEvents` | **Graph `runHuntingQuery`** (via `RunInTerminal`) |
 | **Sentinel / Entra ID** | `SigninLogs`, `AADNonInteractiveUserSignInLogs`, `AADUserRiskEvents`, `AuditLogs`, `SecurityAlert`, `SecurityIncident`, `OfficeActivity`, `ThreatIntelIndicators`, `Anomalies` | **Log Analytics KQL** (`QueryLogAnalyticsByWorkspaceId` / Azure Monitor MCP) |
 
 > **Entra ID user profile / directory objects** (user, manager, group memberships, app role assignments, risk state) come from **Microsoft Graph REST** (`GET /v1.0/users/...`, `/identityProtection/...`) via `RunAzCliReadCommands` — not from a table. See `get-entra-user-context-via-tool.md`.

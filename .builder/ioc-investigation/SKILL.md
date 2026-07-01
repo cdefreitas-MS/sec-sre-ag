@@ -26,7 +26,7 @@ drill_down_prompt: 'Investigate IoC {entity} — threat intel, organizational ex
 
 | Origin (system of record) | Tables | Transport |
 |---|---|---|
-| **Defender XDR** (Advanced Hunting) | `DeviceNetworkEvents`, `DeviceProcessEvents`, `DeviceFileEvents`, `DeviceRegistryEvents`, `DeviceLogonEvents`, `DeviceImageLoadEvents`, `DeviceEvents`, `DeviceInfo`, `AlertEvidence`, `AlertInfo`, `EmailEvents`, `EmailUrlInfo`, `EmailAttachmentInfo`, `UrlClickEvents`, `CloudAppEvents`, `IdentityLogonEvents`, `IdentityQueryEvents`, `IdentityDirectoryEvents` | **Graph `runHuntingQuery`** (`RunAzCliReadCommands`) |
+| **Defender XDR** (Advanced Hunting) | `DeviceNetworkEvents`, `DeviceProcessEvents`, `DeviceFileEvents`, `DeviceRegistryEvents`, `DeviceLogonEvents`, `DeviceImageLoadEvents`, `DeviceEvents`, `DeviceInfo`, `AlertEvidence`, `AlertInfo`, `EmailEvents`, `EmailUrlInfo`, `EmailAttachmentInfo`, `UrlClickEvents`, `CloudAppEvents`, `IdentityLogonEvents`, `IdentityQueryEvents`, `IdentityDirectoryEvents` | **Graph `runHuntingQuery`** (via `RunInTerminal`) |
 | **Sentinel / Entra ID** | `ThreatIntelIndicators`, `SecurityAlert`, `SecurityIncident`, `SigninLogs`, `AADNonInteractiveUserSignInLogs`, `AADUserRiskEvents`, `AuditLogs`, `OfficeActivity`, `SecurityEvent`, `Anomalies` | **Log Analytics KQL** (`QueryLogAnalyticsByWorkspaceId` / Azure Monitor MCP) |
 
 ### Running an XDR query (Graph Advanced Hunting)
