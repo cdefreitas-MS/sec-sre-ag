@@ -1,0 +1,127 @@
+# =============================================================================
+# forensic-user-investigation — verified queries (single source of truth)
+# Pattern: collector↔renderer. This file = CAPTURE. generate_html_report.py = RENDER.
+# Workspace: LA-HERBEST-SENTINEL (Sentinel / Log Analytics). SINGLE-USER (target = UPN, required).
+# Placeholders: {target} {lookback_days}
+# =============================================================================
+metadata:
+  skill: forensic-user-investigation
+  title: Forensic User Investigation
+  description: >
+    Deep single-user forensic from Sentinel + Defender: overview, geo distribution,
+    auth & Conditional Access tracing, risk/IOC, correlated alerts, directory audit ops,
+    device logons. Companion to user-scope-drift (detect) → this (investigate) → contain.
+  data_sources:
+    sentinel_kql: [SigninLogs, AADNonInteractiveUserSignInLogs, SecurityAlert, AuditLogs]
+    graph_xdr:    [DeviceLogonEvents]   # Defender XDR Advanced Hunting (device logons)
+
+parameters:
+  lookback_days: 30
+
+queries:
+  # Q1 — overview (single row)
+  overview: |
+    let target = "{target}";
+    // extrair sub-campos dynamic DENTRO de cada perna do union (evita KQL SEM0139 no summarize pós-union)
+    union isfuzzy=true
+      (SigninLogs | extend Country=tostring(LocationDetails.countryOrRegion), DeviceId=tostring(DeviceDetail.deviceId)),
+      (AADNonInteractiveUserSignInLogs | extend Country=tostring(LocationDetails.countryOrRegion), DeviceId=tostring(DeviceDetail.deviceId))
+    | where TimeGenerated >= ago({lookback_days}d)
+    | where UserPrincipalName =~ target
+    | summarize Total=count(), Success=countif(ResultType == "0"), Fail=countif(ResultType != "0"),
+                Apps=dcount(AppDisplayName), Resources=dcount(ResourceDisplayName),
+                IPs=dcount(IPAddress), Countries=dcount(Country), Devices=dcount(DeviceId),
+                RiskHigh=countif(RiskLevelDuringSignIn == "high"),
+                RiskMedium=countif(RiskLevelDuringSignIn == "medium"),
+                FirstSeen=min(TimeGenerated), LastSeen=max(TimeGenerated)
+
+  # Q2 — geo distribution
+  geo: |
+    let target = "{target}";
+    SigninLogs
+    | where TimeGenerated >= ago({lookback_days}d)
+    | where UserPrincipalName =~ target
+    | extend Country = tostring(LocationDetails.countryOrRegion), City = tostring(LocationDetails.city)
+    | summarize Count=count(), Fails=countif(ResultType != "0") by Country, City, IPAddress
+    | order by Count desc
+    | take 50
+
+  # Q3 — auth & Conditional Access tracing
+  auth_ca: |
+    let target = "{target}";
+    SigninLogs
+    | where TimeGenerated >= ago({lookback_days}d)
+    | where UserPrincipalName =~ target
+    | summarize Count=count(), Fails=countif(ResultType != "0")
+        by ConditionalAccessStatus, AuthenticationRequirement
+    | order by Count desc
+
+  # Q4 — risky sign-ins / IOC
+  risky: |
+    let target = "{target}";
+    SigninLogs
+    | where TimeGenerated >= ago({lookback_days}d)
+    | where UserPrincipalName =~ target
+    | where RiskLevelDuringSignIn in ("high", "medium") or RiskState in ("atRisk", "confirmedCompromised")
+    | project TimeGenerated, IPAddress, Country=tostring(LocationDetails.countryOrRegion),
+              AppDisplayName, RiskLevelDuringSignIn, RiskState, ResultType
+    | order by TimeGenerated desc
+    | take 50
+
+  # Q5 — correlated security alerts
+  alerts: |
+    let target = "{target}";
+    SecurityAlert
+    | where TimeGenerated >= ago({lookback_days}d)
+    | where Entities has target or CompromisedEntity =~ target
+    | project TimeGenerated, AlertName, AlertSeverity, ProviderName, Status
+    | order by TimeGenerated desc
+    | take 30
+
+  # Q6 — directory audit operations (on/by the user)
+  audit: |
+    let target = "{target}";
+    AuditLogs
+    | where TimeGenerated >= ago({lookback_days}d)
+    | where tostring(TargetResources[0].userPrincipalName) =~ target
+         or tostring(InitiatedBy.user.userPrincipalName) =~ target
+    | project TimeGenerated, OperationName,
+              Initiator = tostring(InitiatedBy.user.userPrincipalName), Result
+    | order by TimeGenerated desc
+    | take 30
+
+  # (Q7 device logons é DeviceLogonEvents — tabela XDR/Advanced Hunting que NÃO vive no Sentinel → movido p/ o bloco `graph_xdr:` abaixo)
+
+# =============================================================================
+# ROTEAMENTO POR ORIGEM DO DADO (não é fallback genérico):
+#   • Tabelas que VIVEM no Sentinel (Entra ID / AAD) → KQL no Log Analytics (bloco `queries:` acima).
+#         SigninLogs · AADNonInteractiveUserSignInLogs · SecurityAlert · AuditLogs
+#   • Tabela XDR-native (NÃO está no Sentinel)         → Microsoft Graph runHuntingQuery (bloco `graph_xdr:`).
+#         DeviceLogonEvents (device logons) — Advanced Hunting do Defender XDR.
+# Perms (UAMI): ThreatHunting.Read.All (runHuntingQuery), AuditLog.Read.All, SecurityAlert.Read.All, IdentityRiskEvent.Read.All.
+# Janela 30d (forense) → cabe na retenção do XDR/Graph.
+# =============================================================================
+routing:
+  sentinel_kql: [overview, geo, auth_ca, risky, alerts, audit]
+  graph_xdr:    [devices]
+  graph_max_days: 30
+
+# XDR-native — SEMPRE via Graph (DeviceLogonEvents não existe no Sentinel deste tenant).
+# O renderer (self-collect) executa isto com `az account get-access-token --resource graph` + POST runHuntingQuery.
+graph_xdr:
+  # Q7 — device logons via Defender XDR Advanced Hunting. DeviceLogonEvents usa AccountName (não AccountUpn); schema usa Timestamp.
+  devices:
+    method: POST
+    url: "https://graph.microsoft.com/v1.0/security/runHuntingQuery"
+    result_key: results
+    columns: [DeviceName, DeviceId, Logons, First, Last]
+    body: |
+      {"Query":"DeviceLogonEvents | where Timestamp >= ago({lookback_days}d) | where AccountName =~ tostring(split('{target}','@')[0]) | summarize Logons=count(), First=min(Timestamp), Last=max(Timestamp) by DeviceName, DeviceId | order by Logons desc | take 20"}
+
+# OPCIONAL — fallback APENAS p/ as tabelas AAD, e SÓ se um conector do Sentinel estiver desligado (KQL = 0 linhas).
+# Não é o caminho padrão: as tabelas AAD estão confirmadas no LA-HERBEST-SENTINEL.
+graph_fallback:
+  signins: "GET https://graph.microsoft.com/v1.0/auditLogs/signIns?$top=1000&$filter=userPrincipalName eq '{target}'"
+  alerts:  "GET https://graph.microsoft.com/v1.0/security/alerts_v2?$top=50  (filtrar por evidência de usuário == {target})"
+  audit:   "GET https://graph.microsoft.com/v1.0/auditLogs/directoryAudits?$top=200&$filter=targetResources/any(t:t/userPrincipalName eq '{target}')"
+  risk:    "GET https://graph.microsoft.com/v1.0/identityProtection/riskDetections?$top=200&$filter=userPrincipalName eq '{target}'"

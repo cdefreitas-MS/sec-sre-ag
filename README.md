@@ -32,6 +32,18 @@ Hunts for **Adversary-in-the-Middle**, token theft, and MFA-bypass activity acro
 | 4 | *Are there anomalous token or session anomalies across the tenant?* |
 | 5 | *Check for risky successful sign-ins and MFA method changes* |
 
+### attack-path
+
+Cross-domain **attack-path synthesizer**. Ingests the datasets the other skills already collect (exposure-graph, org-posture NHI, graph-least-privilege, advisor-impact, and the github-posture feed) and builds a directed risk graph — finding `external attacker → pivot → crown jewel` paths, scoring each by likelihood × impact, and ranking the remediation **chokepoints** that break the most high-risk paths (re-prioritizing by blast-radius reduction, not Secure-Score points). Splits **signal vs noise** by importance: cross-domain toxic combinations no single product correlates, detection blind spots, and active-now hunts rise to the top while lone recommendations are demoted. 100% read-only; the only optional write is approval-gated Sentinel incident creation.
+
+| # | Example prompt |
+|---|---|
+| 1 | *Run the attack-path analysis for the tenant* |
+| 2 | *What are the cross-domain attack paths to tenant takeover?* |
+| 3 | *Which single fix breaks the most high-risk paths (chokepoint)?* |
+| 4 | *Show me the toxic combinations no single product correlates* |
+| 5 | *Which attack paths are detection blind spots right now?* |
+
 ### computer-investigation
 
 Performs comprehensive security investigations on Windows, macOS, and Linux devices registered in Microsoft Entra ID and onboarded to Microsoft Defender for Endpoint. Collects device context, process execution history, network connections, registry persistence, file activity, vulnerability assessment, and risk scoring.
@@ -55,6 +67,30 @@ Synthesizes a **blast-radius** view by crossing **entry points** (Identity Prote
 | 3 | *Show me exposed machines that could reach crown-jewel accounts* |
 | 4 | *Which privileged identities are most at risk from current exposure?* |
 | 5 | *Map entry points to high-value targets* |
+
+### forensic-user-investigation
+
+Deep-dive forensic investigation of **one** user account from Microsoft Sentinel + Defender signals. Builds a single-user timeline, geo distribution (sign-in countries/IPs), authentication & Conditional Access tracing, a risk/IOC view (risky sign-ins, Identity Protection), correlated security alerts, directory audit operations, and device logons into one investigator-grade HTML. Natural companion to `user-scope-drift` (detection) → this (investigation) → `contain-compromised-user` (response). Requires a target UPN. Read-only collection; action only via the containment handoff with a safety gate.
+
+| # | Example prompt |
+|---|---|
+| 1 | *Run a forensic investigation on user jdoe@contoso.com* |
+| 2 | *Deep-dive this UPN: sign-in timeline, geo, and CA tracing* |
+| 3 | *Is this user compromised — show risky sign-ins and correlated alerts* |
+| 4 | *Trace device logons and directory changes for this account* |
+| 5 | *Investigate this UPN and hand off to containment if confirmed* |
+
+### github-posture
+
+Living, gap-scored security posture for a **GitHub organization** across the 8 domains of the Security Work Program: governance/access (2FA, SAML, PATs, base permission, owners), branch protection, secrets & credentials, GitHub Actions/CI-CD, code security (Dependabot, CodeQL), audit log, and supply chain. Scores the org against the **GH-NNN catalog** → a GitHub Posture Score (0–100) with verdict SAUDÁVEL / ATENÇÃO / EM RISCO / CRÍTICO and an importance layer (signal vs noise). Emits a cross-domain feed (leaked cloud secrets, OIDC federation) that `attack-path` chains `repo → service principal → privileged Azure role`. Runs standalone or embedded as the 🔐 GitHub tab inside `advisor-impact`. 100% read-only (`gh api` GET).
+
+| # | Example prompt |
+|---|---|
+| 1 | *Run a github-posture audit for the org contoso-eng* |
+| 2 | *Score our GitHub org against the 8-domain security program* |
+| 3 | *Which repos have leaked secrets that are Azure credentials?* |
+| 4 | *Show branch protection and Dependabot/CodeQL coverage gaps* |
+| 5 | *Is audit-log streaming configured for SOC visibility into GitHub?* |
 
 ### graph-least-privilege
 
@@ -200,6 +236,18 @@ Executive one-page **security posture index** for board/CISO. Consolidates Micro
 | 4 | *Show the NHI / agent identity governance and licensing sections* |
 | 5 | *Generate the board report for our security posture* |
 
+### secure-score-leadership
+
+Executive **Microsoft Secure Score** report for leadership (board / CISO). Pulls the Graph Secure Score API (current score, 30/90-day trend, comparative averages vs all tenants / similar seat count / industry) and the control profiles catalog, then surfaces the highest-ROI **quick wins** (max score gain × low implementation cost × low user impact) and a per-category breakdown (Identity, Data, Device, Apps, Infrastructure). Renders a clean, board-ready HTML. 100% read-only.
+
+| # | Example prompt |
+|---|---|
+| 1 | *Generate the secure-score leadership report* |
+| 2 | *How do we compare to peers on Microsoft Secure Score?* |
+| 3 | *What are the highest-ROI quick wins to raise our score?* |
+| 4 | *Show the 30/90-day secure score trend by category* |
+| 5 | *Give me a board-ready secure score posture summary* |
+
 ### sentinel-documenter
 
 Produces living, gap-scored documentation of a Sentinel workspace. Inventories analytic rules, data connectors, DCRs/DCEs, tables, RBAC, and workspace settings, then runs a scored best-practice gap analysis against the **SENT-NNN catalog** (43 rules across Cost, Coverage, Operational, Identity, Network, Resilience, Hygiene, Foundation, and Strategic — ported faithfully from the open-source Sentinel-As-Code Wave 4 `best-practices.json`). Estimates cost from Usage × Azure Retail Prices (with the 5 GB/day Sentinel free benefit and a commitment-tier what-if), and emits a **Documenter Score** (0–100) with verdict SAUDÁVEL / ATENÇÃO / EM RISCO / CRÍTICO. Renders the final HTML (email) + Markdown (repo) deterministically. 100% read-only — never mutates the workspace.
@@ -236,6 +284,30 @@ Consolidates three daily SOC signals into a single executive email with one weig
 | 4 | *Summarize threat pulse, identity posture, and MITRE coverage in one brief* |
 | 5 | *Send the daily executive SOC brief to the security leads* |
 
+### spn-scope-drift
+
+Autonomous behavioral drift analysis for **service principals / workload identities**. Compares a 90-day baseline vs a 7-day recent window with an additive model (new resources, new non-fabric IPs, brand-new identity), overlaying AuditLogs credential/consent/permission-escalation signals and dead-SPN (100% failure) detection. Verdicts NEW / IP_DRIFT / STABLE / DORMANT. **Meta-security:** explicitly self-audits the SRE Agent's own UAMI and Copilot/agent SPNs — the autonomous SOC watches itself. Read-only, recommend-only (no destructive auto-action on service principals).
+
+| # | Example prompt |
+|---|---|
+| 1 | *Run spn-scope-drift across workload identities* |
+| 2 | *Are any service principals behaving anomalously?* |
+| 3 | *Is the SRE Agent's own UAMI drifting?* |
+| 4 | *Show SPNs with new credentials, consent grants, or IP drift* |
+| 5 | *Find dead service principals (100% failure) to decommission* |
+
+### threat-correlation
+
+Correlates threat intelligence with the environment's **real** vulnerabilities and **active** alerts to surface the CVEs that matter right now. Tier 1 (license-free) via Defender XDR Advanced Hunting — exposed-device count per CVE enriched with CVSS + exploit signal from the TVM KB, cross-referenced with active alerts on the same devices (= active threat on a vulnerable asset), plus crown-jewel weighting. Tier 2 (with the MDTI premium API add-on) enriches the top CVEs with actor/article/dark-web context, degrading gracefully on 402/403. Ranks each CVE and renders a per-CVE verdict (corrigir agora / janela / monitorar). 100% read-only.
+
+| # | Example prompt |
+|---|---|
+| 1 | *Run threat-correlation for the tenant* |
+| 2 | *Which CVEs are being actively exploited in my environment?* |
+| 3 | *Show vulnerabilities that also have an active alert on the same device* |
+| 4 | *Rank the top CVEs by exposure × exploit × active threat* |
+| 5 | *What should we fix now vs schedule vs just monitor?* |
+
 ### threat-pulse
 
 Performs a rapid, broad-spectrum security scan across seven domains — incidents, identity, nonhuman identities, endpoint, email, admin/cloud, and exposure — in roughly 15 minutes. Presents findings as a prioritized dashboard with drill-down recommendations to specialized investigation skills. Ideal as a daily SOC starting point.
@@ -259,6 +331,30 @@ Performs comprehensive security investigations on Entra ID user accounts. Collec
 | 3 | *What locations and IPs has this user signed in from in the last 30 days?* |
 | 4 | *Enrich user IP addresses with geolocation and threat intelligence* |
 | 5 | *Generate a complete forensic report for this potentially compromised account* |
+
+### user-scope-drift
+
+Autonomous behavioral drift analysis for **user accounts**. Compares a 90-day baseline vs a 7-day recent window across seven dimensions (volume, apps, resources, IPs, locations, devices, failure rate), computes a weighted drift score with a low-volume floor, and overlays independent **exfiltration** signals (outbound email surge, CloudApp surge, MFA re-registration). Flags account-takeover / insider behavior and — when FLAG/Critical with an exfil indicator — hands off to `contain-compromised-user`. Read-only collection; action only via the containment handoff with a safety gate.
+
+| # | Example prompt |
+|---|---|
+| 1 | *Run user-scope-drift across the tenant* |
+| 2 | *Who is behaving anomalously compared to their baseline?* |
+| 3 | *Show users with an outbound-email or CloudApp exfiltration surge* |
+| 4 | *Which accounts drifted enough to warrant containment?* |
+| 5 | *Detect insider risk and account takeover from behavioral drift* |
+
+### vulnerability-exposure
+
+Executive **Threat & Vulnerability Management (TVM)** exposure report from Microsoft Defender for Endpoint. Pulls the MDE org Exposure Score, the vulnerability catalog (CVEs), and security recommendations, then surfaces the highest-risk CVEs (Critical/High with public-exploit / KEV signal, ranked by exposed machines) and the top remediation recommendations (ranked by exposed-machine impact). Works via the MDE API even when advanced hunting isn't streaming to Sentinel, so it complements the Sentinel-based skills. Read-only.
+
+| # | Example prompt |
+|---|---|
+| 1 | *Generate the vulnerability-exposure (TVM) report* |
+| 2 | *What's our Defender for Endpoint exposure score?* |
+| 3 | *Which critical CVEs are exploited in the wild and hit the most machines?* |
+| 4 | *Show the top remediation recommendations by exposed-machine impact* |
+| 5 | *Give me a board-ready vulnerability exposure summary* |
 
 ---
 

@@ -1,0 +1,148 @@
+# =============================================================================
+# user-scope-drift — verified queries (single source of truth)
+# Pattern: collector↔renderer. This file = CAPTURE. generate_html_report.py = RENDER.
+# Workspace: LA-HERBEST-SENTINEL (Sentinel / Log Analytics)
+# Placeholders substituted by generate_html_report.py: {target} {baseline_days} {recent_days} {floor}
+# =============================================================================
+metadata:
+  skill: user-scope-drift
+  title: User Scope Drift
+  description: >
+    Behavioral drift for USER accounts (90d baseline vs 7d recent) across 7 dimensions,
+    with low-volume floor and independent exfiltration/AiTM signals. Detection front-end
+    that can hand off to contain-compromised-user.
+  data_sources: [SigninLogs, AADNonInteractiveUserSignInLogs, EmailEvents, AuditLogs, SecurityAlert]
+
+parameters:
+  baseline_days: 90
+  recent_days: 7
+  low_volume_floor: 10
+  flag_threshold: 150
+  critical_threshold: 250
+  email_surge_pct: 300
+  top_n: 25
+
+scoring:
+  # DriftScore = Σ weight·ratio ; ratio = (recent/baseline)·100 ; failrate is additive ×10
+  weights:
+    volume: 0.25
+    apps: 0.20
+    resources: 0.10
+    ips: 0.15
+    locations: 0.10
+    devices: 0.10
+    failrate: 0.10
+  bands:           # upper bound (exclusive) per label
+    contracting: 80
+    stable: 120
+    monitor: 150
+    flag: 250      # >250 => critical
+
+queries:
+  # Q1 — sign-in drift, the 7 dimensions, per user
+  drift: |
+    let BASELINE_DAYS = {baseline_days};
+    let RECENT_DAYS = {recent_days};
+    let FLOOR = {floor};
+    let target = "{target}";
+    let baseStart = ago(BASELINE_DAYS * 1d);
+    let recentStart = ago(RECENT_DAYS * 1d);
+    let signins =
+        union isfuzzy=true
+          (SigninLogs
+            | project TimeGenerated, UserPrincipalName, AppDisplayName, ResourceDisplayName,
+                      IPAddress, Location, DeviceId = tostring(DeviceDetail.deviceId), ResultType),
+          (AADNonInteractiveUserSignInLogs
+            | project TimeGenerated, UserPrincipalName, AppDisplayName, ResourceDisplayName,
+                      IPAddress, Location, DeviceId = tostring(DeviceDetail.deviceId), ResultType)
+        | where TimeGenerated >= baseStart
+        | where isempty(target) or UserPrincipalName =~ target
+        | extend Period = iff(TimeGenerated >= recentStart, "recent", "baseline");
+    let baseline = signins | where Period == "baseline"
+        | summarize blSignIns=count(), blApps=dcount(AppDisplayName), blRes=dcount(ResourceDisplayName),
+                    blIPs=dcount(IPAddress), blLoc=dcount(Location), blDev=dcount(DeviceId),
+                    blFail=countif(ResultType != "0")
+          by UserPrincipalName;
+    let recent = signins | where Period == "recent"
+        | summarize rSignIns=count(), rApps=dcount(AppDisplayName), rRes=dcount(ResourceDisplayName),
+                    rIPs=dcount(IPAddress), rLoc=dcount(Location), rDev=dcount(DeviceId),
+                    rFail=countif(ResultType != "0")
+          by UserPrincipalName;
+    baseline | join kind=inner recent on UserPrincipalName
+    | extend blDaily = blSignIns/(BASELINE_DAYS*1.0), rDaily = rSignIns/(RECENT_DAYS*1.0)
+    | extend blFailRate = iff(blSignIns>0, todouble(blFail)/blSignIns*100, 0.0),
+             rFailRate  = iff(rSignIns>0,  todouble(rFail)/rSignIns*100,  0.0)
+    | extend volDenom = max_of(blDaily, FLOOR)
+    | extend VolRatio = rDaily/volDenom*100, AppRatio = todouble(rApps)/max_of(blApps,1)*100,
+             ResRatio = todouble(rRes)/max_of(blRes,1)*100, IPRatio = todouble(rIPs)/max_of(blIPs,1)*100,
+             LocRatio = todouble(rLoc)/max_of(blLoc,1)*100, DevRatio = todouble(rDev)/max_of(blDev,1)*100,
+             FailRatio = 100 + ((rFailRate - blFailRate) * 10)
+    | extend DriftScore = round(0.25*VolRatio + 0.20*AppRatio + 0.10*ResRatio + 0.15*IPRatio
+                              + 0.10*LocRatio + 0.10*DevRatio + 0.10*FailRatio, 1)
+    | extend Verdict = case(DriftScore > 250, "Critical", DriftScore > 150, "FLAG",
+                            DriftScore > 120, "Monitor", DriftScore >= 80, "Stable", "Contracting")
+    | project UserPrincipalName, DriftScore, Verdict, VolRatio=round(VolRatio,1), AppRatio=round(AppRatio,1),
+              ResRatio=round(ResRatio,1), IPRatio=round(IPRatio,1), LocRatio=round(LocRatio,1),
+              DevRatio=round(DevRatio,1), FailRatio=round(FailRatio,1),
+              blDaily=round(blDaily,1), rDaily=round(rDaily,1)
+    | order by DriftScore desc
+    | take {top_n}
+
+  # Q2 — exfiltration: outbound email surge (countif por período — evita KQL SEM0100 do evaluate pivot)
+  email_surge: |
+    let target = "{target}";
+    let baseDays = ({baseline_days} - {recent_days}) * 1.0;
+    EmailEvents
+    | where TimeGenerated >= ago({baseline_days}d)
+    | where EmailDirection == "Outbound"
+    | where isempty(target) or SenderFromAddress =~ target
+    | summarize baselineSent = countif(TimeGenerated < ago({recent_days}d)),
+                recentSent   = countif(TimeGenerated >= ago({recent_days}d))
+        by SenderFromAddress
+    | extend baselineDaily = baselineSent / baseDays, recentDaily = recentSent / ({recent_days}*1.0)
+    | extend SurgePct = round((recentDaily - baselineDaily) / max_of(baselineDaily, 0.1) * 100, 0)
+    | where SurgePct >= {email_surge_pct}
+    | project SenderFromAddress, baselineDaily=round(baselineDaily,1), recentDaily=round(recentDaily,1), SurgePct
+    | order by SurgePct desc
+
+  # Q3 — AiTM combo: MFA / security-info re-registration in recent window
+  mfa_reregistration: |
+    let target = "{target}";
+    AuditLogs
+    | where TimeGenerated >= ago({recent_days}d)
+    | where OperationName has_any ("security info", "registered security info", "Reset password")
+    | extend UPN = tostring(TargetResources[0].userPrincipalName)
+    | where isempty(target) or UPN =~ target
+    | summarize MfaEvents = count(), MfaOps = make_set(OperationName) by UPN
+
+  # Q4 — correlated alerts for flagged users (fill {flagged_csv} from Q1 FLAG/Critical)
+  correlated_alerts: |
+    let flagged = dynamic([{flagged_csv}]);
+    SecurityAlert
+    | where TimeGenerated >= ago({recent_days}d)
+    | where CompromisedEntity in (flagged) or Entities has_any (flagged)
+    | project TimeGenerated, AlertName, AlertSeverity, ProviderName, Status, CompromisedEntity
+    | order by TimeGenerated desc
+
+# =============================================================================
+# DUAL-SOURCE — PRIMARY = Sentinel KQL (acima). FALLBACK = Microsoft Graph (abaixo).
+# Regra: roda o KQL no Log Analytics; se retornar 0 linhas (conector/tabela ausente),
+#        usa o equivalente Graph. ⚠️ signIns Entra + XDR Advanced Hunting retêm ~30d,
+#        então em modo graph LIMITE o baseline a 30d (baseline_days=23, recent_days=7).
+# Perms (UAMI já tem): AuditLog.Read.All, ThreatHunting.Read.All.
+# =============================================================================
+source_strategy:
+  primary: sentinel
+  fallback: graph
+  graph_max_days: 30
+  rule: "run primary KQL; if 0 rows, run the graph equivalent"
+
+graph:
+  # sign-in drift (Entra) — REST, paginar @odata.nextLink, agregar client-side
+  signins: "GET https://graph.microsoft.com/v1.0/auditLogs/signIns?$top=1000&$filter=createdDateTime ge {graph_baseline_iso}"
+  # exfil — XDR Advanced Hunting (schema usa Timestamp, não TimeGenerated)
+  email_surge: |
+    POST https://graph.microsoft.com/v1.0/security/runHuntingQuery
+    {"Query":"EmailEvents | where Timestamp >= ago(30d) | where EmailDirection == 'Outbound' | summarize baselineSent=countif(Timestamp < ago(7d)), recentSent=countif(Timestamp >= ago(7d)) by SenderFromAddress | extend SurgePct=round((recentSent/7.0 - baselineSent/23.0)/max_of(baselineSent/23.0,0.1)*100,0) | where SurgePct >= 300 | order by SurgePct desc"}
+  # MFA re-registration — Entra directory audits
+  mfa_reregistration: "GET https://graph.microsoft.com/v1.0/auditLogs/directoryAudits?$top=200&$filter=activityDisplayName eq 'User registered security info'"
