@@ -1,5 +1,8 @@
 ---
 name: ioc-investigation
+tools:
+  - RunAzCliReadCommands
+  - QueryLogAnalyticsByWorkspaceId
 description: >
   IoC (Indicator of Compromise) investigation skill for environments with Azure Monitor MCP
   (Log Analytics workspace queries) and Azure CLI access — currently without

@@ -1,5 +1,8 @@
 ---
 name: incident-investigation
+tools:
+  - RunAzCliReadCommands
+  - QueryLogAnalyticsByWorkspaceId
 description: >
   Use this skill when asked to investigate a security incident by ID from Microsoft
   Defender XDR or Microsoft Sentinel. Triggers on keywords like "investigate incident",
