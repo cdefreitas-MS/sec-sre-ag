@@ -12,22 +12,35 @@ which are NOT available in this environment.
 
 ---
 
-## ⛔ Critical: Tool Selection
+## ⛔ Critical: Identity & Transport (READ FIRST)
 
-> **ALWAYS** use `RunAzCliReadCommands` for ALL calls in this document.
+> **The MDE API roles live on the UAMI — a plain `az rest` uses the WRONG identity.**
+> The agent has **two** managed identities: a **system-assigned** MI (the DEFAULT for
+> `az` / `az rest` / `az account get-access-token` / `RunAzCliReadCommands`) that holds only a
+> minimal role set (e.g. `Sites.Selected`, **no MDE roles**), and a **user-assigned** MI
+> (**UAMI**) that holds the **WindowsDefenderATP** app roles (`Ti`/`Ip`/`File`/`Vulnerability`/`Machine`
+> `.Read.All` — the "MDE" grants). A plain `az rest --resource https://api.securitycenter.microsoft.com`
+> uses the **system-assigned** MI → **403** → the SRE Agent then offers the **OBO** prompt
+> ("Conceder permissões"). **This is the exact same root cause as the Graph `runHuntingQuery` 403.**
+> (Observed live: `/api/indicators` succeeded but `/api/ips/{ip}/stats` 403'd on the default identity
+> — per-endpoint role inconsistency. Minting the **UAMI** token fixes ALL endpoints uniformly.)
 >
-> **NEVER** use `RunAzCliWriteCommands` — even though the calls are `az rest --method GET` (read-only), `RunAzCliWriteCommands` has a different authorization flow:
-> 1. It first tries Managed Identity (same as `RunAzCliReadCommands`)
-> 2. If MI returns 403, it falls back to **On-Behalf-Of (OBO)** flow
-> 3. OBO requires **Delegated permissions** which are NOT configured → **403 error**
+> ✅ **DO:** mint a token from the **UAMI** for the MDE resource and call the API with `curl` via
+> **`RunInTerminal`** (recipe below). *(The old note "az is not in the shell PATH / never use
+> RunInTerminal" was WRONG — in the SRE Agent sandbox `az`/`curl` in `RunInTerminal` run as the
+> agent and work; this was proven with `runHuntingQuery`.)*
 >
-> `RunAzCliReadCommands` uses MI directly with **Application permissions** → works correctly.
->
-> **NEVER** use `RunInTerminal` with `az` commands — the `az` binary is not in the shell PATH.
+> ⛔ **DON'T:**
+> - **Do NOT click "Conceder permissões" (OBO)** — it runs as the human's delegated creds, not the
+>   autonomous UAMI. If the OBO prompt appears, **Cancel** and use the UAMI-token recipe; if the UAMI
+>   token itself 403s, treat it as "MDE not accessible" and **skip ALL MDE calls** (KQL-only mode).
+> - **Do NOT use `RunAzCliWriteCommands`** — it OBO-403s (delegated perms not configured).
+> - **Do NOT rely on `RunAzCliReadCommands` / plain `az rest`** for MDE — it defaults to the
+>   system-MI (no MDE roles) → 403 → OBO loop (this is the recurring failure).
 
 ---
 
-## MDE API Base URL
+## MDE API Base URL + how to call it (UAMI token)
 
 All MDE API calls use this base URL:
 
@@ -35,25 +48,42 @@ All MDE API calls use this base URL:
 https://api.securitycenter.microsoft.com/api/
 ```
 
-The `--resource` parameter must be set to authenticate against the MDE API scope:
+**Call recipe (mint UAMI token → `curl` the API):** the `az rest ... --resource "https://api.securitycenter.microsoft.com"` snippets below are the **URL/shape reference only** — execute each one as a `curl` with an explicit **UAMI** Bearer token. Resolve the UAMI `client_id` from the agent's `<agent_identity>` settings or from `config.json` → `agent_uami_client_id`:
 
+```bash
+# 1) Mint a UAMI token for the MDE API resource (once per run; reuse $TOKEN)
+TOKEN=$(curl -s -H "X-IDENTITY-HEADER: $IDENTITY_HEADER" \
+  "$IDENTITY_ENDPOINT?api-version=2019-08-01&resource=https://api.securitycenter.microsoft.com&client_id=<UAMI_CLIENT_ID>" \
+  | python3 -c "import sys,json;print(json.load(sys.stdin)['access_token'])")
+
+# 2) Call any MDE endpoint with the explicit UAMI Bearer token
+curl -s "https://api.securitycenter.microsoft.com/api/ips/<IP_ADDRESS>/stats" \
+  -H "Authorization: Bearer $TOKEN"
 ```
---resource "https://api.securitycenter.microsoft.com"
-```
+
+> Run both via **`RunInTerminal`**. The same `$TOKEN` works for every endpoint in this document
+> (alerts, stats, files, indicators, vulnerabilities/machineReferences) — only the URL changes.
+> **Optional token check:** base64url-decode the JWT payload and confirm `appid` == the UAMI
+> `client_id` and the MDE roles are in `roles`.
+> **Fallback:** if the UAMI token call still returns **403** → the UAMI lacks MDE roles in this
+> tenant → **skip ALL MDE calls** and note "MDE API not accessible — KQL-only mode".
 
 ---
 
 ## Decision Flow
 
 ```
-Can I use RunAzCliReadCommands tool?
-  ├─ YES → Use the calls below (this document)
-  │         └─ If 403 on first call → MDE API permissions not granted
-  │              └─ Skip ALL MDE API enrichment
-  │              └─ Note in report: "MDE API not accessible — KQL-only mode"
-  │              └─ Rely on KQL queries from SKILL.md (Q1–Q14)
-  └─ NO → Skip MDE API enrichment entirely
+Mint UAMI token for https://api.securitycenter.microsoft.com (recipe above)
+  ├─ Token OK → call the MDE endpoints below with: curl -H "Authorization: Bearer $TOKEN"
+  │         └─ If 403 (even with the UAMI token) → UAMI lacks MDE roles in this tenant
+  │              └─ Skip ALL MDE API enrichment · note "MDE API not accessible — KQL-only mode"
+  │              └─ Rely on KQL queries from SKILL.md (Q1–Q14) + Graph runHuntingQuery
+  └─ Cannot mint UAMI token (no IDENTITY_ENDPOINT / no client_id) → skip MDE enrichment
            └─ Rely on KQL queries from SKILL.md (Q1–Q14)
+
+⛔ If the SRE Agent shows the "Conceder permissões" (OBO) prompt → CANCEL it (do NOT grant).
+   The OBO uses the human's delegated creds, not the autonomous UAMI. Use the UAMI-token
+   recipe; if that 403s, skip MDE (above). NEVER loop on OBO.
 ```
 
 ---
@@ -295,7 +325,7 @@ az rest --method GET --url "https://api.securitycenter.microsoft.com/api/machine
 | **200** | Success | Process the response |
 | **400** | Bad request | Check parameters (invalid IP format, hash length, CVE format) |
 | **401** | Unauthorized | Token expired — retry once, then skip MDE enrichment |
-| **403** | Forbidden | Managed identity lacks MDE API permissions. Skip ALL MDE API calls, note in report |
+| **403** | Forbidden | You called with the **system-MI** (plain `az rest`) which has no MDE roles → mint the **UAMI** token (recipe at top) and retry with `curl`. If it **still** 403s (UAMI lacks MDE roles) → skip ALL MDE calls, note "KQL-only mode". **Never** accept the OBO prompt. |
 | **404** | Not found | IoC/CVE not in MDE scope — not an error, just no data. Continue with KQL |
 | **429** | Rate limited | Wait and retry with exponential backoff (1s, 2s, 4s) |
 | **500+** | Server error | Retry once, then skip and note in report |
