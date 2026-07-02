@@ -88,11 +88,19 @@ description: 'Remediation impact planner uniting Azure Advisor (Cost/Reliability
 
 Grant these **to the agent's user-assigned MI (UAMI)** *before* running so no dataset silently 403s. A 403 on the Graph datasets is exactly what makes the **🛡️ Defender XDR** / **🏆 Microsoft Secure Score** tabs disappear (the agent skips the dataset → the tab won't render). The UAMI appId / SP objectId come from `config.json` (`agent_uami_client_id`) or `<agent_identity>`.
 
-### 1 · SRE Agent tools to enable (portal → agent → Tools / Code Access)
-| Tool | Why |
-|------|-----|
-| **Code Access** (`codeRefs/sec-sre-ag`) | loads `advisor-impact/` + sibling `github-posture/` skill files — **re-sync before every run** |
-| **Run Az CLI (read)** / terminal (`az`, `az rest`, `python3`, `curl`) | Mode A/B/C collection + rendering |
+### 1 · SRE Agent tools to enable — pick these in **"Escolher ferramentas"** (or, preferably, configure them directly on the agent)
+> These are the exact tool names the portal offers. The dialog note ("Tools added here will be dynamically available when this skill is activated — for more consistent behavior, configure tools directly on the agent instead") means the **most reliable** setup is to enable them on the agent, not only on the skill.
+
+| Tool (portal name) | Used for |
+|--------------------|----------|
+| **`RunAzCliReadCommands`** | collect every dataset — `az rest` GET (the 7 ARM endpoints) **+** `az rest --method post` to Azure Resource Graph (Mode C ARG — a read-only query) |
+| **`RunInTerminal`** | run `python3 generate_html_report.py`, `pip install pyyaml`, `curl` (mint the **UAMI** Graph token + fetch `secureScores` / `secureScoreControlProfiles`), and `gh api` (optional 🐙 GitHub tab) |
+| **`read_skill_file`** | materialize `generate_html_report.py` + `queries.yaml` (and the sibling `github-posture/` files) when they aren't already in `codeRefs` |
+| **`CreateFile`** | write `inventory.json`, the `_m365.json` / `_xdr.json` temps, and the output `advisor-impact-<ts>.{html,md}` |
+
+**Also enable (agent-level, not in the tool picker):** **Code Access** (`codeRefs/sec-sre-ag`) — synced/re-synced so `advisor-impact/` and `github-posture/` load directly.
+
+> ⚠️ **This skill is 100% READ-ONLY — do NOT add `RunAzCliWriteCommands`** (nor `runHuntingQuery`; it isn't used here). The one-time UAMI grant commands in §3 are run **once by an admin**, not by the skill. Delivery (Step 6) is handled by the separate `send-email-report` / `send-teams-notification` skills, which carry their own tools.
 
 ### 2 · Azure RBAC (ARM) — assign to the UAMI
 | Role | Scope | Unlocks |
