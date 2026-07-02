@@ -67,6 +67,8 @@ description: 'Remediation impact planner uniting Azure Advisor (Cost/Reliability
 3. Neither → read_skill_file() each missing file → CreateFile("tmp/advisor-impact/<file>") → use tmp/.
 ```
 
+> **🐙 Unified GitHub tab needs the sibling engine.** For the single 🐙 GitHub tab (github-posture folded in), `../github-posture/generate_html_report.py` + `queries.yaml` must resolve as a **sibling** of `<SKILL_DIR>` — advisor-impact imports it via that relative path (`_github_posture()` + importlib). With **Code Access** (`codeRefs/sec-sre-ag`) the whole repo is synced, so the sibling exists automatically. Running standalone from `tmp/` will **skip the tab** (skip-gracioso) unless you also materialize `tmp/github-posture/{generate_html_report.py,queries.yaml}`.
+
 > Dependency: **PyYAML** (`pip install pyyaml` if missing). No other third-party packages.
 
 ---
@@ -130,10 +132,14 @@ az rest --method post \
 ```
 > Portal path: **Entra ID → Enterprise applications → (the UAMI) → Permissions**. App-role assignments to a managed identity can take **up to ~24 h** to propagate through STS (a fresh token may still show the old role set for a while — this is replication latency, **not** a missing grant; don't re-grant).
 
-### 4 · Optional — GitHub (🐙 GitHub tab only)
-| Grant | Scope | Feeds |
-|-------|-------|-------|
-| GitHub PAT / GitHub App token | `admin:org` + `security_events` (+ `repo` for private repos) | 8-domain GH-NNN posture + Dependabot/CodeQL/secret findings + cross-domain feed |
+### 4 · Optional — unified 🐙 GitHub tab (github-posture folded into advisor-impact)
+The **🐙 GitHub** tab merges the *governance/posture* half (**github-posture**, 8-domain GH-NNN) with the *code findings* half (Defender DevOps — Dependabot/CodeQL/secret) into **one organized tab** (sections 1·🔗 Diferencial · 2·🛡️ Postura & Governança · 3·🐙 Remediação de código). It renders **only when all three below are in place** — otherwise it's silently omitted (skip-gracioso), which is why it "didn't show up":
+
+| Requirement | How to satisfy |
+|-------------|----------------|
+| **① Companion engine present** | `../github-posture/generate_html_report.py` + `queries.yaml` co-located as a **sibling** of `advisor-impact/`. ✅ Enable **Code Access** (`codeRefs/sec-sre-ag`) so the whole repo syncs and the sibling resolves automatically. *(Standalone skill without codeRefs → also add both github-posture files to the skill, or materialize them under `tmp/github-posture/`.)* |
+| **② Trigger flag** | pass **`--github-org <org>`** (live `gh api`) **or** **`--github-json <file>`** (offline). Without one, the engine never runs and the tab is omitted. *(There is no config default — the org must be given on the command line.)* |
+| **③ GitHub token** | a PAT / GitHub App token with **`admin:org`** + **`security_events`** (+ `repo` for private repos), exported for `gh` (e.g. `GH_TOKEN=<token>`). Feeds the 8-domain score + findings + the `_github_feed.json` cross-domain feed that **attack-path** chains (`repo → leaked-secret/SP → privileged role`). |
 
 ### 5 · No grant needed
 - **Azure Retail Prices API** (`prices.azure.com`) — public, unauthenticated (implementation-cost estimates).
@@ -199,6 +205,8 @@ az role assignment list --assignee <UAMI_OBJECT_ID> --scope /subscriptions/<SUB>
 python3 <SKILL_DIR>/generate_html_report.py --tenant --output tmp/advisor-impact --format both
 # or a specific set of subscriptions:
 python3 <SKILL_DIR>/generate_html_report.py --subs <sub1>,<sub2> --output tmp/advisor-impact --format both
+# …attach the unified 🐙 GitHub tab (github-posture 8 domains + DevOps findings) — needs a gh token with admin:org/security_events:
+python3 <SKILL_DIR>/generate_html_report.py --tenant --github-org <org> --output tmp/advisor-impact --format both
 ```
 Runs one ARG query per dataset over `advisorresources` / `securityresources` / `resourcecontainers`. Needs **Reader** on the subscriptions. If the sandbox `az` is blocked, prefetch the ARG results (Mode B) instead.
 
@@ -333,8 +341,8 @@ This skill produces **HTML + MD artifacts**. Deliver them via the existing deliv
 - CTA: **Open report (SharePoint)** → `webUrl` (when present), plus a link to Azure Portal → Defender for Cloud → Recommendations.
 - The Power Automate webhook URL comes from `config.json` (hardening pending: move to Key Vault).
 
-**Agent prompt pattern (tenant-wide + triple delivery):**
-> *"Run advisor-impact tenant-wide (Mode B prefetch ARG if `az` is sandboxed), then deliver: email the HTML to BOTH default recipients and post the Teams card. Use the script's own KPI numbers."*
+**Agent prompt pattern (tenant-wide + unified GitHub tab + triple delivery):**
+> *"Run advisor-impact tenant-wide (Mode B prefetch ARG if `az` is sandboxed). Attach the unified 🐙 GitHub tab with `--github-org <org>` (github-posture folded in — needs the sibling engine via Code Access + a gh token with admin:org/security_events). Mint the UAMI Graph token for `m365_secure_score` + `xdr_recommendations`. Then deliver: email the HTML to BOTH default recipients and post the Teams card. Use the script's own KPI numbers."*
 
 ---
 
@@ -376,6 +384,8 @@ This skill produces **HTML + MD artifacts**. Deliver them via the existing deliv
 |------|------------|-------|
 | `generate_html_report.py` | On skill activation | Main script |
 | `queries.yaml` | On skill activation | Config + risk baseline |
+| `../github-posture/generate_html_report.py` | When `--github-org`/`--github-json` is passed | Sibling engine for the unified 🐙 GitHub tab (loaded via `_github_posture()` + importlib) — present automatically with **Code Access** |
+| `../github-posture/queries.yaml` | Same | GH-NNN catalog (8 domains) read by the engine |
 | `inventory.json` | Mode B only | Prefetch artifact (user/LLM assembles) |
 | `_raw.json` | Optional (--save-raw) | Debugging artifact (workspace-only, never commit) |
 
