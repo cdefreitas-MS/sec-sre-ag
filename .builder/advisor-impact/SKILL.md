@@ -168,6 +168,31 @@ If terminal `az` fails (token cache / auth), fall back to **Mode B**.
 
 > `{standard}` = the MCSB standard name discovered from `mcsb_compliance_standards` (`Microsoft-cloud-security-benchmark`, or legacy `Azure-Security-Benchmark`). Mode A discovers it automatically; for Mode B, pick it from the standards list. All 7 endpoints degrade gracefully — secure-score-controls and MCSB are optional (skipped sections if Defender for Cloud / MCSB is not enabled).
 
+#### Optional Graph datasets — 🏆 Microsoft Secure Score + 🛡️ Defender XDR (mint the **UAMI** token)
+
+Two extra datasets power the **🏆 Microsoft Secure Score** card (`page-m365`) and the **🛡️ Defender XDR** page — the *Recommended Actions* shown at `security.microsoft.com/securescore`. They come from **Microsoft Graph** (NOT ARM), so they are **not** in the ARM table above and must be collected separately:
+
+| JSON key | Microsoft Graph endpoint | Feeds |
+|----------|--------------------------|-------|
+| `m365_secure_score` | `GET https://graph.microsoft.com/v1.0/security/secureScores?$top=1` | 🏆 Microsoft Secure Score card + `page-m365` |
+| `xdr_recommendations` | `GET https://graph.microsoft.com/v1.0/security/secureScoreControlProfiles` | 🛡️ Defender XDR page (Recommended Actions) |
+
+> ⚠️ **Identity gotcha — the real cause of "the Defender XDR / Secure Score tab disappeared".** A plain `az rest --url ... --resource https://graph.microsoft.com` mints the token from the agent's **system-assigned MI**, which holds only `Sites.Selected` → **HTTP 403** → the agent silently skips → the tabs vanish. **A 403 here is NOT "unavailable" — DO NOT skip.** These datasets require the **user-assigned MI (UAMI)** token (it holds the security scopes). Mint it explicitly — same recipe as `runHuntingQuery` / the MDE API:
+>
+> ```bash
+> # 1) Mint a Graph token from the UAMI (client_id = agent's user-assigned MI appId; from <agent_identity> or config.json → agent_uami_client_id)
+> TOKEN=$(curl -s -H "X-IDENTITY-HEADER: $IDENTITY_HEADER" \
+>   "$IDENTITY_ENDPOINT?api-version=2019-08-01&resource=https://graph.microsoft.com&client_id=<UAMI_CLIENT_ID>" \
+>   | python3 -c "import sys,json;print(json.load(sys.stdin)['access_token'])")
+> # 2) Collect with the UAMI token (NOT az rest, which uses the system MI)
+> curl -s -H "Authorization: Bearer $TOKEN" "https://graph.microsoft.com/v1.0/security/secureScores?\$top=1"        > tmp/advisor-impact/_m365.json
+> curl -s -H "Authorization: Bearer $TOKEN" "https://graph.microsoft.com/v1.0/security/secureScoreControlProfiles" > tmp/advisor-impact/_xdr.json
+> ```
+>
+> Add the results under `m365_secure_score` and `xdr_recommendations` in `inventory.json`. Both are **optional** — omit only if genuinely unavailable (then the two tabs simply won't render). A **403 means the wrong (system-MI) token was used → re-mint from the UAMI**, don't drop the dataset.
+
+> 🐙 **DevOps / GitHub tab (`devops_findings`).** This is an **Azure Resource Graph** dataset (`securityresources` subassessments whose id has `githubowners` / `/devops/` / `/securityconnectors/`), collected automatically in **Mode C** (`--tenant` / `--subs`). If you prefetch (Mode B) and only fetch the 7 ARM endpoints above, `devops_findings` comes back empty → the **🐙 DevOps** tab won't render. Include the `devops_findings` ARG query (from `queries.yaml`) when prefetching, or use Mode C.
+
 Example command per endpoint:
 ```bash
 az rest --method get --url "https://management.azure.com/subscriptions/<SUB>/resourceGroups/<RG>/providers/Microsoft.Advisor/recommendations?api-version=2023-01-01" -o json
@@ -182,7 +207,10 @@ Assemble into `inventory.json`:
   "mdc_secure_score": { "value": [...] },
   "mdc_secure_score_controls": { "value": [...] },
   "mcsb_compliance_standards": { "value": [...] },
-  "mcsb_compliance_controls": { "value": [...] }
+  "mcsb_compliance_controls": { "value": [...] },
+  "m365_secure_score":   { "value": [...] },   // optional · Microsoft Graph (UAMI token) → 🏆 Secure Score + page-m365
+  "xdr_recommendations": { "value": [...] },   // optional · Microsoft Graph (UAMI token) → 🛡️ Defender XDR page
+  "devops_findings":     { "value": [...] }    // optional · Azure Resource Graph (Mode C) → 🐙 DevOps/GitHub tab
 }
 ```
 
