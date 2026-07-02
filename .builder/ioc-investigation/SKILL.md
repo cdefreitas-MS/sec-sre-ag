@@ -133,7 +133,7 @@ The investigation correlates IoCs with threat intelligence, identifies associate
 6. **ALWAYS run independent queries in parallel** (drastically faster execution)
 7. **ALWAYS use `create_file` for JSON export** (NEVER use PowerShell terminal commands)
 8. **ALWAYS use Azure Monitor MCP for KQL execution** (see KQL Execution Reference)
-9. **ALWAYS use `RunAzCliReadCommands` for MDE API calls** (see defender-api-via-cli.md)
+9. **MDE API calls: mint a UAMI token and `curl` the API** — the default MI (system-assigned) has **no** MDE roles → 403/OBO. See `defender-api-via-cli.md` (NEVER accept the "Conceder permissões"/OBO prompt; on 403 skip MDE → KQL-only).
 
 ---
 
@@ -665,17 +665,17 @@ ABUSEIPDB_TOKEN=<value> python3 <resolved_path>/enrich_ips.py <IP_ADDRESS_1> <IP
 
 #### Pre-requisite: Read MDE API Reference (MANDATORY)
 
-Before executing ANY MDE API call (`az rest`), you **MUST** read the reference file:
+Before executing ANY MDE API call, you **MUST** read the reference file:
 
 ```
 read_skill_file(skill_name="ioc-investigation", file_path="defender-api-via-cli.md")
 ```
 
-This file contains the **exact `az rest` commands**, the required `--resource` parameter, the correct tool to use (`RunAzCliReadCommands` — NEVER `RunAzCliWriteCommands`), error handling, and the fallback strategy.
+This file contains the **exact endpoint URLs**, the **UAMI-token call recipe** (mint a token for `https://api.securitycenter.microsoft.com` and `curl` the API — the default **system-MI** has **no** MDE roles → 403/OBO), why to **NEVER** use `RunAzCliWriteCommands` or accept the OBO prompt, error handling, and the fallback strategy.
 
 - If the file has already been read in this session, skip this step.
-- Do NOT attempt MDE API calls from memory — the URLs and `--resource` parameter are precise and must match exactly.
-- If the first MDE API call returns 403 → skip ALL remaining MDE API calls and note "MDE API not accessible — KQL-only mode" in the report.
+- Do NOT attempt MDE API calls from memory — the endpoint URLs and the UAMI-token recipe are precise and must match exactly.
+- If the MDE call returns 403 (even with the UAMI token) → skip ALL remaining MDE API calls and note "MDE API not accessible — KQL-only mode" in the report. **Never** accept the OBO prompt.
 
 #### Batch 1: Threat-Intel queries (routed by origin — run ALL in parallel)
 
@@ -687,7 +687,7 @@ This file contains the **exact `az rest` commands**, the required `--resource` p
 | **Q8** | AlertEvidence | XDR → Graph `runHuntingQuery` | All | IoC in alert evidence |
 | **Q10** | SecurityAlert | Sentinel → Log Analytics KQL | All | Security alerts mentioning IoC |
 
-#### Batch 2: MDE API Calls via `RunAzCliReadCommands` (Run ALL in parallel)
+#### Batch 2: MDE API Calls (UAMI-token `curl` — see [defender-api-via-cli.md](defender-api-via-cli.md)) (Run ALL in parallel)
 
 | Call | Endpoint | IoC Types | Details |
 |------|----------|-----------|---------|
