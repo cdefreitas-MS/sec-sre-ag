@@ -75,10 +75,62 @@ description: 'Remediation impact planner uniting Azure Advisor (Cost/Reliability
 
 | Capability | Available | Notes |
 |------------|-----------|-------|
-| `az rest` (ARM) | ✅ | All 7 endpoints use ARM management API |
+| `az rest` (ARM) | ✅ | All 7 core endpoints + ARG use the ARM management API (needs **Reader**) |
+| Microsoft Graph API (via **UAMI** token) | ✅ (optional) | `secureScores` + `secureScoreControlProfiles` → 🏆 Secure Score + 🛡️ Defender XDR. Mint from the **UAMI** (NOT `az rest`, which uses the system MI → **403** → tabs vanish). |
 | HTTPS to prices.azure.com | ✅ (optional) | Azure Retail Prices API — **public, no auth**. Degrades to fixed fallback estimates if blocked. |
-| Microsoft Graph MCP | ❌ | Not needed |
+| `gh api` (GitHub CLI) | ✅ (optional) | 🐙 GitHub tab — needs a PAT/App with `admin:org` + `security_events`. |
+| Microsoft Graph MCP | ❌ | Not used (Graph datasets fetched by direct `curl` with the UAMI token) |
 | Sentinel Data Lake | ❌ | Not used |
+
+---
+
+## Required Tools & Permissions — Portal Grant Checklist (paste-ready)
+
+Grant these **to the agent's user-assigned MI (UAMI)** *before* running so no dataset silently 403s. A 403 on the Graph datasets is exactly what makes the **🛡️ Defender XDR** / **🏆 Microsoft Secure Score** tabs disappear (the agent skips the dataset → the tab won't render). The UAMI appId / SP objectId come from `config.json` (`agent_uami_client_id`) or `<agent_identity>`.
+
+### 1 · SRE Agent tools to enable (portal → agent → Tools / Code Access)
+| Tool | Why |
+|------|-----|
+| **Code Access** (`codeRefs/sec-sre-ag`) | loads `advisor-impact/` + sibling `github-posture/` skill files — **re-sync before every run** |
+| **Run Az CLI (read)** / terminal (`az`, `az rest`, `python3`, `curl`) | Mode A/B/C collection + rendering |
+
+### 2 · Azure RBAC (ARM) — assign to the UAMI
+| Role | Scope | Unlocks |
+|------|-------|---------|
+| **Reader** | tenant root MG (`--tenant`) **or** each subscription (`--subs`) | Advisor · Defender for Cloud assessments/secure score/MCSB · resource inventory · `devops_findings` (ARG) |
+
+```bash
+# Tenant-wide (recommended): Reader at the root management group
+az role assignment create --assignee <UAMI_OBJECT_ID> --role Reader \
+  --scope /providers/Microsoft.Management/managementGroups/<TENANT_ROOT_MG>
+# …or per-subscription
+az role assignment create --assignee <UAMI_OBJECT_ID> --role Reader --scope /subscriptions/<SUB>
+```
+
+### 3 · Microsoft Graph application permission — assign to the UAMI (fixes the disappearing tabs)
+| Permission (app role) | appRoleId | Feeds |
+|-----------------------|-----------|-------|
+| **`SecurityEvents.Read.All`** | `bf394140-e372-4bf9-a898-299cfc7564e5` | `secureScores` (🏆 Microsoft Secure Score) + `secureScoreControlProfiles` (🛡️ Defender XDR) |
+
+```bash
+# Grant SecurityEvents.Read.All (application) to the UAMI service principal
+GRAPH_SP=$(az ad sp show --id 00000003-0000-0000-c000-000000000000 --query id -o tsv)
+az rest --method post \
+  --url "https://graph.microsoft.com/v1.0/servicePrincipals/<UAMI_SP_OBJECT_ID>/appRoleAssignments" \
+  --headers "Content-Type=application/json" \
+  --body "{\"principalId\":\"<UAMI_SP_OBJECT_ID>\",\"resourceId\":\"$GRAPH_SP\",\"appRoleId\":\"bf394140-e372-4bf9-a898-299cfc7564e5\"}"
+```
+> Portal path: **Entra ID → Enterprise applications → (the UAMI) → Permissions**. App-role assignments to a managed identity can take **up to ~24 h** to propagate through STS (a fresh token may still show the old role set for a while — this is replication latency, **not** a missing grant; don't re-grant).
+
+### 4 · Optional — GitHub (🐙 GitHub tab only)
+| Grant | Scope | Feeds |
+|-------|-------|-------|
+| GitHub PAT / GitHub App token | `admin:org` + `security_events` (+ `repo` for private repos) | 8-domain GH-NNN posture + Dependabot/CodeQL/secret findings + cross-domain feed |
+
+### 5 · No grant needed
+- **Azure Retail Prices API** (`prices.azure.com`) — public, unauthenticated (implementation-cost estimates).
+
+> ✅ **Reader** (RBAC) + **`SecurityEvents.Read.All`** (Graph) on the UAMI = all built-in tabs render. GitHub scopes are only for the optional 🐙 tab.
 
 ---
 
