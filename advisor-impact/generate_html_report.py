@@ -478,6 +478,7 @@ def _portal_resource_link(resource_id):
 _ADVISOR_PORTAL = "https://aka.ms/azureadvisordashboard"
 _MDC_RECS_PORTAL = "https://portal.azure.com/#view/Microsoft_Azure_Security/SecurityMenuBlade/~/5"
 _M365_SECURESCORE_PORTAL = "https://security.microsoft.com/securescore"
+_DFC_SECURESCORE_PORTAL = "https://portal.azure.com/#view/Microsoft_Azure_Security/SecurityMenuBlade/~/SecureScore"
 
 def _fallback_portal_link(source):
     """Fallback oficial por origem (Advisor → Advisor dashboard; demais → Defender recommendations)."""
@@ -628,6 +629,7 @@ def parse_secure_score_controls(data):
     if not controls:
         return None
     by_sub = {}
+    ctrl_agg = {}  # displayName -> impacto agregado tenant-wide (elevacao do Secure Score, soma entre subs)
     for c in controls:
         p = c.get("properties", {}) or {}
         sub_id = str(c.get("subscriptionId") or _sub_of(c.get("id", "")) or "").lower()
@@ -648,6 +650,12 @@ def parse_secure_score_controls(data):
         bucket["current_total"] += cur
         bucket["max_total"] += mx
         bucket["potential_total"] += potential
+        if potential > 0:
+            agg = ctrl_agg.setdefault(ctrl["name"], {"name": ctrl["name"], "potential": 0.0,
+                                                     "unhealthy": 0, "healthy": 0})
+            agg["potential"] += potential
+            agg["unhealthy"] += unhealthy
+            agg["healthy"] += healthy
         defn = (p.get("definition", {}) or {}).get("properties", {}) or {}
         for ad in defn.get("assessmentDefinitions", []) or []:
             guid = str(ad.get("id", "")).rstrip("/").split("/")[-1].lower()
@@ -662,6 +670,10 @@ def parse_secure_score_controls(data):
         return None
     current_pct = round(100.0 * cur_all / max_all, 1)
     potential_pct = round(100.0 * min(cur_all + pot_all, max_all) / max_all, 1)
+    # Ranking de controles por ELEVACAO do Secure Score (ganho % do total se remediar os unhealthy).
+    top_controls = sorted(ctrl_agg.values(), key=lambda x: x["potential"], reverse=True)
+    for a in top_controls:
+        a["impact_pct"] = round(100.0 * a["potential"] / max_all, 2)
     return {
         "by_sub": by_sub,
         "current_pct": current_pct,
@@ -670,6 +682,7 @@ def parse_secure_score_controls(data):
         "max_total": max_all,
         "current_total": cur_all,
         "potential_points": pot_all,
+        "top_controls": top_controls,
     }
 
 def parse_mcsb_compliance(standards_data, controls_data, std_name, preferred_names):
@@ -925,6 +938,7 @@ def build_context(q, raw, params):
         "secure_score": secure_score,
         "secure_score_potential": secure_score_potential,
         "secure_score_delta": secure_score_delta,
+        "mdc_top_score": (ss_controls.get("top_controls") if ss_controls else None),
         "mcsb": mcsb,
         "subs": subs,
         "devops": devops,
@@ -1553,7 +1567,27 @@ def _exec_critical_tables(ctx):
                 f"style='color:var(--accent);white-space:nowrap;text-decoration:none'>{esc(label)}</a>")
     blocks = []
     mdc = ctx.get("mdc", [])
-    if mdc:
+    top_score = ctx.get("mdc_top_score") or []
+    if top_score:
+        # RANKING por ELEVAÇÃO do Secure Score: controles com maior ganho potencial (%) ao remediar
+        # os recursos unhealthy. Mapa controle → link do portal (usa uma recomendação MDC do controle).
+        link_by_ctrl = {}
+        for it in mdc:
+            cn = it.get("score_control")
+            if cn and cn not in link_by_ctrl:
+                lk = it.get("portal_link") or it.get("rec_link")
+                if lk:
+                    link_by_ctrl[cn] = lk
+        rows = "".join(
+            f"<tr><td>{esc(c['name'])}</td>"
+            f"<td style='text-align:right'>{c.get('unhealthy', 0)}</td>"
+            f"<td style='text-align:right;color:#9ae6b4;font-weight:700;white-space:nowrap'>+{c.get('impact_pct', 0):.2f}%</td>"
+            f"<td style='text-align:right'>{_lnk(link_by_ctrl.get(c['name']) or _DFC_SECURESCORE_PORTAL)}</td></tr>"
+            for c in top_score[:6])
+        blocks.append(("🛡️ Defender for Cloud — maior impacto no Secure Score",
+                       "<table><tr><th>Controle / recomendação</th><th>Recursos</th>"
+                       "<th>Ganho SS</th><th>&nbsp;</th></tr>" + rows + "</table>"))
+    elif mdc:
         top = sorted(mdc, key=lambda it: _MDC_ORDER.get(str(it.get("priority", "")).lower(), -1), reverse=True)[:6]
         rows = "".join(
             f"<tr><td class='{_SEV_CLASS.get(str(it.get('priority','—')).capitalize(),'sv-informational')}' "
