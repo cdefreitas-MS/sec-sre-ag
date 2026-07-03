@@ -742,8 +742,13 @@ def render_section(ctx, devops_html=None, devops_meta=None):
     `devops_html` = o dashboard DevOps que o advisor-impact já produz (embutido no setor 3)."""
     inv = ctx["inv"]; org = inv["OrgLogin"]
     sector3 = (devops_html if devops_html else
-               '<div class="secmuted">A remediação de código (Dependabot / CodeQL / secret scanning via Defender for Cloud) '
-               'aparece aqui quando este motor roda <b>dentro do advisor-impact</b> (precisa do conector DevOps do Defender no Azure).</div>')
+               '<div class="covnote">🐙 <b>Remediação de código (DevOps do Defender for Cloud) — sem dados neste relatório.</b> '
+               'Os findings de dependências (Dependabot), CodeQL/SAST, IaC e <i>secrets</i> dos seus repositórios aparecem aqui quando o '
+               '<b>conector DevOps do Microsoft Defender for Cloud</b> está configurado <i>e</i> o dataset <code>devops_findings</code> '
+               '(Azure Resource Graph) é coletado no run. '
+               '➡️ <b>Ainda não configurado no tenant?</b> Conecte GitHub / Azure DevOps / GitLab ao Defender for Cloud para passar a receber essas recomendações: '
+               '<a href="https://portal.azure.com/#view/Microsoft_Azure_Security/SecurityMenuBlade/~/DevOpsSecurity" style="color:#ffd98a;text-decoration:underline">Portal · DevOps security ↗</a> · '
+               '<a href="https://learn.microsoft.com/azure/defender-for-cloud/quickstart-onboard-github" style="color:#ffd98a;text-decoration:underline">guia de onboarding do GitHub ↗</a>.</div>')
     return f"""{GHP_STYLE}
 <div class="ghp">
 <h2>🐙 GitHub — segurança unificada</h2>
