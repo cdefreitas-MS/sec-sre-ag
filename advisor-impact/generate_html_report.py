@@ -140,7 +140,12 @@ def as_list(x):
         return []
     if isinstance(x, dict):
         v = x.get("value")
-        return v if isinstance(v, list) else []   # resposta ARM de erro ({} ou {error:...}) → vazio
+        if isinstance(v, list):
+            return v                              # resposta ARM: {"value":[...]}
+        d = x.get("data")                         # resposta Azure Resource Graph POST: {"data":[...]}
+        if isinstance(d, list):
+            return d
+        return []                                 # resposta de erro ({} ou {error:...}) → vazio
     if isinstance(x, list):
         return x
     return [x]
