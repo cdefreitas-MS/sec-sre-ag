@@ -2002,7 +2002,10 @@ def render_html(ctx, q):
              ("Controles avaliados", m365['controls'], "var(--muted)")],
             m_click, m_pie)
     if ss is not None:
-        d_pie = _svg_pie([(s, mdc_by_sev.get(s, 0), _SEV_COLOR.get(s, '#9fb0c8')) for s in _SEVS])
+        # Inclui QUALQUER severidade presente (ex.: "Unknown" quando o assessment veio sem $expand=metadata),
+        # senao a pizza fica toda-zero e o _svg_pie devolve vazio -> o card DfC ficava sem pizza. _SEVS primeiro, depois extras.
+        _dsev = _SEVS + [s for s in mdc_by_sev if s not in _SEVS]
+        d_pie = _svg_pie([(s, mdc_by_sev.get(s, 0), _SEV_COLOR.get(s, '#9fb0c8')) for s in _dsev if mdc_by_sev.get(s, 0)])
         score_cards += _score_card("<img class='plogo' src='" + _DFC_LOGO_URI + "' alt=''>", "Defender for Cloud — Secure Score", f"{ss}%", "postura de nuvem",
             [("Potencial", f"{ss_pot}%" if ss_pot is not None else "—", "#5ed16a"),
              ("Elevação possível", f"+{ss_delta} pp" if ss_delta is not None else "—", "#5ed16a"),

@@ -46,6 +46,7 @@ collector:
       mdc_assessments:
         path: "/subscriptions/{sub}/providers/Microsoft.Security/assessments"
         api: "2021-06-01"
+        query: "$expand=metadata"   # inclui severity/remediation/categories/MITRE. SEM isso a severidade vem "Unknown" e a pizza do card Defender for Cloud fica toda-zero e nao renderiza (Mode C/ARG ja traz via pack()).
       # Defender for Cloud — secure score (headline opcional; degrada p/ n/a se vazio)
       mdc_secure_score:
         path: "/subscriptions/{sub}/providers/Microsoft.Security/secureScores"
