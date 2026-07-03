@@ -15,13 +15,18 @@ on:
     inputs:
       org:
         description: "Org ou usuário GitHub a auditar (ex.: minha-org)"
-        required: true
+        required: false
+        default: "soc-lab-demo"
         type: string
       max_repos:
         description: "Máx. de repositórios a varrer"
         required: false
         default: "100"
         type: string
+  schedule:
+    # Automático: todo dia às 06:00 UTC (03:00 BRT). Ajuste o cron ou remova se não quiser.
+    # Runs agendados NÃO recebem inputs -> o org vem de `vars.GHP_ORG` (Settings → Actions → Variables) ou 'soc-lab-demo'.
+    - cron: "0 6 * * *"
 
 permissions:
   contents: write          # publica os dados (sanitizados) na branch gh-posture-data p/ o SRE Agent
@@ -30,6 +35,9 @@ permissions:
 jobs:
   audit:
     runs-on: ubuntu-latest
+    env:
+      # Resolve o org: input manual -> variável GHP_ORG -> default. Assim o run AGENDADO (sem input) funciona.
+      GH_ORG: ${{ inputs.org || vars.GHP_ORG || 'soc-lab-demo' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -48,7 +56,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GHP_TOKEN || github.token }}
         run: |
           python github-posture/generate_html_report.py \
-            --org "${{ inputs.org }}" \
+            --org "$GH_ORG" \
             --output out \
             --save-raw \
             --emit-feed out/_feed.json \
@@ -58,7 +66,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: github-posture-${{ inputs.org }}
+          name: github-posture-${{ env.GH_ORG }}
           path: out/
           if-no-files-found: warn
 
@@ -71,7 +79,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -e
-          ORG="${{ inputs.org }}"
+          ORG="$GH_ORG"
           REPO="${{ github.repository }}"
           if [ ! -f out/_raw.json ]; then echo "sem out/_raw.json — nada a publicar"; exit 0; fi
           rm -rf publish && mkdir publish && cd publish
