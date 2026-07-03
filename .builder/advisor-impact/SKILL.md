@@ -143,6 +143,8 @@ The **🐙 GitHub** tab merges the *governance/posture* half (**github-posture**
 
 > ℹ️ **The 🐙 GitHub tab does NOT need the ARG `devops_findings` (no POST required).** With `--github-org` + a `gh` token, sections **1 (🔗 Diferencial)** and **2 (🛡️ Postura & Governança — 8 domains incl. code security / Dependabot / CodeQL / secret)** render **entirely from `gh api` (GET)**. The ARG `devops_findings` dataset (Defender-for-Cloud DevOps connector) is **optional** — the renderer only folds it into section 3 **if present** (`if ctx.get("devops")`); without it the tab still renders fully. So you get the complete GitHub tab **without enabling any POST**. Only pursue the ARG POST below if you specifically want the Defender-DevOps-connector findings.
 
+> ⚠️ **In the Azure SRE Agent, prefer `--github-json` over `--github-org`.** Code Access does **not** pass a `GITHUB_TOKEN` into the skill's subprocess, so live `--github-org` (`gh api`) runs **unauthenticated** and collects nothing. The validated pattern ("Jeito 1") is: a **GitHub Actions** workflow (`GitHub Posture Audit`) collects with the org PAT and publishes `<org>-raw.json` to the **`gh-posture-data`** branch; the agent then `git show gh-posture-data:<org>-raw.json > /tmp/<org>-raw.json` and passes **`--github-json /tmp/<org>-raw.json`**. (Live `--github-org` only works where a `gh`-authenticated token exists in-process, e.g. local runs.)
+
 ### 5 · No grant needed
 - **Azure Retail Prices API** (`prices.azure.com`) — public, unauthenticated (implementation-cost estimates).
 
