@@ -654,11 +654,15 @@ def _finding_card(f):
 def _hero_html(ctx):
     score = ctx["score"]; verdict = ctx["verdict"]; klass = ctx["klass"]
     findings = ctx["findings"]; skipped = ctx["skipped"]
-    vcol = {"good": "#36d399", "warn": "#ffb454", "bad": "#ff8c66", "crit": "#ff4d6d"}[klass]
+    vcol = {"good": "#36d399", "warn": "#ffb454", "bad": "#ff8c66", "crit": "#ff4d6d", "neutral": "#8b949e"}[klass]
+    cov = ctx.get("coverage", {})
+    subcov = f" · cobertura {cov.get('pct', 0)}%" if cov else ""
+    scorenote = ('<div class="sub" style="color:#8b949e;margin-top:4px">cobertura insuficiente · resultado não conclusivo (poucos domínios avaliáveis com o acesso atual)</div>'
+                 if klass == "neutral" else "")
     k = _kpi_counts(findings)
     return f"""<div class="hero">
   <div><div class="score" style="color:{vcol}">{score}</div><div class="sub">GitHub Posture Score</div></div>
-  <div><div class="verdict" style="color:{vcol}">{esc(verdict)}</div><div class="sub">{len(findings)} achados · {len(ctx['passed'])} ok · {len(skipped)} n/a</div></div>
+  <div><div class="verdict" style="color:{vcol}">{esc(verdict)}</div><div class="sub">{len(findings)} achados · {len(ctx['passed'])} ok · {len(skipped)} n/a{subcov}</div>{scorenote}</div>
   <div class="kpis">
     <div class="kpi" style="border-color:#ff7d8a55"><b style="color:#ff7d8a">{k['importa']}</b><span>🔥 o que importa</span></div>
     <div class="kpi" style="border-color:#ff4d6d55"><b style="color:#ff4d6d">{k['critical']}</b><span>🔴 Critical</span></div>
@@ -702,7 +706,7 @@ def _findings_html(ctx):
 
 def _orient_html(ctx, devops_meta):
     feed = ctx["feed"]; score = ctx["score"]; verdict = ctx["verdict"]; klass = ctx["klass"]
-    vcol = {"good": "#36d399", "warn": "#ffb454", "bad": "#ff8c66", "crit": "#ff4d6d"}[klass]
+    vcol = {"good": "#36d399", "warn": "#ffb454", "bad": "#ff8c66", "crit": "#ff4d6d", "neutral": "#8b949e"}[klass]
     n_cloud = sum(1 for s in feed["github_secrets"] if s.get("cloud_credential"))
     n_diff = n_cloud + len(feed["github_oidc"])
     dv_total = (devops_meta or {}).get("total")
@@ -742,13 +746,8 @@ def render_section(ctx, devops_html=None, devops_meta=None):
     `devops_html` = o dashboard DevOps que o advisor-impact já produz (embutido no setor 3)."""
     inv = ctx["inv"]; org = inv["OrgLogin"]
     sector3 = (devops_html if devops_html else
-               '<div class="covnote">🐙 <b>Remediação de código (DevOps do Defender for Cloud) — sem dados neste relatório.</b> '
-               'Os findings de dependências (Dependabot), CodeQL/SAST, IaC e <i>secrets</i> dos seus repositórios aparecem aqui quando o '
-               '<b>conector DevOps do Microsoft Defender for Cloud</b> está configurado <i>e</i> o dataset <code>devops_findings</code> '
-               '(Azure Resource Graph) é coletado no run. '
-               '➡️ <b>Ainda não configurado no tenant?</b> Conecte GitHub / Azure DevOps / GitLab ao Defender for Cloud para passar a receber essas recomendações: '
-               '<a href="https://portal.azure.com/#view/Microsoft_Azure_Security/SecurityMenuBlade/~/DevOpsSecurity" style="color:#ffd98a;text-decoration:underline">Portal · DevOps security ↗</a> · '
-               '<a href="https://learn.microsoft.com/azure/defender-for-cloud/quickstart-onboard-github" style="color:#ffd98a;text-decoration:underline">guia de onboarding do GitHub ↗</a>.</div>')
+               '<div class="secmuted">A remediação de código (Dependabot / CodeQL / secret scanning via Defender for Cloud) '
+               'aparece aqui quando este motor roda <b>dentro do advisor-impact</b> (precisa do conector DevOps do Defender no Azure).</div>')
     return f"""{GHP_STYLE}
 <div class="ghp">
 <h2>🐙 GitHub — segurança unificada</h2>
@@ -786,10 +785,17 @@ def render_html(ctx) -> str:
 <style>:root{{color-scheme:dark}}*{{box-sizing:border-box}}
 body{{margin:0;background:#0b0e14}} .wrap{{max-width:1040px;margin:0 auto;padding:28px}}
 h1{{font-size:22px;margin:0 0 4px;color:#e6edf3;font-family:'Segoe UI',system-ui,sans-serif}}
+.intro{{margin:14px 0 4px;padding:14px 16px;background:#11151d;border:1px solid #1f2733;border-radius:12px;color:#adbac7;font:13px/1.6 'Segoe UI',system-ui,sans-serif}}
+.intro b{{color:#e6edf3}} .intro .k{{color:#9bd1ff}}
 .topfoot{{margin-top:30px;padding-top:14px;border-top:1px solid #1f2733;color:#586069;font-size:11.5px;text-align:center;font-family:'Segoe UI',system-ui,sans-serif}}</style>
 </head><body><div class="wrap">
 <h1>🐙 GitHub Posture</h1>
 <div style="color:#7d8590;font-size:13px;font-family:'Segoe UI',system-ui,sans-serif">Org {esc(org)} · gerado {now} · GitHub Posture Score <b style="color:#9bd1ff">{score}/100</b> ({esc(verdict)})</div>
+<div class="intro">
+<b>O que é este relatório?</b> Uma auditoria <b>read-only</b> (não altera nada) da segurança da sua organização no GitHub, em <b>8 domínios</b>: governança &amp; acesso, branch protection, secrets, GitHub Actions, code security, audit log e supply chain.<br>
+<b>Como ler o score.</b> O <span class="k">GitHub Posture Score</span> vai de <b>0 a 100</b> (SAUDÁVEL ≥85 · ATENÇÃO ≥65 · EM RISCO ≥40 · CRÍTICO). Cada achado é classificado por importância: <b>🔥 o que realmente importa</b> (crítico/exposição ativa) · <b>⚡ cross-domain</b> · <b>📋 recomendação</b> conhecida. Achados que exigem acesso não concedido aparecem como <b>“não avaliado”</b> — nunca como falso “desabilitado”. Se o acesso não cobre ao menos metade dos domínios, o veredito vira <b>COBERTURA INSUFICIENTE</b> (cinza, não conclusivo) em vez de um verde tranquilizador.<br>
+<b>O diferencial (Setor 1).</b> A correlação que <b>nenhum produto isolado faz</b>: um secret vazado num repositório que é uma <b>credencial válida do Azure</b> (ou um pipeline com OIDC para a nuvem) vira um <b>caminho de ataque real do código até o tenant</b>.
+</div>
 {body}
 <div class="topfoot">Parte do <b>SOC Autônomo</b> · skill <code>github-posture</code> · catálogo GH-NNN (8 domínios)<br>
 Read-only · não modifica a organização · alimenta o <code>attack-path</code> (correlação cross-domain)</div>
@@ -831,9 +837,18 @@ def build_report(data, params):
     findings, passed, skipped = run_gaps(inv, catalog, params)
     classify_importance(findings)
     score, verdict, klass = posture_score(findings)
+    # verdict-by-coverage: se o acesso não cobre metade dos domínios aplicáveis, o score é
+    # inconclusivo (poucos achados porque não vimos, não porque está tudo ok) → veredito NEUTRO,
+    # nunca um verde tranquilizador. Não distorce o número, só a leitura.
+    evaluated = len(findings) + len(passed)
+    total = evaluated + len(skipped)
+    cov_pct = round(100 * evaluated / total) if total else 0
+    if cov_pct < 50:
+        verdict, klass = "COBERTURA INSUFICIENTE", "neutral"
     feed = build_attack_path_feed(inv)
     ctx = {"inv": inv, "findings": findings, "passed": passed, "skipped": skipped,
-           "score": score, "verdict": verdict, "klass": klass, "feed": feed}
+           "score": score, "verdict": verdict, "klass": klass, "feed": feed,
+           "coverage": {"evaluated": evaluated, "total": total, "pct": cov_pct}}
     ctx["html_section"] = render_section(ctx)
     return ctx
 

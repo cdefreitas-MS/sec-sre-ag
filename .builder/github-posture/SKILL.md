@@ -31,6 +31,7 @@ After scoring, `build_attack_path_feed()` emits:
 **GitHub Posture Score** = `100 − Σ severity_weight[finding]`, clamped to [0,100] (`Critical −15`, `Warning −7`, `Info −2`).
 
 - **SAUDÁVEL** (green): ≥ 85 · **ATENÇÃO** (yellow): 65–84 · **EM RISCO** (orange): 40–64 · **CRÍTICO** (red): < 40.
+- **COBERTURA INSUFICIENTE** (neutral/gray): when the granted access evaluates **< 50%** of applicable domains (many checks Skip), the verdict is inconclusive instead of a reassuring green — the score is not distorted, only its reading. Prevents a false "healthy" when the token/scopes simply couldn't see enough (e.g. unauthenticated public-only collection).
 
 **Importance layer** (signal vs noise, aligned with attack-path):
 - 🔥 **crítico** — severity Critical OR an *active* exposure (open secret-scanning alert, open critical Dependabot CVE).
