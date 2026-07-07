@@ -77,13 +77,13 @@ queries:
       by UserPrincipalName
 
   # ── IP ↔ IOC: sign-in de IP que consta como indicador de ameaça (Threat Intel nativo) ──
+  # Robusto às DUAS tabelas de TI do Sentinel via `union isfuzzy` (tabela ausente = perna ignorada, sem erro):
+  #  · ThreatIntelIndicators       (schema NOVO/STIX: IsActive + ObservableValue/Pattern)
+  #  · ThreatIntelligenceIndicator (schema LEGADO: Active + NetworkIP/NetworkSourceIP)
+  # `column_ifexists` protege contra drift de coluna dentro de cada tabela existente.
   ip_ioc: |
     let start = {lookback_days}d;
-    let TI = ThreatIntelligenceIndicator
-      | where Active == true and TimeGenerated > ago(90d)
-      | extend TIIP = coalesce(tostring(NetworkIP), tostring(NetworkSourceIP), tostring(NetworkDestinationIP), tostring(EmailSourceIpAddress))
-      | where isnotempty(TIIP)
-      | summarize arg_max(TimeGenerated, ThreatType, ConfidenceScore, Description) by TIIP;
+    let TI = union isfuzzy=true (ThreatIntelligenceIndicator | where column_ifexists('Active', true) == true and TimeGenerated > ago(90d) | extend TIIP = coalesce(tostring(column_ifexists('NetworkIP','')), tostring(column_ifexists('NetworkSourceIP','')), tostring(column_ifexists('NetworkDestinationIP','')), tostring(column_ifexists('EmailSourceIpAddress',''))) | where isnotempty(TIIP) | extend ThreatType = tostring(column_ifexists('ThreatType','IOC')), ConfidenceScore = toint(column_ifexists('ConfidenceScore', 0)), Description = tostring(column_ifexists('Description','')) | summarize arg_max(TimeGenerated, ThreatType, ConfidenceScore, Description) by TIIP), (ThreatIntelIndicators | where column_ifexists('IsActive', true) == true and TimeGenerated > ago(90d) | extend _key = tostring(column_ifexists('ObservableKey','')), _pat = tostring(column_ifexists('Pattern','')) | extend TIIP = iff(_key contains 'ipv4-addr', tostring(column_ifexists('ObservableValue','')), extract(@"ipv4-addr:value\s*=\s*'([^']+)'", 1, _pat)) | where isnotempty(TIIP) | extend ThreatType = coalesce(tostring(column_ifexists('ThreatType','')), 'IOC'), ConfidenceScore = toint(column_ifexists('Confidence', 0)), Description = tostring(column_ifexists('Name','')) | summarize arg_max(TimeGenerated, ThreatType, ConfidenceScore, Description) by TIIP) | summarize arg_max(ConfidenceScore, ThreatType, Description) by TIIP;
     SigninLogs
     | where TimeGenerated between (ago(start) .. now()) and isnotempty(IPAddress)
     | distinct UserPrincipalName, IPAddress

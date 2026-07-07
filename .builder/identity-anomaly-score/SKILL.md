@@ -27,7 +27,7 @@ account-compromise signal — and a **unified identity risk score** that feeds t
 A high score says *anomalous*, not *dangerous*. A corroboration layer adjudicates each identity and
 emits a **veredito** (`rr_klass`): **RISCO REAL PROVÁVEL** · **SUSPEITO — investigar** · **PROVÁVEL RUÍDO**.
 - **Strong corroborators** (any one alone → real risk):
-  - `ioc_ip` — a sign-in IP matches an **Active ThreatIntelligenceIndicator** (IP↔IOC: ThreatType/Confidence).
+  - `ioc_ip` — a sign-in IP matches an **active Threat-Intel indicator** — supports both `ThreatIntelIndicators` (new STIX table) and legacy `ThreatIntelligenceIndicator` via `union isfuzzy` (IP↔IOC: ThreatType/Confidence).
   - `risky_success` — a `SigninLogs` event with `RiskLevelDuringSignIn` high/med **AND** `ResultType == 0` (risky sign-in that *succeeded*).
   - `active_alert` — a non-Dismissed `SecurityAlert` on the UPN.
 - **Weak corroborators** (need ≥ 2, or 1 + a strong): `impossible_travel`, `anonymized_ip`, `idp_risky` (riskyUsers), `personal_deviation` (only computed for Score ≥ 40 — perf guard).
@@ -54,7 +54,7 @@ emits a **veredito** (`rr_klass`): **RISCO REAL PROVÁVEL** · **SUSPEITO — in
 | `identity_features` | KQL `identity_features` (per-identity aggregate) | ✅ drives the score |
 | `identity_daily` | KQL `identity_daily` (per-identity per-day) | optional — drives the personal baseline |
 | `identity_signals` | KQL `identity_signals` (RiskySuccess / ImpossibleTravel / Anonymized per UPN) | optional — corroboration |
-| `ip_ioc` | KQL `ip_ioc` (SigninLogs IPs ⨚ `ThreatIntelligenceIndicator` where Active) | optional — **strong** corroboration (IP↔IOC) |
+| `ip_ioc` | KQL `ip_ioc` (SigninLogs IPs ⨚ active TI — `ThreatIntelIndicators` new **or** legacy `ThreatIntelligenceIndicator`, `union isfuzzy`) | optional — **strong** corroboration (IP↔IOC) |
 | `active_alerts` | KQL `active_alerts` (`SecurityAlert` non-Dismissed by UPN) | optional — **strong** corroboration |
 | `risky_users` | Graph `/identityProtection/riskyUsers` | optional — weak corroboration (🔺 marker) |
 
@@ -72,7 +72,7 @@ Follows the canonical sequence (`shared/sharepoint-archival.md`): archive to Sha
 
 ## Permissions
 Log Analytics Reader on the Sentinel workspace — reads `SigninLogs` (score/baseline),
-`ThreatIntelligenceIndicator` + `SecurityAlert` (real-risk corroboration). Optional
+`ThreatIntelIndicators`/`ThreatIntelligenceIndicator` + `SecurityAlert` (real-risk corroboration). Optional
 `IdentityRiskyUser.Read.All` (Graph) for the riskyUsers corroboration — every corroboration
 source degrades gracefully if absent (the score still renders; the verdict just uses fewer signals).
 
