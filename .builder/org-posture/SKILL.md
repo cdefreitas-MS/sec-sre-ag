@@ -14,7 +14,7 @@ Give leadership **one number and one grade** for the whole environment, defensib
 ## Configuration
 
 Reads from `config.json` at workspace root: `subscription_id`, `email.*`, `teams.*`.
-Tunables (`queries.yaml`): `grade_strong=80`, `grade_moderate=60`, `weights{}`, `incident_penalty{}`, `risky_user_penalty`.
+Tunables (`queries.yaml`): `grade_strong=80`, `grade_moderate=60`, `weights{}`, `incident_penalty{}`, `risky_user_penalty`, `ueba_real_penalty=18`, `ueba_suspect_penalty=6`.
 
 ## Skill Files
 
@@ -53,7 +53,7 @@ Pillar sub-scores:
 - **Identity** = Secure Score % (`currentScore/maxScore`).
 - **Endpoint** = `100 − exposureScore` (exposure is lower-is-better).
 - **Threat** = `100 − Σ incident_penalty[severity]` (active incidents).
-- **IdentityRisk** = `100 − (highRiskUsers × 12)`.
+- **IdentityRisk** = `100 − (highRiskUsers × 12) − (uebaReal × 18) − (uebaSuspect × 6)`. The **`identity_anomaly`** feed (from **identity-anomaly-score**) folds *corroborated* real-risk behaviour (IP↔IOC / risky-success sign-in / active alert) into the static IdP flag — a confirmed anomaly weighs more than a raw risky-user flag. **Absent feed → falls back to `100 − highRiskUsers × 12`** (identical to before; the penalty only fires when the feed is present in the bundle). Driver appends `· UEBA {n} risco real / {m} suspeito`.
 
 ## Workflow
 
@@ -69,6 +69,8 @@ Pillar sub-scores:
 **MDE:**
 - `GET /api/exposureScore` → org exposure score.
 
+**Optional UEBA feed — `identity_anomaly` (from identity-anomaly-score; sharpens the Identity-risk pillar):**
+- Run `identity-anomaly-score` first with `--emit-feed` (writes `_identity_anomaly_feed.json` = `{"identity_anomaly": [{upn, score, rr_klass, real_risk, corroborators, …}]}`), then include that `identity_anomaly` array in the org-posture bundle (Mode B `--from-json`), OR pass the feed file path so the agent merges it. When present, corroborated-real identities (`rr_klass:real`, ×18) and suspects (`rr_klass:suspect`, ×6) deepen the Identity-risk pillar beyond the raw riskyUsers count. **Entirely optional — no feed = no change** (degrades gracefully).
 **Graph — informational sections (do NOT affect the index; degrade gracefully on 402/403/404):**
 - `GET /v1.0/subscribedSkus` → 🪪 **Licensing/FinOps** (total/assigned/idle per SKU). Perm: `Organization.Read.All` / `Directory.Read.All`.
 - `GET /v1.0/security/attackSimulation/simulations?$top=50` + `GET /v1.0/reports/security/getAttackSimulationSimulationUserCoverage` · `...getAttackSimulationTrainingUserCoverage` · `...getAttackSimulationRepeatOffenders` → 🎓 **Human Risk** (simulated users, click rate, training %, repeat offenders). Perm: `AttackSimulation.Read.All` (may need a one-time grant on the agent identity).
