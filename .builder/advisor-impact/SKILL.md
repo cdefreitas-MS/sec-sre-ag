@@ -138,7 +138,7 @@ The **🐙 GitHub** tab merges the *governance/posture* half (**github-posture**
 | Requirement | How to satisfy |
 |-------------|----------------|
 | **① Companion engine present** | `../github-posture/generate_html_report.py` + `queries.yaml` co-located as a **sibling** of `advisor-impact/`. ✅ Enable **Code Access** (`codeRefs/sec-sre-ag`) so the whole repo syncs and the sibling resolves automatically. *(Standalone skill without codeRefs → also add both github-posture files to the skill, or materialize them under `tmp/github-posture/`.)* |
-| **② Trigger flag** | pass **`--github-org <org>`** (live `gh api`) **or** **`--github-json <file>`** (offline). Without one, the engine never runs and the tab is omitted. *(There is no config default — the org must be given on the command line.)* |
+| **② Trigger flag** | pass **`--github-branch <org>`** (RECOMMENDED in the SRE Agent — self-fetches `gh-posture-data:<org>-raw.json` **deterministically**, no file path to pick, no stale tmp) **or** **`--github-json <file>`** (offline/dev) **or** **`--github-org <org>`** (live `gh api`). Without one, the engine never runs and the tab is omitted. *(No config default — the org must be given on the command line.)* |
 | **③ GitHub token** | a PAT / GitHub App token with **`admin:org`** + **`security_events`** (+ `repo` for private repos), exported for `gh` (e.g. `GH_TOKEN=<token>`). Feeds the 8-domain score + findings + the `_github_feed.json` cross-domain feed that **attack-path** chains (`repo → leaked-secret/SP → privileged role`). |
 
 > ℹ️ **The 🐙 GitHub tab does NOT need the ARG `devops_findings` (no POST required).** With `--github-org` + a `gh` token, sections **1 (🔗 Diferencial)** and **2 (🛡️ Postura & Governança — 8 domains incl. code security / Dependabot / CodeQL / secret)** render **entirely from `gh api` (GET)**. The ARG `devops_findings` dataset (Defender-for-Cloud DevOps connector) is **optional** — the renderer only folds it into section 3 **if present** (`if ctx.get("devops")`); without it the tab still renders fully. So you get the complete GitHub tab **without enabling any POST**. Only pursue the ARG POST below if you specifically want the Defender-DevOps-connector findings.
@@ -147,7 +147,7 @@ The **🐙 GitHub** tab merges the *governance/posture* half (**github-posture**
 >
 > 📦 **Shape of a self-collected `devops_findings`.** When you run the ARG POST yourself via `RunInTerminal` + `curl`, the ResourceGraph response is `{"data":[...]}` (NOT `{"value":[...]}`). Save it **as-is** under the `devops_findings` key — the renderer's `as_list()` now unwraps **`value`, `data`, or a bare list**, so no re-wrapping is needed. (If section 3 still shows the configure banner even though you collected findings, it means the dataset was dropped — almost always because the raw `{"data":[...]}` wasn't recognized; this is now handled.)
 
-> ⚠️ **In the Azure SRE Agent, prefer `--github-json` over `--github-org`.** Code Access does **not** pass a `GITHUB_TOKEN` into the skill's subprocess, so live `--github-org` (`gh api`) runs **unauthenticated** and collects nothing. The validated pattern ("Jeito 1") is: a **GitHub Actions** workflow (`GitHub Posture Audit`) collects with the org PAT and publishes `<org>-raw.json` to the **`gh-posture-data`** branch; the agent then `git show gh-posture-data:<org>-raw.json > /tmp/<org>-raw.json` and passes **`--github-json /tmp/<org>-raw.json`**. (Live `--github-org` only works where a `gh`-authenticated token exists in-process, e.g. local runs.)
+> ✅ **In the Azure SRE Agent, use `--github-branch <org>` (definitive).** Code Access does **not** pass a `GITHUB_TOKEN` into the skill's subprocess, so live `--github-org` (`gh api`) runs **unauthenticated** and collects nothing. The validated pattern ("Jeito 1") is: a **GitHub Actions** workflow (`GitHub Posture Audit`) collects with the org PAT and publishes `<org>-raw.json` to the **`gh-posture-data`** branch. **`--github-branch <org>` now does the fetch itself** — it runs `git fetch origin gh-posture-data` + `git show gh-posture-data:<org>-raw.json` **inside the renderer** and loads that, so there is **no local file to choose and nothing to go stale** (the earlier `git show … > /tmp/<org>-raw.json` + `--github-json /tmp/…` dance is gone — it once loaded a leftover tmp from a different account). An **identity guard** also fires: if the loaded inventory's `org.login` ≠ the requested org (or the org came back as a `User`, not `Organization`), the 🐙 GitHub tab shows a **warning banner** instead of silently shipping wrong data. Use `--github-json <file>` only for offline/dev; live `--github-org` only where a `gh`-authenticated token exists in-process (local runs).
 
 ### 5 · No grant needed
 - **Azure Retail Prices API** (`prices.azure.com`) — public, unauthenticated (implementation-cost estimates).
@@ -213,8 +213,8 @@ az role assignment list --assignee <UAMI_OBJECT_ID> --scope /subscriptions/<SUB>
 python3 <SKILL_DIR>/generate_html_report.py --tenant --output tmp/advisor-impact --format both
 # or a specific set of subscriptions:
 python3 <SKILL_DIR>/generate_html_report.py --subs <sub1>,<sub2> --output tmp/advisor-impact --format both
-# …attach the unified 🐙 GitHub tab (github-posture 8 domains + DevOps findings) — needs a gh token with admin:org/security_events:
-python3 <SKILL_DIR>/generate_html_report.py --tenant --github-org <org> --output tmp/advisor-impact --format both
+# …attach the unified 🐙 GitHub tab (github-posture 8 domains + DevOps findings). In the SRE Agent use --github-branch <org> (self-fetches gh-posture-data:<org>-raw.json; no stale tmp):
+python3 <SKILL_DIR>/generate_html_report.py --tenant --github-branch <org> --output tmp/advisor-impact --format both
 ```
 Runs one ARG query per dataset over `advisorresources` / `securityresources` / `resourcecontainers`. Needs **Reader** on the subscriptions. If the sandbox `az` is blocked, prefetch the ARG results (Mode B) instead.
 
@@ -360,7 +360,7 @@ This skill produces **HTML + MD artifacts**. Deliver them via the existing deliv
 - The Power Automate webhook URL comes from `config.json` (hardening pending: move to Key Vault).
 
 **Agent prompt pattern (tenant-wide + unified GitHub tab + triple delivery):**
-> *"Run advisor-impact tenant-wide (Mode B prefetch ARG if `az` is sandboxed). Attach the unified 🐙 GitHub tab with `--github-org <org>` (github-posture folded in — needs the sibling engine via Code Access + a gh token with admin:org/security_events). Mint the UAMI Graph token for `m365_secure_score` + `xdr_recommendations`. Then deliver: email the HTML to BOTH default recipients and post the Teams card. Use the script's own KPI numbers."*
+> *"Run advisor-impact tenant-wide (Mode B prefetch ARG if `az` is sandboxed). Attach the unified 🐙 GitHub tab with `--github-branch <org>` (self-fetches the org's inventory from the `gh-posture-data` branch — needs the sibling github-posture engine via Code Access; no gh token, no stale tmp). Mint the UAMI Graph token for `m365_secure_score` + `xdr_recommendations`. Then deliver: email the HTML to BOTH default recipients and post the Teams card. Use the script's own KPI numbers."*
 
 ---
 

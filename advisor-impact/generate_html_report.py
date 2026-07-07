@@ -2135,9 +2135,14 @@ def render_html(ctx, q):
             ctx["github_ctx"],
             devops_html=(devops_html if ctx.get("devops") else None),
             devops_meta=_dv_meta)
+        _gh_warn = ctx["github_ctx"].get("_data_warn")
+        _gh_warn_html = ('<div style="margin:12px 0;padding:11px 15px;background:#2a1206;'
+                         'border:1px solid #5a2a10;border-radius:10px;color:#ffb38a;'
+                         "font:13px/1.5 'Segoe UI',system-ui,sans-serif\">\u26a0\ufe0f "
+                         + esc(_gh_warn) + '</div>') if _gh_warn else ''
         page_github = ('<div id="page-github" class="page" style="display:none">'
                        '<button class="btn back" onclick="goHome()">← Início</button>'
-                       + _gh_body + '</div>')
+                       + _gh_warn_html + _gh_body + '</div>')
     else:
         page_github = ''
 
@@ -2304,10 +2309,37 @@ def _validate_links(ctx):
     return missing
 
 
-def _github_posture(github_json=None, github_org=None, queries_path=None):
-    """Roda o motor github-posture (8 domínios) e devolve (html_section, feed) p/ embutir
-    a aba 'GitHub Posture' no advisor-impact. Best-effort: sem o motor/dado, devolve
-    (None, None) e o relatório segue sem a aba (skip gracioso)."""
+def _load_github_from_branch(org):
+    """Busca o inventário GitHub canônico direto da branch `gh-posture-data` (git show),
+    determinístico por org — sempre o dado publicado mais fresco, sem depender de um arquivo
+    local (elimina o risco de pegar um tmp desatualizado). Faz fetch best-effort e tenta os
+    refs conhecidos. Devolve o dict ou None."""
+    repo_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    fname = f"{org}-raw.json"
+    try:
+        subprocess.run(["git", "-C", repo_dir, "fetch", "origin", "gh-posture-data"],
+                       capture_output=True, timeout=60)
+    except Exception:
+        pass
+    for ref in ("origin/gh-posture-data", "gh-posture-data", "FETCH_HEAD"):
+        try:
+            r = subprocess.run(["git", "-C", repo_dir, "show", f"{ref}:{fname}"],
+                               capture_output=True, timeout=30)
+            if r.returncode == 0 and r.stdout.strip():
+                return json.loads(r.stdout.decode("utf-8", "replace"))
+        except Exception:
+            continue
+    return None
+
+
+def _github_posture(github_json=None, github_org=None, github_branch=None, queries_path=None):
+    """Roda o motor github-posture (8 domínios) e devolve (gctx, engine) p/ embutir a aba
+    'GitHub Posture' no advisor-impact. Fontes do inventário (ordem de robustez):
+      --github-branch <org>  → busca gh-posture-data:<org>-raw.json via git (DETERMINÍSTICO,
+                               recomendado no SRE Agent — sem escolher arquivo, sem tmp stale);
+      --github-json <arq>    → arquivo pré-coletado (offline/dev);
+      --github-org <org>     → coleta ao vivo via gh api (precisa admin:org/security_events).
+    Best-effort: sem motor/dado devolve (None, None) e o relatório segue sem a aba."""
     here = os.path.dirname(os.path.abspath(__file__))
     eng_path = os.path.join(here, "..", "github-posture", "generate_html_report.py")
     if not os.path.exists(eng_path):
@@ -2322,7 +2354,15 @@ def _github_posture(github_json=None, github_org=None, queries_path=None):
         gq = eng.load_yaml(qpath)
         gparams = dict(gq.get("parameters", {}) or {})
         gparams["_catalog"] = gq["best_practices"]
-        if github_json:
+        expected_org = github_branch or github_org
+        if github_branch:
+            gdata = _load_github_from_branch(github_branch)
+            if not gdata:
+                print(f"  [github] dado da org '{github_branch}' não encontrado na branch gh-posture-data — "
+                      f"rode o workflow 'GitHub Posture Audit' p/ publicar {github_branch}-raw.json. Aba GitHub omitida.",
+                      file=sys.stderr)
+                return None, None
+        elif github_json:
             with open(github_json, "r", encoding="utf-8") as f:
                 gdata = json.load(f)
         elif github_org:
@@ -2332,7 +2372,22 @@ def _github_posture(github_json=None, github_org=None, queries_path=None):
                 return None, None
         else:
             return None, None
+        # Guarda de identidade: o dado TEM que ser da org pedida (pega arquivo errado/stale).
+        data_warn = None
+        _org = gdata.get("org") or {}
+        _actual = _org.get("login"); _otype = _org.get("type")
+        if expected_org and _actual and str(_actual).lower() != str(expected_org).lower():
+            data_warn = (f"O inventário GitHub carregado é da conta \u201c{_actual}\u201d, mas foi solicitada "
+                         f"\u201c{expected_org}\u201d. Provável dado incorreto ou desatualizado — a aba abaixo NÃO "
+                         f"reflete \u201c{expected_org}\u201d. Rode o workflow 'GitHub Posture Audit' e use --github-branch {expected_org}.")
+            print(f"  [github] \u26a0 mismatch de org: dado='{_actual}' pedido='{expected_org}'", file=sys.stderr)
+        elif github_branch and _otype and _otype != "Organization":
+            data_warn = (f"O dado de \u201c{expected_org}\u201d foi coletado como conta \u201c{_otype}\u201d, não \u201cOrganization\u201d — "
+                         f"os domínios de governança não são avaliáveis (cobertura reduzida; veja o veredito).")
+            print(f"  [github] \u26a0 '{expected_org}' veio como {_otype}, não Organization", file=sys.stderr)
         gctx = eng.build_report(gdata, gparams)
+        if data_warn:
+            gctx["_data_warn"] = data_warn
         print(f"  [github] GitHub Posture Score {gctx['score']}/100 ({gctx['verdict']}) · "
               f"{len(gctx['findings'])} achados · feed: {len(gctx['feed']['github_secrets'])} secret(s)/"
               f"{len(gctx['feed']['github_oidc'])} oidc", file=sys.stderr)
@@ -2351,6 +2406,7 @@ def main(argv=None):
     ap.add_argument("--subs", dest="subs", default=None, help="Lista de subscription IDs separados por vírgula (escopo ARG); sem isso = tenant inteiro")
     ap.add_argument("--category", default=None, help="Cost|Security|Reliability|OperationalExcellence|Performance|all")
     ap.add_argument("--queries", default=None)
+    ap.add_argument("--github-branch", dest="github_branch", default=None, help="Org GitHub p/ a aba 'GitHub Posture' — busca gh-posture-data:<org>-raw.json direto da branch (DETERMINÍSTICO; recomendado no SRE Agent, evita arquivo/tmp stale)")
     ap.add_argument("--github-org", dest="github_org", default=None, help="Org GitHub p/ anexar a aba 'GitHub Posture' (8 domínios via gh api; precisa admin:org/security_events)")
     ap.add_argument("--github-json", dest="github_json", default=None, help="Inventário GitHub pré-coletado (offline) p/ a aba GitHub Posture")
     ap.add_argument("--output", default=".")
@@ -2405,7 +2461,7 @@ def main(argv=None):
 
     ctx = build_context(q, raw, params)
     _validate_links(ctx)
-    gh_ctx, gh_eng = _github_posture(args.github_json, args.github_org)
+    gh_ctx, gh_eng = _github_posture(args.github_json, args.github_org, args.github_branch)
     if gh_ctx:
         ctx["github_ctx"] = gh_ctx
         ctx["github_eng"] = gh_eng
