@@ -401,6 +401,27 @@ def build_graph(data, params, scoring, abuse_map, exposure=None):
         g.add_edge(rn, tgt or _cloud_jewel(), "oidc_federation",
                    ew.get("oidc_federation", 0.75), "github/actions", abuse_map)
 
+    # ── UEBA (feed do identity-anomaly-score) → COMPORTAMENTO ATIVO por identidade ────
+    # Uma identidade com risco REAL corroborado (IP↔IOC, sucesso c/ risco, alerta ativo)
+    # é comportamento em andamento: vira vetor de entrada e marca os caminhos que passam
+    # por ela como ATIVOS — de teórico p/ real. É a correlação que liga o UEBA ao grafo.
+    for ia in _val(data.get("identity_anomaly")):
+        upn = str(ia.get("upn") or "").strip()
+        if not upn:
+            continue
+        lc = upn.lower()
+        un = upn_to_node.get(lc) or g.add_node(
+            f"user::{upn}", "user", f"Usuário: {upn}", kind="pivot", meta={"upn": upn})
+        upn_to_node[lc] = un
+        g.nodes[un]["meta"]["ueba"] = {
+            "verdict": ia.get("real_risk"), "klass": ia.get("rr_klass"),
+            "score": ia.get("score"), "severity": ia.get("severity"),
+            "corroborators": [str(c) for c in (ia.get("corroborators") or [])]}
+        if ia.get("rr_klass") == "real":  # só risco real corroborado vira entrada ativa
+            g.add_edge(EXT, un, "risky_identity",
+                       ew.get("ueba_active", ew.get("risky_user_high", 0.7)),
+                       "ueba/identity-anomaly", abuse_map)
+
     # ── blind-spot annotation (Module 2 + Module 4) ─────────────────
     covered = {str(t).upper() for t in (data.get("mitre_covered") or [])}
     silent = {str(s).lower() for s in (data.get("silent_sources") or [])}
@@ -521,6 +542,22 @@ def classify_importance(paths):
         p["importance"] = round((1000 if active else 0) + (400 if takeover else 0)
                                 + (100 + 25 * ndom if novel else 0) + (15 if blind else 0)
                                 + p["risk"], 1)
+
+
+def mark_ueba_active(g, paths):
+    """Feed do identity-anomaly-score: um caminho que atravessa uma identidade com RISCO
+    REAL corroborado (IP↔IOC / sucesso c/ risco / alerta ativo) é comportamento ATIVO —
+    promove de teórico p/ real (mesmo efeito de um hunt hit). Anexa a evidência UEBA ao
+    caminho para exibição."""
+    real = {n for n, nd in g.nodes.items()
+            if (nd.get("meta", {}).get("ueba") or {}).get("klass") == "real"}
+    if not real:
+        return
+    for p in paths:
+        hit = [n for n in p.get("node_ids", []) if n in real]
+        if hit:
+            p["active"] = True
+            p["ueba"] = [g.nodes[n]["meta"]["ueba"] for n in hit]
 
 
 def chokepoints(g, scored, params):
@@ -979,6 +1016,13 @@ def render_html(s, g):
             tags += '<span class="b blind">👁️ blind spot</span>'
         active = p.get("active")
         act_badge = '<span class="b hot">🔴 ativo agora</span>' if active else ""
+        ueba_badge = ""
+        if p.get("ueba"):
+            evs = []
+            for u in p["ueba"]:
+                evs += (u.get("corroborators") or [])
+            ev = ", ".join(dict.fromkeys(evs)) or (p["ueba"][0].get("verdict") or "risco real")
+            ueba_badge = f'<span class="b hot" title="Feed identity_anomaly">🔴 UEBA: {html.escape(ev)}</span>'
         short = " → ".join(_trunc(x, 20) for x in p["nodes"])
         entry_id = p["node_ids"][1] if len(p["node_ids"]) > 1 else p["node_ids"][0]
         fix_link = _portal_link(g, entry_id)
@@ -1019,7 +1063,7 @@ def render_html(s, g):
                         f'para criar, ou:</div><pre>{cmd}</pre></div>')
         window = (f'<details class="pcard{" active" if active else ""}">'
                    f'<summary>{tier_badge}<span class="rp" style="color:{rc};border-color:{rc}">{p["risk"]}</span> '
-                   f'<span class="sc">{html.escape(short)}</span> {tags}{act_badge}</summary>'
+                   f'<span class="sc">{html.escape(short)}</span> {tags}{act_badge}{ueba_badge}</summary>'
                    f'<div class="pb">'
                    f'<div class="maptitle">🗺️ Da camada de entrada até onde o ataque chega</div>'
                    f'<div class="mapwrap">{minimap}</div>'
@@ -1238,6 +1282,7 @@ def main():
     if args.hunt:
         run_hunts(hunts, args.workspace)
         refresh_active(top_paths, hunts)
+    mark_ueba_active(g, top_paths)          # feed do identity-anomaly-score
     classify_importance(top_paths)
     top_paths.sort(key=lambda p: p["importance"], reverse=True)
     important = [p for p in top_paths if p.get("importance_tier") != "recomendacao"]

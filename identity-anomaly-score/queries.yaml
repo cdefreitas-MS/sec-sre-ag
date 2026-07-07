@@ -1,0 +1,124 @@
+# identity-anomaly-score — UEBA de identidade (lake-first) para o SOC Autônomo
+# Portado (não-verbatim) do notebook "Identity Anomaly Detection" de David Alonso
+# (github.com/davidalonsod/Dalonso-Security-Repo, MIT). Engine em Python stdlib:
+# agrega SigninLogs por identidade -> baselines robustos (robust-Z/MAD) -> Composite
+# Risk Score 0-100 -> fila de risco + baseline pessoal + feed identity_anomaly.
+
+parameters:
+  lookback_days: 30          # janela total de histórico
+  detect_days: 3             # dias recentes comparados ao baseline pessoal (§7b)
+  contamination: 0.02        # fração-alvo de outliers (Isolation Forest opcional)
+
+# ── Composite Risk Score (fiel ao §4 do notebook) ──
+scoring:
+  weights:                   # somam 100
+    rarity: 30               # rarity multi-dimensional (robust-Z; Isolation Forest se --use-iso)
+    country: 20              # DistinctCountries > country_gt
+    zspike: 15               # SignIns_z > z_gt
+    fail: 15                 # Failed >= fail_ge
+    night: 10                # Night > 0
+    ip: 10                   # DistinctIPs > ip_gt
+  thresholds:
+    country_gt: 2
+    z_gt: 3
+    fail_ge: 20
+    ip_gt: 3
+  severity_bands:            # limites superiores (Score) -> rótulo
+    - [20, "Normal"]
+    - [40, "Low"]
+    - [60, "Medium"]
+    - [80, "High"]
+    - [100, "Critical"]
+  personal_baseline_sigma: 3 # |robust-z| >= isso no §7b = desvio do próprio histórico
+
+# Features agregadas por identidade (base do score)
+features: [SignIns, Failed, DistinctIPs, DistinctCountries, DistinctApps, Night, FailRatio]
+
+# ── Modo A: self-collect (az monitor log-analytics query) ──
+# KQL lake-first: 1 linha compacta por identidade (Python nunca carrega eventos crus).
+queries:
+  # Agregado por identidade na janela (dirige o score de fleet)
+  identity_features: |
+    let start = {lookback_days}d;
+    SigninLogs
+    | where TimeGenerated between (ago(start) .. now())
+    | extend Country = tostring(LocationDetails.countryOrRegion), hr = hourofday(TimeGenerated)
+    | summarize SignIns = count(),
+                Failed = countif(ResultType != '0'),
+                Success = countif(ResultType == '0'),
+                DistinctIPs = dcount(IPAddress),
+                DistinctCountries = dcount(Country),
+                DistinctApps = dcount(AppDisplayName),
+                Night = countif(hr < 6 or hr > 20)
+      by UserPrincipalName
+    | extend FailRatio = todouble(Failed) / (SignIns + 1)
+
+  # Série diária por identidade (dirige o baseline pessoal §7b) — opcional
+  identity_daily: |
+    let start = {lookback_days}d;
+    SigninLogs
+    | where TimeGenerated between (ago(start) .. now())
+    | extend Country = tostring(LocationDetails.countryOrRegion), hr = hourofday(TimeGenerated)
+    | summarize SignIns = count(),
+                Failed = countif(ResultType != '0'),
+                DistinctIPs = dcount(IPAddress),
+                DistinctCountries = dcount(Country),
+                Night = countif(hr < 6 or hr > 20)
+      by UserPrincipalName, Date = format_datetime(startofday(TimeGenerated), 'yyyy-MM-dd')
+
+  # ── Corroboração: sinais de risco REAL por identidade (SigninLogs Entra risk) ──
+  identity_signals: |
+    let start = {lookback_days}d;
+    SigninLogs
+    | where TimeGenerated between (ago(start) .. now())
+    | summarize RiskySuccess = countif((RiskLevelDuringSignIn in ('high','medium') or RiskState == 'atRisk') and ResultType == 0),
+                ImpossibleTravel = countif(RiskEventTypes has 'unlikelyTravel' or RiskEventTypes has 'impossibleTravel'),
+                Anonymized = countif(RiskEventTypes has 'anonymizedIPAddress')
+      by UserPrincipalName
+
+  # ── IP ↔ IOC: sign-in de IP que consta como indicador de ameaça (Threat Intel nativo) ──
+  ip_ioc: |
+    let start = {lookback_days}d;
+    let TI = ThreatIntelligenceIndicator
+      | where Active == true and TimeGenerated > ago(90d)
+      | extend TIIP = coalesce(tostring(NetworkIP), tostring(NetworkSourceIP), tostring(NetworkDestinationIP), tostring(EmailSourceIpAddress))
+      | where isnotempty(TIIP)
+      | summarize arg_max(TimeGenerated, ThreatType, ConfidenceScore, Description) by TIIP;
+    SigninLogs
+    | where TimeGenerated between (ago(start) .. now()) and isnotempty(IPAddress)
+    | distinct UserPrincipalName, IPAddress
+    | join kind=inner TI on $left.IPAddress == $right.TIIP
+    | project UserPrincipalName, IPAddress, ThreatType = tostring(ThreatType), ConfidenceScore = toint(ConfidenceScore), Description = tostring(Description)
+
+  # ── Alertas ativos na identidade (uma detecção real disparou) ──
+  active_alerts: |
+    let start = {lookback_days}d;
+    SecurityAlert
+    | where TimeGenerated between (ago(start) .. now()) and Status != 'Dismissed'
+    | extend _upn = tolower(coalesce(tostring(parse_json(ExtendedProperties)['User Principal Name']), tostring(CompromisedEntity)))
+    | where isnotempty(_upn) and _upn contains '@'
+    | summarize Alerts = count(), Sample = anyif(AlertName, isnotempty(AlertName)), MaxSev = max(AlertSeverity) by UserPrincipalName = _upn
+
+# Corroboração opcional (Entra ID Protection) — degrada gracioso se ausente
+graph:
+  risky_users: "/identityProtection/riskyUsers?$top=200&$filter=riskLevel eq 'high' or riskLevel eq 'medium'"
+
+# ── Real-risk: anomalia + corroboração independente = risco REAL (não só raro) ──
+corroboration:
+  enabled: true
+  # cada corroborador FORTE, sozinho, já eleva a identidade a "risco real"
+  strong: [ioc_ip, risky_success, active_alert]
+  # fracos: 1 sozinho = suspeito; 2+ = risco real
+  weak: [impossible_travel, idp_risky, personal_deviation, anonymized_ip]
+  verdict:
+    real: "RISCO REAL PROVÁVEL"
+    suspect: "SUSPEITO — investigar"
+    noise: "PROVÁVEL RUÍDO"
+
+# Feed cross-domain (como o github-posture): identidades anômalas p/ attack-path/org-posture
+feed:
+  min_score: 60              # score alto OU corroborado entram no feed identity_anomaly
+
+attribution:
+  source: "David Alonso — Dalonso-Security-Repo/Notebook/Identity-Anomaly-Detection (MIT)"
+  note: "Engine re-implementada em Python stdlib (não-verbatim); Isolation Forest opcional."
