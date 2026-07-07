@@ -31,6 +31,9 @@ scoring:
   incident_penalty: {informational: 1, low: 3, medium: 6, high: 12}
   # identity_risk: subtrai por usuário de alto risco
   risky_user_penalty: 12
+  # identity_risk: penalidade extra do feed identity-anomaly-score (só conta quando o feed é passado no bundle)
+  ueba_real_penalty: 18      # por identidade com risco REAL corroborado (rr_klass=real)
+  ueba_suspect_penalty: 6    # por identidade SUSPEITA (rr_klass=suspect)
   # nota por faixa de índice
   grades: [[90, "A"], [80, "B"], [70, "C"], [60, "D"], [0, "F"]]
 

@@ -169,10 +169,16 @@ def compute(data, params, scoring):
         penalty += pen.get(sev, pen.get("medium", 6))
     threat = _clamp(100 - penalty)
 
-    # --- Identity risk (high-risk users) ---
+    # --- Identity risk (high-risk users + UEBA corroborated-real behaviour) ---
     risky = _val(data.get("risky_users"))
     n_risky = len(risky)
-    identity_risk = _clamp(100 - n_risky * rup)
+    # feed identity-anomaly-score: risco REAL corroborado pesa mais que um flag estático do IdP
+    ueba = _val(data.get("identity_anomaly"))
+    n_ueba_real = sum(1 for u in ueba if str(u.get("rr_klass")) == "real")
+    n_ueba_suspect = sum(1 for u in ueba if str(u.get("rr_klass")) == "suspect")
+    urp = scoring.get("ueba_real_penalty", 18)
+    usp = scoring.get("ueba_suspect_penalty", 6)
+    identity_risk = _clamp(100 - n_risky * rup - n_ueba_real * urp - n_ueba_suspect * usp)
 
     index = round(w["identity"] * identity + w["endpoint"] * endpoint +
                   w["threat"] * threat + w["identity_risk"] * identity_risk, 1)
@@ -202,11 +208,14 @@ def compute(data, params, scoring):
          "driver": f"{len(incidents)} ativos · " + (", ".join(f"{k}:{v}" for k, v in sorted(sev_counts.items())) or "nenhum")},
         {"name": "Risco de identidade (risky users)", "score": round(identity_risk, 1),
          "weight": w["identity_risk"], "contrib": round(w["identity_risk"] * identity_risk, 1),
-         "driver": f"{n_risky} usuários de alto risco"},
+         "driver": f"{n_risky} usuários de alto risco" +
+                   (f" · UEBA {n_ueba_real} risco real / {n_ueba_suspect} suspeito"
+                    if (n_ueba_real or n_ueba_suspect) else "")},
     ]
     return {"index": index, "grade": grade, "posture": posture, "pillars": pillars,
             "secure_pct": ss_pct, "exposure": exposure,
-            "incidents": len(incidents), "risky": n_risky, "sev_counts": sev_counts}
+            "incidents": len(incidents), "risky": n_risky, "sev_counts": sev_counts,
+            "ueba_real": n_ueba_real, "ueba_suspect": n_ueba_suspect}
 
 
 # --- Informational sections (do NOT affect the Org Posture Index) ----------------------------
